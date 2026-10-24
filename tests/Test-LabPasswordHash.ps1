@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Checks that New-LabFirewall.ps1's Get-PasswordHash (secret on openssl's stdin) gives exactly
+    Checks that lib\LabFirewall.ps1's Get-PasswordHash (secret on openssl's stdin) gives exactly
     the hash of the plain command-line form - with a DUMMY value, never a real password.
 
 .DESCRIPTION
-    Local only. Loads Get-PasswordHash and its helpers from New-LabFirewall.ps1 (without running
-    the script), hashes a dummy value with a fixed salt both ways and compares. It also runs
+    Local only. Loads Get-PasswordHash and its helpers from scripts\lib\LabFirewall.ps1 (without loading
+    the whole library), hashes a dummy value with a fixed salt both ways and compares. It also runs
     with a console input encoding that writes a byte order mark (UTF-8 with BOM), the case in
     which a naive stdin version would hash the BOM as part of the password.
 
@@ -15,7 +15,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'LabTest.ps1')
 
-$scriptPath = Join-Path $script:LabTestRoot 'scripts\New-LabFirewall.ps1'
+$scriptPath = Join-Path $script:LabTestRoot 'scripts\lib\LabFirewall.ps1'
 $openssl = Join-Path $env:ProgramFiles 'Git\mingw64\bin\openssl.exe'
 $ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null)
 foreach ($name in 'New-RandomBytes', 'New-RandomText', 'Get-PasswordHash') {

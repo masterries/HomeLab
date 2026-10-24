@@ -21,7 +21,7 @@ need a deployed lab (OpenBao, Keycloak, Matrix) unless noted. No test prints a s
 | `Test-LabFirewallRender.ps1` | the firewall's build path (secrets, GUI certificate from the root, config.xml with the SSH CA lines for user ansible, seed ISO) into a temporary folder | the root signs one extra test certificate; the temporary folder is deleted |
 | `Test-LabSshCa.ps1` | the SSH certificate code on the PC: offline signing (`ssh-keygen -P` on Windows OpenSSH), what a user and a host certificate contain (principals, extensions, source-address, lifetime, serial), principals that are refused (empty, wildcards, foreign names, root), the encrypted CA key, the revocation list, the rendered trust files and `keys\ssh_config` | no (two 6-minute certificates for a throwaway key; local only) |
 | `Test-LabSshCertificates.ps1` | SSH in the running lab: strict logins everywhere, plain host keys refused (from the PC and from ansible-control), the PC certificate alone and an offline-CA certificate (break-glass) log in, a foreign CA is refused, a run certificate for `host-matrix` opens matrix only, a PC certificate does not work from ansible-control (source-address), a revoked host key is refused, sshd settings, no old lab key; elevated also: KVP host keys and Vagrant's jump (`remote\ssh-cert-check.sh` runs on ansible-control) | no (throwaway keys and CAs, short-lived certificates, deleted again) |
-| `Test-LabRecoveryLogin.ps1` | the break-glass login (AppRole `recovery`) and the issuing of new PC logins, as `New-LabRecoveryKit.ps1 -Recover` does | **yes**: new pc-admin/pc-deploy logins, and an existing recovery kit's break-glass login stops working (then `New-LabRecoveryKit.ps1 -Renew`); asks first; only with `-IncludeStateChanging` |
+| `Test-LabRecoveryLogin.ps1` | the break-glass login (AppRole `recovery`) and the issuing of new PC logins, as `lab.ps1 recovery -Recover` does | **yes**: new pc-admin/pc-deploy logins, and an existing recovery kit's break-glass login stops working (then `lab.ps1 recovery -Renew`); asks first; only with `-IncludeStateChanging` |
 
 Files:
 
@@ -29,6 +29,6 @@ Files:
   copying `remote\*` to `/tmp/lab-tests` on ansible-control and removing it again)
 - `remote\` - the scripts the tests run on ansible-control
 
-The deployment scripts check themselves as well (for example `Deploy-LabMatrix.ps1`: ACME
+The deployment scripts check themselves as well (for example `lab.ps1 deploy matrix`: ACME
 certificates, MDAD's self-check, the login path to Keycloak); these tests cover what the
 deployments do not.

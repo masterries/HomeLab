@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Checks the build path of New-LabFirewall.ps1 without building a firewall: secrets, GUI
+    Checks the build path of lab.ps1 firewall without building a firewall: secrets, GUI
     certificate, rendered config.xml and seed ISO, all into a temporary folder.
 
 .DESCRIPTION
-    Loads everything of New-LabFirewall.ps1 before its main part (parameters, paths, functions),
+    Loads everything of lab.ps1 firewall before its main part (parameters, paths, functions),
     points the VM folder to a temporary folder and runs Get-Secrets, Get-GuiCertificate,
     New-FirewallConfig and New-SeedIso. Checks: the GUI certificate is signed by the lab root,
     the root is the CA in config.xml, the GUI key is in it, the password hashes are SHA-512-crypt,
@@ -21,17 +21,13 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'LabTest.ps1')
 
-$scriptPath = Join-Path $script:LabTestRoot 'scripts\New-LabFirewall.ps1'
 $scratch = Join-Path ([IO.Path]::GetTempPath()) "lab-fwtest-$PID"
 $archived = Join-Path $script:LabKeysDir 'pki\issued\firewall-gui.crt'
 $archivedCopy = if (Test-Path $archived) { [IO.File]::ReadAllText($archived) } else { $null }
 
-# Everything up to "# --- Main", with the parameters set directly and $PSScriptRoot fixed.
-$text = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null).Extent.Text
-$prefix = $text.Substring(0, $text.IndexOf('# --- Main ---'))
-$prefix = $prefix -replace '(?s)\[CmdletBinding\(\)\]\s*param\(.*?\)\s*\n', "`$StorageRoot = 'G:\Vagrant'; `$TimeZone = 'Europe/Berlin'; `$Rebuild = `$false`n"
-$prefix = $prefix.Replace('$PSScriptRoot', "'$(Split-Path $scriptPath)'")
-. ([scriptblock]::Create($prefix))
+# The firewall's building blocks (lib\LabFirewall.ps1), with the default storage location.
+$StorageRoot = 'G:\Vagrant'; $TimeZone = 'Europe/Berlin'
+. (Join-Path $script:LabTestRoot 'scripts\lib\LabFirewall.ps1')
 $vmDir = Join-Path $scratch 'firewall'
 $seedIso = Join-Path $vmDir 'seed\lab-config.iso'
 

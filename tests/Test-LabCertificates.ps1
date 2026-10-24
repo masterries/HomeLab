@@ -4,12 +4,12 @@
     how long it is valid, and whether Windows trusts the chain including the revocation check.
 
 .DESCRIPTION
-    Read-only. Needs the lab root CA imported into Windows (.\scripts\Install-LabRootCA.ps1);
+    Read-only. Needs the lab root CA imported into Windows (.\lab.ps1 trust);
     without it every "trusted" check fails. Expected issuers:
       firewall.lab.internal, vault.lab.internal:8200   the offline root CA
       keycloak, matrix, element, lab.internal          the current intermediate CA in OpenBao
     The "current intermediate" is compared by key identifier (authority key identifier of the
-    certificate = subject key identifier of OpenBao's issuing CA), as Deploy-LabMatrix.ps1 does.
+    certificate = subject key identifier of OpenBao's issuing CA), as lab.ps1 deploy matrix does.
 
 .EXAMPLE
     .\tests\Test-LabCertificates.ps1

@@ -5,14 +5,14 @@
   WHAT THIS IS
   OPNsense keeps its whole configuration in one XML file, /conf/config.xml. The GUI, the REST
   API and the console all read and write that file. This template is the lab's version of it:
-  scripts/New-LabFirewall.ps1 replaces the placeholders (upper-case names in double curly
+  scripts/commands/firewall.ps1 replaces the placeholders (upper-case names in double curly
   braces: passwords, keys, certificates, addresses from config/lab.json) and the generated
   blocks, checks that none is left over, and hands the result to OPNsense's configuration
   importer on the very first boot, on a small ISO. The rendered file contains password hashes
   and the GUI's private key, so it is never kept: the script deletes the ISO after the import.
 
   WHY A TEMPLATE (CONFIGURATION AS CODE)
-  The firewall is built from this file every time (Remove-Lab.ps1 + Initialize-Lab.ps1), so the
+  The firewall is built from this file every time (lab.ps1 down + lab.ps1 up), so the
   repository describes the firewall completely: what is in Git is what runs. Changes made later
   in the GUI are NOT written back here; they last until the next rebuild. Day-2 changes are
   meant to go through the REST API (Ansible) or into this template. Enterprise equivalent: a
@@ -55,7 +55,7 @@
     </group>
     <!-- root: the GUI login. Its random password is generated once and kept DPAPI-encrypted
          on the PC (keys\opnsense\root-password.dpapi; see it with
-         .\scripts\Show-LabSecret.ps1 -Pc opnsense/root-password); only its SHA-512-crypt hash
+         .\lab.ps1 secret -Pc opnsense/root-password); only its SHA-512-crypt hash
          is stored here. -->
     <user>
       <name>root</name>
@@ -68,12 +68,12 @@
     <!-- ansible: the account the rest of the lab uses.
          - SSH jump host: your PC (and Vagrant through it) and ansible-control log in with SSH
            CERTIFICATES and tunnel on to the lab VMs (ProxyJump / ssh -W). <authorizedkeys>
-           (base64 of keys\ssh\firewall_authorized_keys, scripts/LabSsh.ps1) holds one line
+           (base64 of keys\ssh\firewall_authorized_keys, scripts/lib/LabSsh.ps1) holds one line
            per lab SSH CA:
              cert-authority,principals="lab-all,host-firewall",from="<PC>,<ansible-control>" ssh-ed25519 AAAA...
            "cert-authority": certificates signed by this CA log in; principals: only certificates
            for these roles; from: only from the PC and ansible-control. The sshd drop-in that
-           New-LabFirewall.ps1 installs (opnsense/sshd_config.d/20-lab-ssh.conf) adds the host
+           lab.ps1 firewall installs (opnsense/sshd_config.d/20-lab-ssh.conf) adds the host
            certificate and limits forwarding to SSH of the lab VMs (PermitOpen). A running
            firewall gets new CA lines through opnsense/lab-ssh-trust.php, without a rebuild.
          - REST API: the line in <apikeys> is "key|hash"; the secret itself is kept
@@ -196,7 +196,7 @@
        - Split-horizon DNS: a published name has two addresses (the VM's lab IP and its
          published address on the HOST network).
          The setting "localise-queries" makes dnsmasq answer each client with the address in
-         its own subnet. OPNsense has no GUI field for it, so New-LabFirewall.ps1 installs it as
+         its own subnet. OPNsense has no GUI field for it, so lab.ps1 firewall installs it as
          a drop-in file (opnsense/dnsmasq.conf.d/10-lab.conf).
        Unbound (OPNsense's other DNS server) stays off: one DNS server is simpler to follow. -->
   <dnsmasq>
@@ -255,7 +255,7 @@
        Rules OPNsense adds by itself: DHCP on LAN (dnsmasq default_fw_rules) and the rules
        registered by the port forwards above. (Its anti-lockout rule is switched off, see
        noantilockout in <webgui>.) See the active rule set with:
-         .\scripts\Connect-Lab.ps1 firewall 'sudo pfctl -sr' -->
+         .\lab.ps1 connect firewall 'sudo pfctl -sr' -->
   <OPNsense>
     <Firewall>
       <Filter>
@@ -408,9 +408,9 @@
   <!-- CERTIFICATES (OPNsense's trust store, System > Trust). PEM data is stored base64-encoded.
        <ca>: the lab root CA certificate only, never its key: the firewall does not issue
        certificates, it only presents one. <cert>: the GUI certificate for
-       firewall.{{DOMAIN}}, signed by the offline root CA on your PC (New-LabFirewall.ps1 with
-       New-LabRootCA.ps1), together with its private key. On a running firewall,
-       New-LabFirewall.ps1 renews both in place (opnsense\lab-gui-cert.php). -->
+       firewall.{{DOMAIN}}, signed by the offline root CA on your PC (lab.ps1 firewall with
+       lib\LabPki.ps1), together with its private key. On a running firewall,
+       lab.ps1 firewall renews both in place (opnsense\lab-gui-cert.php). -->
   <ca>
     <refid>{{CA_REFID}}</refid>
     <descr>DeployableServer Lab Root CA 2026</descr>

@@ -12,7 +12,7 @@
 $script:LabTestRoot = Split-Path -Parent $PSScriptRoot
 $script:LabTestFailures = 0
 $script:LabTestCount = 0
-. (Join-Path $script:LabTestRoot 'scripts\LabSecrets.ps1')
+. (Join-Path $script:LabTestRoot 'scripts\lib\Lab.ps1')
 
 function Assert-LabTest([string]$Name, [bool]$Condition, [string]$Detail = '') {
     $script:LabTestCount++
@@ -26,13 +26,14 @@ function Complete-LabTest([string]$What) {
     exit 0
 }
 
-# Copies scripts from tests\remote to /tmp/lab-tests on ansible-control (the tests run them
-# there); Remove-LabTestRemote deletes them again.
+# Copies scripts from ansible\tests to /tmp/lab-tests on ansible-control, for tests that run
+# them over a plain SSH session (runs through lab.ps1 run find them in ~/lab/tests anyway);
+# Remove-LabTestRemote deletes them again.
 function Copy-LabTestRemote([string[]]$Files) {
     $sshConfig = Get-LabSshConfig
     $ErrorActionPreference = 'Continue'
     & ssh -F $sshConfig -o LogLevel=ERROR ansible-control 'rm -rf /tmp/lab-tests && mkdir -m 700 /tmp/lab-tests'
-    & scp -q -F $sshConfig -o LogLevel=ERROR ($Files | ForEach-Object { Join-Path $script:LabTestRoot "tests\remote\$_" }) 'ansible-control:/tmp/lab-tests/'
+    & scp -q -F $sshConfig -o LogLevel=ERROR ($Files | ForEach-Object { Join-Path $script:LabTestRoot "ansible\tests\$_" }) 'ansible-control:/tmp/lab-tests/'
     if ($LASTEXITCODE -ne 0) { throw "Copying the test files to ansible-control failed (exit code $LASTEXITCODE)." }
 }
 

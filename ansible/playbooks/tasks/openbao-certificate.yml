@@ -22,7 +22,7 @@
 #   openbao_cert_file           path of the certificate on the server (certificate followed by
 #                               the intermediate CA: the chain clients need, without the root)
 #   openbao_cert_names          DNS names; the first one is also the common name
-#   openbao_cert_role           OpenBao PKI role (Deploy-LabVault.ps1), e.g. keycloak
+#   openbao_cert_role           OpenBao PKI role (lab.ps1 deploy vault), e.g. keycloak
 #   openbao_cert_notify         handler to notify when the certificate changed
 #   openbao_cert_key_group      group of the key file (default root), and
 #   openbao_cert_key_mode       its mode (default 0600)
@@ -112,7 +112,7 @@
           OpenBao did not sign the certificate for {{ openbao_cert_names | join(', ') }}
           (role {{ openbao_cert_role }}, HTTP {{ openbao_cert_signed.status }}):
           {{ openbao_cert_signed.json.errors | default([]) | join(' ') }}
-          {{ 'No run token? Start the playbook with .\scripts\Invoke-LabPlaybook.ps1.' if openbao_cert_signed.status in [400, 403] else '' }}
+          {{ 'No run token? Start the playbook with .\lab.ps1 run.' if openbao_cert_signed.status in [400, 403] else '' }}
         quiet: true
 
     # The server sends its certificate followed by the issuing (intermediate) CA, so clients

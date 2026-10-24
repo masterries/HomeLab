@@ -2,9 +2,9 @@
 # matrix-docker-ansible-deploy (MDAD) can run
 #
 # Where it runs:
-#   On ansible-control, as user "ansible". Normally started by .\scripts\Deploy-LabMatrix.ps1,
+#   On ansible-control, as user "ansible". Normally started by .\lab.ps1 deploy matrix,
 #   which runs MDAD right after it; it can also run alone:
-#     .\scripts\Invoke-LabPlaybook.ps1 matrix-prepare.yml
+#     .\lab.ps1 run matrix-prepare.yml
 #   Either way the PC hands it a short-lived OpenBao token with the policy "ansible-matrix"
 #   (bin/openbao-run).
 #
@@ -14,11 +14,11 @@
 # Encrypt), DNS names that resolve, and here also the connection to Keycloak, the identity
 # provider. This playbook provides them, and it checks the pinned MDAD version and puts our
 # configuration in place on ansible-control. Keycloak must be deployed first
-# (.\scripts\Deploy-LabKeycloak.ps1): it creates the client secret that MAS needs.
+# (.\lab.ps1 deploy keycloak): it creates the client secret that MAS needs.
 #
 # Structure: two plays.
 #   1. On ansible-control: trust the lab root CA, check that ~/mdad holds the pinned MDAD version
-#      (copied there from the repository, vendor\mdad, by Deploy-LabMatrix.ps1), put our
+#      (copied there from the repository, vendor\mdad, by lab.ps1 deploy matrix), put our
 #      inventory and the entry point lab-setup.yml in place, make sure the Matrix secrets exist
 #      in OpenBao (created on the very first run), remove the old plain-text secret files.
 #   2. On the Matrix VM: trust the lab root CA, check DNS, check that Keycloak is reachable and
@@ -38,7 +38,7 @@
     # is a version, so the lab pins one exact commit. Same idea as pinning a container image by
     # digest: every run (and every rebuild of the lab) installs exactly the same code. The code
     # itself is in the repository (vendor\mdad); this line must name the commit that is there
-    # (vendor\mdad\.lab-vendored-commit). An upgrade: .\scripts\Update-LabMdad.ps1 -Commit <sha>,
+    # (vendor\mdad\.lab-vendored-commit). An upgrade: .\lab.ps1 mdad-upgrade -Commit <sha>,
     # then change this line and matrix_playbook_migration_validated_version in
     # ansible/matrix/.../vars.yml (after reading MDAD's CHANGELOG.md).
     mdad_version: a52e9876526aa6dcd41075b3a83d5eea7c31887b
@@ -85,7 +85,7 @@
 
     # --- MDAD at the pinned version ---------------------------------------------------------
     # MDAD's code is part of this repository (vendor\mdad, with its roles; see vendor\README.md),
-    # and Deploy-LabMatrix.ps1 copies it to ~/mdad before this playbook runs - nothing is
+    # and lab.ps1 deploy matrix copies it to ~/mdad before this playbook runs - nothing is
     # downloaded from GitHub at deployment time. This only checks that the copy is the version
     # this playbook expects (the marker file comes with it).
     - name: Which MDAD version is in ~/mdad?
@@ -102,13 +102,13 @@
         fail_msg: >-
           ~/mdad does not hold MDAD {{ mdad_version }} (found:
           {{ (mdad_marker.content | default('') | b64decode | trim) or 'nothing' }}). Run
-          .\scripts\Deploy-LabMatrix.ps1, which copies vendor\mdad from the repository there first;
-          after an upgrade (Update-LabMdad.ps1) also change mdad_version in this playbook.
+          .\lab.ps1 deploy matrix, which copies vendor\mdad from the repository there first;
+          after an upgrade (lab.ps1 mdad-upgrade) also change mdad_version in this playbook.
         quiet: true
 
     # --- Our configuration ------------------------------------------------------------------
     # The inventory and the entry point are copied from the repository (~/lab is the copy
-    # Invoke-LabPlaybook.ps1 makes of ansible\), so the repository stays the single source of
+    # lab.ps1 run makes of ansible\), so the repository stays the single source of
     # truth.
     - name: MDAD inventory folders
       ansible.builtin.file:
@@ -226,7 +226,7 @@
           {{ item.item }} does not resolve to {{ ansible_facts['default_ipv4']['address'] }} on the
           Matrix VM (got: {{ item.stdout_lines | first | default('nothing') }}). Are matrix, element
           and @ under "published" in config\lab.json, and was the firewall rebuilt since
-          (.\scripts\New-LabFirewall.ps1 -Rebuild)?
+          (.\lab.ps1 firewall -Rebuild)?
         quiet: true
       loop: "{{ matrix_dns.results }}"
       loop_control:
@@ -260,7 +260,7 @@
         path: /matrix/traefik/ssl/acme.json
       register: traefik_acme_store
 
-    # After a NEW intermediate CA (a rotation by Deploy-LabVault.ps1, or a rebuilt vault VM),
+    # After a NEW intermediate CA (a rotation by lab.ps1 deploy vault, or a rebuilt vault VM),
     # Traefik would keep serving certificates from the old one until their regular renewal -
     # and a rebuilt OpenBao does not even know Traefik's ACME account any more. So: which CA
     # issued the certificate Traefik serves now? The "authority key identifier" in a certificate

@@ -1,0 +1,144 @@
+# playbooks/checks.yml -- the lab seen from inside: can Ansible reach and manage every machine, and
+# are the things the lab relies on in place?
+#
+# Where it runs: on ansible-control (profile "checks", at the end of every ".\lab.ps1 up", or by
+# hand: .\lab.ps1 run checks). Read-only: nothing is changed (every task is changed_when: false and
+# works in check mode), so it can run at any time. What the PC sees (Windows' trust in the
+# certificates, the firewall's port forwards, the PC's DNS rule) is checked by the PC itself and by
+# tests\*.ps1.
+#
+# What it checks:
+#   every machine     the DNS name resolves (dnsmasq on the firewall), the SSH login with
+#                     ansible-control's run certificate works (host certificate checked), Python
+#                     runs, and sudo works without a password prompt
+#   the Ubuntu VMs    every lab name resolves to its lab-side address; sshd runs with the lab's
+#                     settings (certificates only, no forwarding, no root login); ansible has no
+#                     authorized_keys (no plain key logs in); the lab root CA is in the trust store
+#   the firewall      the OPNsense version, its DNS drop-in, sshd limited to the jump host job, and
+#                     only cert-authority lines in the authorized_keys of ansible
+#   ansible-control   its inventory matches config/lab.json
+# If this fails, every other playbook would fail too, with a less obvious error.
+- name: Every machine is reachable and manageable
+  hosts: all
+  gather_facts: false
+  tasks:
+    # Not an ICMP ping: the module logs in, runs Python on the host and answers "pong".
+    - name: Connection and Python
+      ansible.builtin.ping:
+
+    # "become" = privilege escalation, by default with sudo to root. LAB SHORTCUT: passwordless
+    # sudo. Enterprise equivalent: sudo with a password or restricted sudo rules, often granted
+    # through a privileged access management system.
+    - name: sudo works
+      ansible.builtin.command: whoami
+      become: true
+      register: whoami
+      changed_when: false
+      failed_when: whoami.stdout != 'root'
+
+- name: The Ubuntu VMs
+  hosts: ubuntu
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Every lab name resolves to its lab-side address
+      ansible.builtin.command: getent hosts {{ item.name }}.{{ lab_domain }}
+      register: resolved
+      changed_when: false
+      failed_when: resolved.rc != 0 or (resolved.stdout.split() | first) != item.ip
+      loop: "{{ lab_config.vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: sshd settings
+      ansible.builtin.command: sshd -T
+      register: sshd
+      changed_when: false
+
+    - name: sshd accepts certificates only, forwards nothing, no root login
+      ansible.builtin.assert:
+        that:
+          - "'trustedusercakeys /etc/ssh/lab_user_ca.pub' in (sshd.stdout | lower).splitlines()"
+          - "'authorizedprincipalsfile /etc/ssh/lab_principals/%u' in (sshd.stdout | lower).splitlines()"
+          - "'hostcertificate /etc/ssh/ssh_host_ed25519_key-cert.pub' in (sshd.stdout | lower).splitlines()"
+          - "'permitrootlogin no' in (sshd.stdout | lower).splitlines()"
+          - "'passwordauthentication no' in (sshd.stdout | lower).splitlines()"
+          - "'allowtcpforwarding no' in (sshd.stdout | lower).splitlines()"
+        fail_msg: sshd on {{ inventory_hostname }} does not run with the lab's settings (provision/harden-ssh.sh). Run .\lab.ps1 up
+        quiet: true
+
+    - name: No authorized_keys for ansible
+      ansible.builtin.stat:
+        path: ~ansible/.ssh/authorized_keys
+      register: authorized_keys
+      failed_when: authorized_keys.stat.exists
+
+    - name: The lab root CA is in the trust store
+      ansible.builtin.stat:
+        path: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+      register: lab_root
+      failed_when: false
+
+    - name: Report a missing lab root CA (a deployment installs it)
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} does not trust the lab root CA yet; the deployments install it (matrix-prepare.yml, keycloak.yml)."
+      when: not lab_root.stat.exists
+
+- name: The firewall (its bootstrap contract, installed by the PC)
+  hosts: firewalls
+  gather_facts: false
+  become: true
+  tasks:
+    - name: OPNsense version
+      ansible.builtin.command: opnsense-version -v
+      register: opnsense_version
+      changed_when: false
+      failed_when: opnsense_version.stdout is version('26.7.7', '<')
+
+    - name: The split-horizon DNS drop-in
+      ansible.builtin.stat:
+        path: /usr/local/etc/dnsmasq.conf.d/10-lab.conf
+      register: dns_dropin
+      failed_when: not dns_dropin.stat.exists
+
+    # OpenSSH 10 prints the option names in CamelCase, 9.6 in lower case: compared in lower case.
+    - name: sshd settings
+      ansible.builtin.command: /usr/local/sbin/sshd -T -f /usr/local/etc/ssh/sshd_config
+      register: sshd
+      changed_when: false
+
+    - name: sshd is limited to the jump host job
+      ansible.builtin.assert:
+        that:
+          - "'allowtcpforwarding local' in (sshd.stdout | lower).splitlines()"
+          - "'permittunnel no' in (sshd.stdout | lower).splitlines()"
+          - "'allowagentforwarding no' in (sshd.stdout | lower).splitlines()"
+          - "'hostcertificate /conf/sshd/ssh_host_ed25519_key-cert.pub' in (sshd.stdout | lower).splitlines()"
+          - "(sshd.stdout | lower).splitlines() | select('match', '^permitopen ') | list | length == 1"
+          - "'permitopen any' not in (sshd.stdout | lower).splitlines()"
+        fail_msg: sshd on the firewall does not run with the lab's drop-in. Run .\lab.ps1 firewall
+        quiet: true
+
+    - name: authorized_keys of ansible
+      ansible.builtin.slurp:
+        src: /home/ansible/.ssh/authorized_keys
+      register: firewall_keys
+
+    - name: Only cert-authority lines (no plain key logs in)
+      ansible.builtin.assert:
+        that: >-
+          (firewall_keys.content | b64decode).splitlines() | select | reject('match', '^cert-authority,') | list | length == 0
+        fail_msg: The firewall accepts a plain SSH key for ansible. Run .\lab.ps1 firewall
+        quiet: true
+
+- name: ansible-control
+  hosts: control
+  gather_facts: false
+  tasks:
+    - name: The inventory lists exactly the VMs of config/lab.json
+      ansible.builtin.assert:
+        that: (groups['ubuntu'] | sort) == (lab_config.vms | map(attribute='name') | sort)
+        fail_msg: >-
+          ansible/inventory/hosts.ini ({{ groups['ubuntu'] | sort | join(', ') }}) does not list the
+          VMs of config/lab.json ({{ lab_config.vms | map(attribute='name') | sort | join(', ') }}).
+        quiet: true

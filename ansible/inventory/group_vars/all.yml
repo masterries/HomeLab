@@ -10,24 +10,25 @@
 # being repeated in each playbook.
 
 # The lab's PKI, two levels as in enterprises: an offline root CA on the PC
-# (scripts/New-LabRootCA.ps1, key encrypted, used only for a few signatures) and an
+# (scripts/lib/LabPki.ps1, key encrypted, used only for a few signatures) and an
 # intermediate CA inside OpenBao that issues the everyday certificates (Keycloak's by CSR
 # signing, Matrix's through ACME). Only PUBLIC files of it are on ansible-control, copied by
-# Invoke-LabPlaybook.ps1 from keys\pki on the PC: root-ca.crt (PEM, put into the VMs' trust
+# lab.ps1 run from keys\pki on the PC: root-ca.crt (PEM, put into the VMs' trust
 # stores) and pub/root-ca.{crt,crl} (DER, served by the vault VM for revocation checks).
 # A lookup always runs on the control node, so HOME is the home directory of the user running
 # ansible-playbook there, even when the variable is used in a task for another host.
 lab_pki_dir: "{{ lookup('env', 'HOME') }}/lab-pki"
-# OpenBao: secrets manager and intermediate CA (playbooks/openbao.yml, Deploy-LabVault.ps1).
+# OpenBao: secrets manager and intermediate CA (playbooks/openbao.yml, lab.ps1 deploy vault).
 lab_vault_url: "https://vault.{{ lab_domain }}:8200"
-# The lab's internal DNS domain. ".internal" is reserved for private networks and never used on
-# the public internet, so lab names cannot collide with real ones. The value must match the
-# domain configured elsewhere: in config/lab.json (from which scripts/New-LabFirewall.ps1
-# configures the firewall's DNS), in the Windows NRPT rule (scripts/Install-LabHostNetwork.ps1)
-# and in matrix_domain (ansible/matrix/inventory/host_vars/matrix.lab.internal/vars.yml).
-# The lab's CAs carry it as a name constraint (scripts/New-LabRootCA.ps1): they can only
-# certify names under this domain.
-lab_domain: lab.internal
+# config/lab.json, the lab's main source of data (VMs, addresses, domain). Every run gets a fresh
+# copy in ~/lab/config/ (ansible/bin/lab-run), so the playbooks read the same values as the PC.
+lab_config: "{{ lookup('file', inventory_dir ~ '/../config/lab.json') | from_json }}"
+# The lab's internal DNS domain, from config/lab.json. ".internal" is reserved for private
+# networks and never used on the public internet, so lab names cannot collide with real ones.
+# Copies kept by hand: the Windows NRPT rule (scripts/host/Initialize-LabHost.ps1) and
+# matrix_domain (ansible/matrix/inventory/host_vars/matrix.lab.internal/vars.yml). The lab's CAs
+# carry it as a name constraint (scripts/lib/LabPki.ps1): they can only certify names under it.
+lab_domain: "{{ lab_config.domain }}"
 
 # ---------------------------------------------------------------------------------------------
 # Single sign-on: Keycloak (identity provider) and the Matrix Authentication Service (MAS)

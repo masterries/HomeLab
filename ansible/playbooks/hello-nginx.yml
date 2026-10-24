@@ -6,7 +6,7 @@
 #   on a VM "server" that no longer exists (the Matrix stack and Keycloak have VMs of their
 #   own). To run it again, give it a VM of its own (README.md, section 6: "Add a VM" and "Run
 #   the hello-nginx demo on a VM of its own"), then start it from the Windows host with
-#     .\scripts\Invoke-LabPlaybook.ps1 hello-nginx.yml
+#     .\lab.ps1 run hello-nginx.yml
 #
 # Result: open https://<host>.lab.internal in a browser on the Windows host (<host> = the
 #   inventory name of the VM in group "web", for example hello).
@@ -17,9 +17,9 @@
 #   80 and 443 on that address to the VM with DNAT (destination NAT; generated from
 #   "published" in config/lab.json; GUI: Firewall > NAT > Destination NAT).
 #   There is no certificate warning once Windows trusts the lab root CA
-#   (.\scripts\Install-LabRootCA.ps1, run once by you). The certificate comes from OpenBao's
-#   intermediate CA, role "web" (Deploy-LabVault.ps1), which allows the name hello.lab.internal:
-#   call the demo VM "hello", or add its name to that role. Invoke-LabPlaybook.ps1 hands the
+#   (.\lab.ps1 trust, run once by you). The certificate comes from OpenBao's
+#   intermediate CA, role "web" (lab.ps1 deploy vault), which allows the name hello.lab.internal:
+#   call the demo VM "hello", or add its name to that role. lab.ps1 run hands the
 #   playbook a run token with the policy "ansible-web" (sign with that role, nothing else).
 #
 # Structure: one play. It installs nginx on the web servers, gets a certificate from OpenBao
@@ -29,11 +29,11 @@
 #   this content") and only acts if the host differs from it. A second run normally reports
 #   changed=0.
 #
-# Not on the Matrix VM: the Matrix stack (.\scripts\Deploy-LabMatrix.ps1) needs ports 80/443
+# Not on the Matrix VM: the Matrix stack (.\lab.ps1 deploy matrix) needs ports 80/443
 #   for its reverse proxy Traefik, so this playbook refuses to run on a host where the Matrix
 #   stack is installed (first task below). Publish the demo's VM in config\lab.json ("published",
 #   its own address with tcp 443 and 80) and rebuild the firewall
-#   (.\scripts\New-LabFirewall.ps1 -Rebuild).
+#   (.\lab.ps1 firewall -Rebuild).
 - name: nginx Hello World with HTTPS
   hosts: web
   # Every task in this play runs with sudo as root on the web server (apt, /etc, services),
@@ -51,7 +51,7 @@
       - "{{ inventory_hostname }}.{{ lab_domain }}"
     # Renewal window: a certificate that expires within this time is reissued (see
     # tasks/openbao-certificate.yml). To force a renewal now:
-    #   .\scripts\Invoke-LabPlaybook.ps1 hello-nginx.yml -e tls_renew_before=+400d
+    #   .\lab.ps1 run hello-nginx.yml -e tls_renew_before=+400d
     tls_renew_before: "+30d"
   tasks:
     # Two services cannot listen on the same port. MDAD installs every Matrix service as a

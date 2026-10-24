@@ -8,7 +8,7 @@
 #
 # ITS PLACE IN THE ARCHITECTURE
 #   Vagrant uses its own account "vagrant" only to create and provision the VMs. Everything
-#   else (Ansible from ansible-control, your SSH logins via Connect-Lab.ps1, the jump through
+#   else (Ansible from ansible-control, your SSH logins via lab.ps1 connect, the jump through
 #   the firewall) uses the dedicated account "ansible". Keeping the automation account separate
 #   from the tool that built the machine is how real servers are set up: the account exists
 #   the same way no matter how the server was created.

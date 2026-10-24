@@ -18,7 +18,7 @@
 #   - ansible-control's OWN SSH key, ~ansible/.ssh/id_ed25519, made here once; it never leaves
 #     the VM. Before every Ansible run the PC signs a certificate for it
 #     (~ansible/.ssh/id_ed25519-cert.pub, valid 2 hours, only for the hosts of that run;
-#     Get-LabControlCertificateCommand in scripts/LabSsh.ps1), and the run deletes it at the end.
+#     Get-LabControlCertificateCommand in scripts/lib/LabSsh.ps1), and the run deletes it at the end.
 #     Without a certificate the key opens nothing. Enterprise equivalent: a CI runner or AWX
 #     gets short-lived SSH certificates from Vault/OpenBao per job.
 #   - Host key checking for every *.lab.internal machine against the lab's SSH CAs
@@ -28,11 +28,11 @@
 #   - Ansible, a pinned version (ANSIBLE_VERSION below) from PyPI, via pipx, installed globally
 #     to /usr/local/bin. It includes the Ansible collections the playbooks use
 #     (community.general, community.crypto, community.docker, ...).
-#   - git (scripts/Update-LabMdad.ps1 fetches a new version of matrix-docker-ansible-deploy with
+#   - git (scripts/dev/Update-LabMdad.ps1 fetches a new version of matrix-docker-ansible-deploy with
 #     it; the deployments themselves take MDAD from the repository, vendor/mdad)
 # The Ansible project itself lives in the repository under ansible/ (infrastructure as code:
 # the repository is the source of truth) and is copied to ~ansible/lab on every run of
-# scripts/Invoke-LabPlaybook.ps1.
+# scripts/lib/LabRun.ps1.
 #
 # IDEMPOTENT: safe to run any number of times. apt-get install is harmless for packages that
 # are already installed, the key is made only once (marker file), the SSH files are rewritten,
@@ -90,7 +90,7 @@ for file in known_hosts:/etc/ssh/ssh_known_hosts revoked_host_keys:/etc/ssh/lab_
     install -m 0644 -o root -g root "$source_file" "$target"
     rm -f "$source_file"
   elif [[ ! -f "$target" ]]; then
-    echo "ERROR: ${file%%:*} was not uploaded. Run .\scripts\Initialize-Lab.ps1 on the host." >&2
+    echo "ERROR: ${file%%:*} was not uploaded. Run .\lab.ps1 up on the host." >&2
     exit 1
   fi
 done

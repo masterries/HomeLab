@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Checks that DPAPI secrets moved by Remove-Lab.ps1 to keys\openbao-retired-<date-time>\ can
+    Checks that DPAPI secrets moved by lab.ps1 down to keys\openbao-retired-<date-time>\ can
     still be read under their new names (Unprotect-LabSecret in LabSecrets.ps1).
 
 .DESCRIPTION

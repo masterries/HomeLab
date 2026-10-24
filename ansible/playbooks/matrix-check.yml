@@ -1,0 +1,86 @@
+# matrix-check.yml - checks that a Matrix deployment really works, from inside the lab
+#
+# Where it runs: on ansible-control itself (group control, a local connection), at the end of bin/deploy-matrix (profile "matrix",
+# ".\lab.ps1 deploy matrix"). Read-only: it connects to the services and changes nothing, so it can
+# also run alone: .\lab.ps1 run matrix-check.yml
+#
+# What it checks (each one fails the run):
+#   1. Traefik on the Matrix VM serves, for matrix, element and the domain itself, a certificate
+#      from OpenBao's CURRENT intermediate CA (ACME). "Current" is compared by key identifier - the
+#      served certificate's authority key identifier must be the CA's subject key identifier -
+#      because an older intermediate (before a rotation or a rebuild of the vault VM) may have the
+#      same name. Traefik asks for its certificates when it starts a new router (seconds, normally);
+#      until then it answers with its own self-signed "TRAEFIK DEFAULT CERT", so this waits up to
+#      3 minutes.
+#   2. Synapse delegates logins to MAS: its auth metadata endpoint (Matrix OAuth 2.0 API) answers
+#      only when that delegation is on, and names MAS as the issuer.
+#   3. The first step of every login: MAS sends the browser to Keycloak. MAS answers with this
+#      redirect only after it has fetched Keycloak's discovery document from inside its container,
+#      so this proves the container's DNS, its trust in the lab root CA and the exact issuer.
+# ansible-control trusts the lab root CA (matrix-prepare.yml put it into its trust store), so the
+# HTTPS checks verify certificates. What the PC sees (Windows' trust, revocation checks, the
+# firewall's port forwards) is checked by tests\Test-LabCertificates.ps1.
+- name: Matrix works end to end
+  hosts: control
+  gather_facts: false
+  vars:
+    matrix_names:
+      - "matrix.{{ lab_domain }}"
+      - "element.{{ lab_domain }}"
+      - "{{ lab_domain }}"
+    matrix_vm_address: "{{ lookup('pipe', 'getent hosts matrix.' ~ lab_domain) | split | first }}"
+  tasks:
+    - name: The current intermediate CA (public, no login needed)
+      ansible.builtin.uri:
+        url: "{{ lab_vault_url }}/v1/pki_int/cert/ca"
+        return_content: true
+      register: issuing_ca
+      check_mode: false
+
+    - name: Its subject key identifier
+      community.crypto.x509_certificate_info:
+        content: "{{ issuing_ca.json.data.certificate }}"
+      register: issuing_ca_info
+      check_mode: false
+
+    - name: Traefik serves certificates from that CA (matrix, element, the domain)
+      community.crypto.get_certificate:
+        host: "{{ matrix_vm_address }}"
+        port: 443
+        server_name: "{{ item }}"
+      register: served
+      until: >-
+        served.cert is defined and
+        (served.cert | community.crypto.x509_certificate_info).authority_key_identifier | default('')
+        == issuing_ca_info.subject_key_identifier
+      retries: 36
+      delay: 5
+      loop: "{{ matrix_names }}"
+      check_mode: false
+
+    - name: Synapse delegates logins to MAS
+      ansible.builtin.uri:
+        url: "https://matrix.{{ lab_domain }}/_matrix/client/v1/auth_metadata"
+        return_content: true
+      register: auth_metadata
+      failed_when: auth_metadata.status != 200 or auth_metadata.json.issuer != lab_mas_public_base
+      check_mode: false
+
+    - name: MAS sends logins to Keycloak
+      ansible.builtin.uri:
+        url: "{{ lab_mas_public_base }}upstream/authorize/{{ lab_mas_keycloak_provider_id }}"
+        follow_redirects: none
+        status_code: [302, 303, 307]
+      register: authorize
+      failed_when: >-
+        authorize.status not in [302, 303, 307] or
+        not (authorize.location | default('')).startswith(lab_keycloak_issuer ~ '/')
+      check_mode: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "Certificates from {{ issuing_ca_info.subject.commonName | default('the intermediate CA') }} for {{ matrix_names | join(', ') }}"
+          - "Synapse delegates login to MAS ({{ lab_mas_public_base }})"
+          - "MAS sends logins to Keycloak ({{ authorize.location.split('?') | first }})"
+          - "Matrix is ready: https://element.{{ lab_domain }} (homeserver https://matrix.{{ lab_domain }}). Sign in through Keycloak as alice or bob; password to the clipboard: .\\lab.ps1 secret keycloak/users/alice"

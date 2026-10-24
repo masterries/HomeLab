@@ -16,8 +16,8 @@ the lab did not write itself lives here, unchanged, at one pinned version
 | Roles | MDAD's 32 external roles in `mdad\roles\galaxy\` are not in MDAD's repository: its `requirements.yml` pins them (most by Git tag, a few by commit). They were installed with `ansible-galaxy install -r requirements.yml` (what MDAD's `just roles` does) and committed with `git add -f`, because MDAD's own `.gitignore` ignores that folder. `ansible-galaxy` adds a small `meta\.galaxy_install_info` to each role (install date and version) |
 | Licence | AGPL-3.0-or-later, see `mdad\LICENSE` and `mdad\LICENSES\` (some files MIT or CC0, marked in `.license` files) |
 | Changed | nothing in MDAD's files. Not used here: MDAD's `inventory\` (the lab's own configuration lives in `ansible\matrix\`; `matrix-prepare.yml` adds it to the copy on ansible-control). Symbolic links (only in MDAD's molecule test folders) are checked out on Windows as small text files that name their target; nothing in a deployment reads them |
-| Used by | `scripts\Deploy-LabMatrix.ps1`: copies `vendor\mdad` to `~/mdad` on ansible-control on every run (the copy there is replaced, like `~/lab`), then `ansible\playbooks\matrix-prepare.yml` adds the lab's inventory and its entry point `lab-setup.yml` |
-| Upgrade | `.\scripts\Update-LabMdad.ps1 -Commit <sha>`: `git subtree pull` for MDAD, then its roles at the new versions, two commits; then read MDAD's CHANGELOG.md and follow the steps the script prints |
+| Used by | `scripts\commands\deploy.ps1`: copies `vendor\mdad` to `~/mdad` on ansible-control on every run (the copy there is replaced, like `~/lab`), then `ansible\playbooks\matrix-prepare.yml` adds the lab's inventory and its entry point `lab-setup.yml` |
+| Upgrade | `.\lab.ps1 mdad-upgrade -Commit <sha>`: `git subtree pull` for MDAD, then its roles at the new versions, two commits; then read MDAD's CHANGELOG.md and follow the steps the script prints |
 
 Why vendored and not cloned at deployment time:
 

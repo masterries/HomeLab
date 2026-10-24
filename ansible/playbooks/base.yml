@@ -1,0 +1,122 @@
+# playbooks/base.yml -- the shared base of every Ubuntu lab VM: zsh with good history search, and
+# the console autologin
+#
+# Where it runs: on ansible-control (profile "base", run by ".\lab.ps1 up" after Vagrant's
+# provisioning), for the Ubuntu VMs: ansible-control itself (locally), matrix, keycloak, vault.
+# Vagrant's provisioning keeps only what must exist before Ansible can reach a VM (the user
+# ansible, SSH with certificates, ansible-control's own key and Ansible); everything else is
+# configuration management here.
+#
+# zsh history search:
+#   Ctrl+R             fuzzy search through the whole history (fzf)
+#   Up/Down arrow      search the history for lines starting with what you have typed
+#   Right arrow        accept the grey suggestion from the history
+# A common configuration-management pattern: a system-wide file that automation owns and
+# overwrites (/etc/zsh/zshrc.lab), and a per-user file that automation creates only once and then
+# leaves to the user (~/.zshrc).
+#
+# Console autologin: "Connect" in Hyper-V Manager shows a shell as ansible right away instead of a
+# login prompt. The console login prompt on tty1 is the systemd service getty@tty1.service; a
+# "drop-in" (/etc/systemd/system/getty@tty1.service.d/autologin.conf) changes it without editing
+# the unit file shipped by the package - standard practice for changing service settings.
+# LAB-ONLY SHORTCUT: whoever can open the VM console (an administrator on the Windows host) gets a
+# shell without a password, and through passwordless sudo that means root. SSH is not affected. VMs
+# with "consoleAutologin": false in config/lab.json (vault: whoever opens the console of the unsealed
+# OpenBao VM should not get a root shell for free) keep the normal login prompt. In an enterprise,
+# console access (hypervisor console, iLO/iDRAC/IPMI) requires authentication, ideally with MFA, is
+# logged, and a break-glass account has a password kept in a vault.
+#
+# Idempotent: a second run reports changed=0.
+- name: Base setup of the Ubuntu VMs
+  hosts: ubuntu
+  become: true
+  gather_facts: false
+  vars:
+    base_users: [vagrant, ansible]
+    # From config/lab.json, as the VM build itself reads it (default: autologin on).
+    base_console_autologin: >-
+      {{ (lab_config.vms | selectattr('name', 'equalto', inventory_hostname) | first).consoleAutologin | default(true) }}
+    # A user's ~/.zshrc to begin with. The line "source /etc/zsh/zshrc.lab" is what tells whether
+    # a .zshrc already has the lab setup, so it must stay unchanged.
+    base_zshrc_start: |
+      # Shared lab setup (history search etc.), see /etc/zsh/zshrc.lab
+      source /etc/zsh/zshrc.lab
+
+      # Your own settings below this line
+  tasks:
+    - name: zsh, fzf and the zsh plugins
+      ansible.builtin.apt:
+        name: [zsh, fzf, zsh-autosuggestions, zsh-syntax-highlighting]
+        state: present
+        update_cache: true
+        cache_valid_time: 86400
+
+    - name: The shared zsh setup
+      ansible.builtin.copy:
+        src: ../files/base/zshrc.lab
+        dest: /etc/zsh/zshrc.lab
+        owner: root
+        group: root
+        mode: "0644"
+
+    # New users get the setup automatically: useradd --create-home copies /etc/skel.
+    - name: A .zshrc for new users
+      ansible.builtin.copy:
+        content: "{{ base_zshrc_start }}"
+        dest: /etc/skel/.zshrc
+        force: false
+        mode: "0644"
+
+    - name: A .zshrc for vagrant and ansible (only if there is none)
+      ansible.builtin.copy:
+        content: "{{ base_zshrc_start }}"
+        dest: "~{{ item }}/.zshrc"
+        force: false
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: "0644"
+      loop: "{{ base_users }}"
+
+    # An existing .zshrc is kept; only the lab setup is put in front of it.
+    - name: The lab setup in the .zshrc of vagrant and ansible
+      ansible.builtin.lineinfile:
+        path: "~{{ item }}/.zshrc"
+        line: source /etc/zsh/zshrc.lab
+        insertbefore: BOF
+      loop: "{{ base_users }}"
+
+    - name: zsh as the login shell of vagrant and ansible
+      ansible.builtin.user:
+        name: "{{ item }}"
+        shell: /usr/bin/zsh
+      loop: "{{ base_users }}"
+
+    - name: The folder for drop-ins of getty@tty1.service
+      ansible.builtin.file:
+        path: /etc/systemd/system/getty@tty1.service.d
+        state: directory
+        mode: "0755"
+      when: base_console_autologin | bool
+
+    - name: Console autologin as ansible
+      ansible.builtin.copy:
+        src: ../files/base/getty-autologin.conf
+        dest: /etc/systemd/system/getty@tty1.service.d/autologin.conf
+        mode: "0644"
+      when: base_console_autologin | bool
+      notify: Restart the console
+
+    - name: No console autologin (vault)
+      ansible.builtin.file:
+        path: /etc/systemd/system/getty@tty1.service.d/autologin.conf
+        state: absent
+      when: not (base_console_autologin | bool)
+      notify: Restart the console
+
+  handlers:
+    # Restarting the console ends a session that is open there.
+    - name: Restart the console
+      ansible.builtin.systemd_service:
+        name: getty@tty1.service
+        state: restarted
+        daemon_reload: true

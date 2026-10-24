@@ -1,19 +1,20 @@
 <#
 .SYNOPSIS
-    Checks the run tokens for Ansible (New-LabRunToken / Invoke-LabRunToken in LabSecrets.ps1 and
-    ansible/bin/openbao-run): what a token may do, where it works, and that it is gone after the
-    run.
+    Checks the run tokens for Ansible (New-LabRunToken in LabSecrets.ps1, Invoke-LabRun in
+    LabRun.ps1, ansible/bin/lab-run and openbao-run): what a token may do, where it works, and that
+    it is gone after the run.
 
 .DESCRIPTION
-    Creates one run token with the policy ansible-keycloak, the same way a playbook run does,
-    and runs tests/remote/run-token-check.sh with it on ansible-control. Checks:
+    Runs the profile test-run-token (config\run-profiles.json: ansible/tests/run-token-check.sh
+    with a token for the policy ansible-keycloak), the same way a playbook run gets its token.
+    Checks:
       - the token arrives (wrapped, unwrapped by openbao-run),
       - its policies are exactly ansible-keycloak (+ default), it lasts at most 2 hours, it is
         bound to ansible-control's address and an orphan,
       - Ansible's temporary folder is on a RAM file system (tmpfs),
       - after the run the token is revoked (looked up by its accessor, which is not secret, with
         pc-admin), and the temporary folder is gone.
-    No secret is printed. Nothing stays behind (the copied script is removed).
+    No secret is printed. Nothing stays behind.
 
 .EXAMPLE
     .\tests\Test-LabRunToken.ps1
@@ -23,12 +24,8 @@ $ErrorActionPreference = 'Stop'
 $controlIp = ($script:LabConfig.vms | Where-Object { $_.name -eq 'ansible-control' }).ip
 
 Write-Host 'Run tokens for Ansible'
-Copy-LabTestRemote 'run-token-check.sh'
-try {
-    $lines = @(Invoke-LabRunToken 'bash /tmp/lab-tests/run-token-check.sh' @('ansible-keycloak') 'test')
-    $exitCode = $LASTEXITCODE
-}
-finally { Remove-LabTestRemote }
+$lines = @(Invoke-LabRun 'test-run-token')
+$exitCode = $LASTEXITCODE
 $report = @{}
 foreach ($line in $lines) { if ("$line" -match '^([a-z_]+)=(.*)$') { $report[$Matches[1]] = $Matches[2] } }
 

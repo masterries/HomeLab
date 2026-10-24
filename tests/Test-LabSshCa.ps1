@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Checks the SSH certificate code (scripts\LabSsh.ps1) on the PC, without touching the lab:
+    Checks the SSH certificate code (scripts\lib\LabSsh.ps1) on the PC, without touching the lab:
     offline signing, what a certificate contains, refused principals, the encrypted CA key, the
     revocation list and the rendered trust files.
 

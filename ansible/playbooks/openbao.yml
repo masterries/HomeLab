@@ -2,7 +2,7 @@
 #
 # Where it runs:
 #   On ansible-control, as user "ansible", against the vault VM. Normally started by
-#   .\scripts\Deploy-LabVault.ps1 (which first puts the server's TLS certificate in place and,
+#   .\lab.ps1 deploy vault (which first puts the server's TLS certificate in place and,
 #   after this playbook, initialises, unseals and configures OpenBao over its API).
 #
 # What OpenBao is:
@@ -12,7 +12,7 @@
 #   including an ACME server like Let's Encrypt). Enterprise equivalent: HashiCorp Vault,
 #   CyberArk Conjur, or a cloud key vault (Azure Key Vault, AWS Secrets Manager).
 #
-# What this playbook does (the API configuration happens in Deploy-LabVault.ps1):
+# What this playbook does (the API configuration happens in lab.ps1 deploy vault):
 #   - trust the new lab root CA on the VM
 #   - install OpenBao from its official package repository, with the signing key's
 #     fingerprint checked, at a pinned version
@@ -32,7 +32,7 @@
     openbao_key_url: https://openbao.org/assets/openbao-gpg-pub-20240618.asc
     openbao_key_fingerprint: 66D15FDD87287219C8E15478D200CD702853E6D0
   tasks:
-    # Deploy-LabVault.ps1 creates the key and certificate BEFORE the package: the package would
+    # lab.ps1 deploy vault creates the key and certificate BEFORE the package: the package would
     # otherwise generate a self-signed certificate that nothing trusts.
     - name: The TLS certificate for OpenBao is in place
       ansible.builtin.stat:
@@ -40,10 +40,10 @@
       loop: [tls.crt, tls.key]
       register: openbao_tls_files
 
-    - name: Stop if it is not (run .\scripts\Deploy-LabVault.ps1, which creates it first)
+    - name: Stop if it is not (run .\lab.ps1 deploy vault, which creates it first)
       ansible.builtin.assert:
         that: openbao_tls_files.results | map(attribute='stat.exists') | min
-        fail_msg: /opt/openbao/tls/tls.crt or tls.key is missing. Run .\scripts\Deploy-LabVault.ps1.
+        fail_msg: /opt/openbao/tls/tls.crt or tls.key is missing. Run .\lab.ps1 deploy vault.
         quiet: true
 
     # --- Trust the new lab root CA -----------------------------------------------------------

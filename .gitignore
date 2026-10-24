@@ -8,13 +8,13 @@
 # The lab's local secrets and SSH files (private keys!):
 #   ssh/                                  the offline SSH CA (key encrypted, passphrase in DPAPI),
 #                                         the PC's SSH key and certificate, the SSH trust files
-#                                         and the lab's verified host keys (scripts/LabSsh.ps1)
-#   ssh_config                            SSH client settings (scripts/Initialize-Lab.ps1)
+#                                         and the lab's verified host keys (scripts/lib/LabSsh.ps1)
+#   ssh_config                            SSH client settings (scripts/commands/up.ps1)
 #   pki/                                  the offline root CA: its key (encrypted), certificate,
-#                                         revocation list, issued certificates (New-LabRootCA.ps1)
+#                                         revocation list, issued certificates (lib\LabPki.ps1)
 #   openbao/                              OpenBao's key shares and the PC's logins (DPAPI) and
-#                                         its snapshots (Deploy-LabVault.ps1, Backup-LabVault.ps1);
-#                                         openbao-retired-<date>/ after Remove-Lab.ps1 vault
+#                                         its snapshots (lab.ps1 deploy vault, lab.ps1 backup);
+#                                         openbao-retired-<date>/ after lab.ps1 down vault
 #   opnsense/                             the firewall's passwords and API key (DPAPI)
 #   ca/                                   the retired first lab CA (certificate only)
 # Everything that the services use at run time lives in OpenBao, not here.
@@ -25,7 +25,7 @@ keys/
 keys-old-*/
 # Note: vendor/mdad is a git subtree. MDAD's own vendor/mdad/.gitignore ignores roles/galaxy/
 # (upstream installs the roles on demand); here they are tracked anyway, added with
-# "git add -f" by scripts/Update-LabMdad.ps1. Tracked files stay tracked whatever .gitignore says.
+# "git add -f" by scripts/dev/Update-LabMdad.ps1. Tracked files stay tracked whatever .gitignore says.
 
 # Vagrant's local state (machine IDs, Vagrant's own SSH keys for the VMs). Vagrant creates it
 # next to the Vagrantfile; here vagrant\.vagrant is a junction to drive G:.

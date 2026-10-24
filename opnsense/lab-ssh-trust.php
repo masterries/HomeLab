@@ -4,8 +4,8 @@
  * RUNNING firewall
  *
  * Where it runs:
- *   On the firewall, as root, started over SSH by scripts/LabSsh.ps1 (Set-LabFirewallSshTrust,
- *   used by New-LabFirewall.ps1 and Deploy-LabVault.ps1); it is copied to a private /tmp folder
+ *   On the firewall, as root, started over SSH by scripts/lib/LabSsh.ps1 (Set-LabFirewallSshTrust,
+ *   used by lab.ps1 firewall and lab.ps1 deploy vault); it is copied to a private /tmp folder
  *   and deleted again afterwards:
  *     php lab-ssh-trust.php <authorized_keys file>
  *   The file is keys\ssh\firewall_authorized_keys from the PC: one line per lab SSH CA,
@@ -16,7 +16,7 @@
  * Why a script: OPNsense keeps every user's authorized keys in /conf/config.xml (base64, in
  * <authorizedkeys>) and writes ~/.ssh/authorized_keys from there. A new firewall gets the lines
  * in its rendered config.xml; a running one gets them here whenever the set of CAs changes
- * (OpenBao's CA added after Deploy-LabVault.ps1, removed when the vault VM is rebuilt) - without a
+ * (OpenBao's CA added after lab.ps1 deploy vault, removed when the vault VM is rebuilt) - without a
  * rebuild. The same as pasting the keys into System > Access > Users in the GUI: write_config()
  * keeps a backup of the previous version (System > Configuration > History), and
  * local_user_set() (OPNsense's own function) writes ~ansible/.ssh/authorized_keys again.
@@ -59,7 +59,7 @@ foreach ($config['system']['user'] ?? [] as $i => $user) {
     $found = true;
     if (($user['authorizedkeys'] ?? '') !== $wanted) {
         $config['system']['user'][$i]['authorizedkeys'] = $wanted;
-        write_config('DeployableServer: SSH CAs of user ansible (scripts/LabSsh.ps1)');
+        write_config('DeployableServer: SSH CAs of user ansible (scripts/lib/LabSsh.ps1)');
         echo "changed\n";
     }
     // Writes ~ansible/.ssh/authorized_keys from config.xml, also when nothing changed (repairs a

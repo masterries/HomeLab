@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Checks the break-glass path of New-LabRecoveryKit.ps1 -Recover without a recovery file:
+    Checks the break-glass path of lab.ps1 recovery -Recover without a recovery file:
     the AppRole "recovery" logs in with administrator rights and issues new logins for the PC.
 
 .DESCRIPTION
@@ -12,7 +12,7 @@
       4. both new logins must work,
       5. every secret_id of "recovery" is destroyed again - so if you already made a recovery
          kit, its break-glass login stops working: make a new one with
-         .\scripts\New-LabRecoveryKit.ps1 -Renew. The test asks before it starts.
+         .\lab.ps1 recovery -Renew. The test asks before it starts.
     The key shares are not touched. No secret is printed.
 
 .PARAMETER Force
@@ -61,5 +61,5 @@ try {
     }
 }
 finally { Close-LabBaoToken $admin }
-Write-Host 'If you had made a recovery kit already, make a new one:  .\scripts\New-LabRecoveryKit.ps1 -Renew'
+Write-Host 'If you had made a recovery kit already, make a new one:  .\lab.ps1 recovery -Renew'
 Complete-LabTest 'Test-LabRecoveryLogin'

@@ -8,7 +8,7 @@
 #     harden-ssh.sh <firewall LAN address> <ansible-control address>
 #   It expects keys\ssh\lab_user_ca.pub from the PC, which the file provisioner "lab-ssh-ca"
 #   uploads to $STAGING just before (or an earlier run's copy in /etc/ssh). (The OPNsense
-#   firewall is not made from the box; New-LabFirewall.ps1 sets up its SSH.)
+#   firewall is not made from the box; lab.ps1 firewall sets up its SSH.)
 #
 # WHY: UNIQUE HOST KEYS
 #   An SSH host key is the server's identity. The Vagrant box ships with host keys that were
@@ -20,7 +20,7 @@
 #   own keys on first boot.
 #
 # WHY: THE HOST KEY GOES TO THE PC THROUGH HYPER-V (KVP), NOT OVER THE NETWORK
-#   The PC signs a host certificate for this key (scripts\LabSsh.ps1), and clients then trust the
+#   The PC signs a host certificate for this key (scripts\lib\LabSsh.ps1), and clients then trust the
 #   VM because of that certificate. So the PC must be sure the key really belongs to this VM. Over
 #   the network it cannot be: another machine on LabNet could answer in this VM's place. Hyper-V
 #   has a channel per VM instead, KVP ("key-value pair exchange", part of the Hyper-V integration
@@ -118,7 +118,7 @@ if [[ -f "$STAGING/lab_user_ca.pub" ]]; then
   rm -f "$STAGING/lab_user_ca.pub"
   rmdir --ignore-fail-on-non-empty "$STAGING"
 elif [[ ! -s "$USER_CA" ]]; then
-  echo "ERROR: no lab_user_ca.pub uploaded. Run .\\scripts\\Initialize-Lab.ps1 on the host (it creates keys\\ssh)." >&2
+  echo "ERROR: no lab_user_ca.pub uploaded. Run .\\lab.ps1 up on the host (it creates keys\\ssh)." >&2
   exit 1
 fi
 install -d -m 0755 -o root -g root "$PRINCIPALS_DIR"
@@ -151,7 +151,7 @@ rm -f "$dropin_tmp"
 # Check the complete configuration before touching the running daemon: a broken sshd config
 # would lock everyone out of the VM except the console. (On a VM that has no host certificate
 # yet, sshd reports 'Could not load host certificate': expected, the PC installs it right after
-# provisioning - scripts/LabSsh.ps1, Update-LabVmHostCertificates.)
+# provisioning - scripts/lib/LabSsh.ps1, Update-LabVmHostCertificates.)
 sshd -t
 if [[ -n "$changed" ]]; then
   # A reload makes sshd re-read its configuration and host keys. Existing sessions (including

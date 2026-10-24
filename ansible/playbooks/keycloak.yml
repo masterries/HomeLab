@@ -1,8 +1,8 @@
 # playbooks/keycloak.yml -- Keycloak, the lab's identity provider (single sign-on)
 #
 # Where it runs:
-#   On ansible-control, as user "ansible". Normally started by .\scripts\Deploy-LabKeycloak.ps1;
-#   it can also run alone:  .\scripts\Invoke-LabPlaybook.ps1 keycloak.yml
+#   On ansible-control, as user "ansible". Normally started by .\lab.ps1 deploy keycloak;
+#   it can also run alone:  .\lab.ps1 run keycloak.yml
 #   Either way the PC hands it a short-lived OpenBao token with the policy "ansible-keycloak"
 #   (bin/openbao-run): its secrets and its certificate come from OpenBao.
 #
@@ -50,7 +50,7 @@
     # The keycloak_* modules in play 3 talk to https://keycloak.lab.internal and verify its
     # certificate against the system trust store (they have no option for an extra CA file).
     # The root comes from the PC (keys\pki\root-ca.crt, copied to ~/lab-pki by
-    # Invoke-LabPlaybook.ps1); its private key never leaves the PC.
+    # lab.ps1 run); its private key never leaves the PC.
     - name: Lab root CA in ansible-control's trust store
       ansible.builtin.copy:
         src: "{{ lab_pki_dir }}/root-ca.crt"
@@ -113,7 +113,7 @@
     keycloak_tls_dir: "{{ keycloak_stack_dir }}/tls"
     keycloak_fqdn: "keycloak.{{ lab_domain }}"
     # Renew the certificate when it expires within this window. Force a renewal now with
-    #   .\scripts\Invoke-LabPlaybook.ps1 keycloak.yml -e tls_renew_before=+400d
+    #   .\lab.ps1 run keycloak.yml -e tls_renew_before=+400d
     tls_renew_before: "+30d"
     # Pinned versions: an upgrade is a deliberate change of these lines. Keycloak 26.8.1 (with
     # security fixes over 26.8.0) supports PostgreSQL 14-18; never use ":latest" for a database.

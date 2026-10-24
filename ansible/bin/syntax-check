@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# bin/syntax-check -- "ansible-playbook --syntax-check" for every top-level playbook of the lab
+#
+# Where it runs: on ansible-control, in ~/lab, as profile "syntax" (".\lab.ps1 run syntax"). A syntax
+# check parses a playbook, its includes and templates' references without connecting anywhere, so it
+# is the cheap first test after editing one.
+set -euo pipefail
+cd "$HOME/lab"
+failed=0
+for playbook in playbooks/*.yml; do
+  if ansible-playbook --syntax-check "$playbook" >/dev/null; then
+    echo "syntax ok: $playbook"
+  else
+    echo "SYNTAX ERROR: $playbook" >&2
+    failed=1
+  fi
+done
+exit "$failed"

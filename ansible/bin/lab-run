@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# bin/lab-run -- the ansible-control half of every lab run
+#
+# Where it runs:
+#   On ansible-control, as user "ansible", started over SSH by the PC (scripts/lib/LabRun.ps1,
+#   Invoke-LabRun - that is ".\lab.ps1 run", "deploy", "up"):
+#     bash <copy>/bin/lab-run <id> <profile> [--cert <base64>] [--token] [--color] [--mdad <archive>] -- [extra arguments]
+#   The PC has just unpacked a fresh copy of the repository's ansible/ folder (plus config/ and the
+#   public files of the lab's PKI) into ~/.lab-incoming/<id>. Not meant to be started by hand.
+#
+# What it does, in order:
+#   1. One run at a time (a lock file). A second run while one is active stops with exit code 75.
+#   2. The fresh copy replaces ~/lab completely ("the repository is the source of truth, the control
+#      node gets a fresh copy": a change made by hand on the VM cannot survive), and with --mdad the
+#      vendored MDAD replaces ~/mdad the same way.
+#   3. The lab root CA's public files go to ~/lab-pki (the playbooks and bin/openbao-run use them).
+#   4. --cert: the run's SSH certificate goes next to ansible-control's own key
+#      (~/.ssh/id_ed25519-cert.pub, where ssh finds it), valid 2 hours and only for the principals of
+#      this profile (config/run-profiles.json); it is deleted again when the run ends, whatever
+#      happens. Sockets of connections that Ansible keeps open (ControlPersist, ~/.ansible/cp) are
+#      removed before and after, so no run can reuse a connection of an earlier, broader one.
+#   5. The profile's playbook or command runs in ~/lab; with --token through bin/openbao-run, which
+#      reads the wrapped OpenBao token from stdin (nothing here may read stdin before it).
+# The exit code is that of the playbook or command.
+set -euo pipefail
+
+# 1. The lock. flock -o: the lock stays with flock itself and is not inherited by what the run
+#    starts - Ansible's SSH "ControlPersist" masters live on for 60 s after a run and would
+#    otherwise hold it and refuse the next run.
+if [[ -z "${LAB_RUN_LOCKED:-}" ]]; then
+  mkdir -p "$HOME/.cache"
+  LAB_RUN_LOCKED=1 exec flock -n -o -E 75 "$HOME/.cache/lab-run.lock" bash "$0" "$@"
+fi
+
+id="${1:?usage: lab-run <id> <profile> [options] -- [extra]}"
+profile="${2:?usage: lab-run <id> <profile> [options] -- [extra]}"
+shift 2
+cert=""; token=""; color=""; mdad=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cert) cert="$2"; shift 2 ;;
+    --token) token=1; shift ;;
+    --color) color=1; shift ;;
+    --mdad) mdad="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) echo "lab-run: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+incoming="$HOME/.lab-incoming/$id"
+if [[ ! "$id" =~ ^[A-Za-z0-9]+$ || ! -d "$incoming" ]]; then
+  echo "lab-run: no fresh copy in $incoming" >&2
+  exit 2
+fi
+
+# 2. ~/lab (and ~/mdad). chmod -R go-w: Ansible ignores an ansible.cfg in a world-writable folder
+#    (otherwise another user could inject settings), and the permissions of an archive made on
+#    Windows depend on the umask.
+chmod -R go-w "$incoming"
+rm -rf "$HOME/lab"
+mv "$incoming" "$HOME/lab"
+if [[ -n "$mdad" ]]; then
+  rm -rf "$HOME/mdad.new"
+  mkdir "$HOME/mdad.new"
+  tar -xzf "$mdad" -C "$HOME/mdad.new"
+  rm -f "$mdad"
+  chmod -R go-w "$HOME/mdad.new"
+  rm -rf "$HOME/mdad"
+  mv "$HOME/mdad.new" "$HOME/mdad"
+fi
+
+# 3. The public PKI files (the root certificate as PEM; its DER copy and revocation list, which
+#    openbao.yml publishes on the vault VM).
+if [[ -f "$HOME/lab/.pki/root-ca.crt" ]]; then
+  install -d -m 755 "$HOME/lab-pki" "$HOME/lab-pki/pub"
+  install -m 644 "$HOME/lab/.pki/root-ca.crt" "$HOME/lab-pki/root-ca.crt"
+  for file in root-ca.crt root-ca.crl; do
+    if [[ -f "$HOME/lab/.pki/pub/$file" ]]; then install -m 644 "$HOME/lab/.pki/pub/$file" "$HOME/lab-pki/pub/$file"; fi
+  done
+fi
+
+# 4. The run's SSH certificate.
+cleanup() {
+  rm -f "$HOME/.ssh/id_ed25519-cert.pub"
+  rm -rf "$HOME/.ansible/cp"
+}
+trap cleanup EXIT
+rm -rf "$HOME/.ansible/cp"
+if [[ -n "$cert" ]]; then
+  printf '%s' "$cert" | base64 -d > "$HOME/.ssh/id_ed25519-cert.pub"
+fi
+
+# 5. The command. python3 reads the profile (always present on Ubuntu; jq is not installed); its
+#    program is an argument, so it does not touch stdin.
+VAULT_ADDR="$(python3 -c 'import json, sys; print("https://vault.%s:8200" % json.load(open(sys.argv[1]))["domain"])' "$HOME/lab/config/lab.json")"
+export VAULT_ADDR
+# Magenta instead of Ansible's blue for verbose output: readable on Windows PowerShell's blue.
+export ANSIBLE_COLOR_VERBOSE=magenta
+if [[ -n "$color" ]]; then export ANSIBLE_FORCE_COLOR=1; fi
+if [[ "$profile" =~ ^file:([A-Za-z0-9._/-]+\.yml)$ ]]; then
+  cmd="ansible-playbook ${BASH_REMATCH[1]}"
+else
+  cmd="$(python3 -c '
+import json, sys
+p = json.load(open(sys.argv[1]))["profiles"].get(sys.argv[2])
+if p is None:
+    sys.exit("lab-run: no profile " + sys.argv[2] + " in config/run-profiles.json")
+print("ansible-playbook " + p["playbook"] if "playbook" in p else p["command"])
+' "$HOME/lab/config/run-profiles.json" "$profile")"
+fi
+for argument in "$@"; do cmd+=" $(printf '%q' "$argument")"; done
+cd "$HOME/lab"
+if [[ -n "$token" ]]; then
+  bash "$HOME/lab/bin/openbao-run" "$cmd"
+else
+  bash -c "$cmd"
+fi

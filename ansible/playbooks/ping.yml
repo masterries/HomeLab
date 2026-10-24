@@ -2,7 +2,7 @@
 #
 # Where it runs:
 #   On ansible-control, as user "ansible". Started from the Windows host with
-#     .\scripts\Invoke-LabPlaybook.ps1 ping.yml
+#     .\lab.ps1 run ping.yml
 #
 # What it checks for every host in the inventory (group "all"):
 #   - the DNS name resolves (dnsmasq on the firewall) and SSH login with the lab key works;

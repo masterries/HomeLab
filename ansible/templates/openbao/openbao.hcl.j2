@@ -4,7 +4,7 @@
 #
 # OpenBao reads this file at start. "systemctl reload openbao" (SIGHUP) re-reads the TLS files,
 # the log level and the audit settings; everything else needs a restart - and every restart
-# seals OpenBao (it forgets its key until it is unsealed again: .\scripts\Unlock-LabVault.ps1).
+# seals OpenBao (it forgets its key until it is unsealed again: .\lab.ps1 unseal).
 
 # The web UI at https://vault.{{ lab_domain }}:8200/ui/
 ui = true
@@ -30,7 +30,7 @@ storage "raft" {
 listener "tcp" {
   address         = "0.0.0.0:8200"
   cluster_address = "127.0.0.1:8201"
-  # Certificate signed by the lab's offline root (Deploy-LabVault.ps1), NOT by OpenBao itself:
+  # Certificate signed by the lab's offline root (lab.ps1 deploy vault), NOT by OpenBao itself:
   # otherwise an expired certificate could only be renewed through the server it protects.
   # (An empty tls_cert_file would also make OpenBao try Let's Encrypt.)
   tls_cert_file   = "/opt/openbao/tls/tls.crt"

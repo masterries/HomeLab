@@ -1,0 +1,49 @@
+# Shared zsh setup of the lab VMs. Managed by ansible/playbooks/base.yml and overwritten at the
+# next run; put your own settings in ~/.zshrc.
+
+# History: large, without duplicates, shared immediately between all shells.
+# Commands that start with a space are not saved in the history (useful for secrets).
+HISTFILE=~/.zsh_history
+HISTSIZE=100000
+SAVEHIST=100000
+setopt EXTENDED_HISTORY SHARE_HISTORY HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE HIST_REDUCE_BLANKS HIST_VERIFY
+
+# Emacs-style line editing (Ctrl+A, Ctrl+E, ...), like bash
+bindkey -e
+
+# Up/Down arrow: search the history for lines starting with what you have typed.
+# Bind both variants: depending on the terminal mode the key sends ^[[A or ^[OA.
+autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+zle -N up-line-or-beginning-search
+zle -N down-line-or-beginning-search
+bindkey '^[[A' up-line-or-beginning-search
+bindkey '^[OA' up-line-or-beginning-search
+bindkey '^[[B' down-line-or-beginning-search
+bindkey '^[OB' down-line-or-beginning-search
+
+# Tab completion; "menu select" lets you pick a candidate with the arrow keys.
+autoload -Uz compinit && compinit
+zstyle ':completion:*' menu select
+
+# fzf: Ctrl+R history, Ctrl+T files, Alt+C change directory
+source /usr/share/doc/fzf/examples/key-bindings.zsh
+source /usr/share/doc/fzf/examples/completion.zsh
+
+# Grey suggestion from the history while typing (accept with the Right arrow)
+source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+
+alias ll='ls -l'
+
+# Prompt: user@host:path (git branch)
+# No blue: unreadable on the blue background of Windows PowerShell.
+autoload -Uz add-zsh-hook vcs_info
+add-zsh-hook precmd vcs_info
+zstyle ':vcs_info:git:*' formats ' (%b)'
+setopt PROMPT_SUBST
+PROMPT='%F{green}%n@%m%f:%F{cyan}%~%f%F{yellow}${vcs_info_msg_0_}%f%# '
+
+# Must be loaded last (it hooks into the line editor set up above).
+source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+# The two default styles that are blue (globs like *.yml, history expansions like !!)
+ZSH_HIGHLIGHT_STYLES[globbing]='fg=magenta'
+ZSH_HIGHLIGHT_STYLES[history-expansion]='fg=magenta'

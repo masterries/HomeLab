@@ -3,7 +3,7 @@
  * opnsense/lab-gui-cert.php -- puts a new TLS certificate into the RUNNING firewall's web GUI
  *
  * Where it runs:
- *   On the firewall, as root, started by scripts/New-LabFirewall.ps1 (Update-GuiCertificate)
+ *   On the firewall, as root, started by scripts/commands/firewall.ps1 (Update-GuiCertificate)
  *   over SSH; it copies this file to /tmp and deletes it again afterwards:
  *     php lab-gui-cert.php <key file> <certificate file> <CA certificate file>
  *   All three are PEM files. The key was generated on the firewall itself and never left it;
@@ -70,5 +70,5 @@ if (!$caFound) {
     exit(1);
 }
 
-write_config('DeployableServer: web GUI certificate renewed (scripts/New-LabFirewall.ps1)');
+write_config('DeployableServer: web GUI certificate renewed (scripts/commands/firewall.ps1)');
 echo "web GUI certificate replaced\n";

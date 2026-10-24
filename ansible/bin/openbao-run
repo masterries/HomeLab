@@ -3,7 +3,7 @@
 #
 # Where it runs:
 #   On ansible-control, as user "ansible", started over SSH by the PC's scripts
-#   (Invoke-LabPlaybook.ps1, Deploy-LabMatrix.ps1, through Invoke-LabRunToken in LabSecrets.ps1):
+#   (lab.ps1 run, lab.ps1 deploy matrix, through Invoke-LabRunToken in LabSecrets.ps1):
 #     <wrapping token on stdin> | openbao-run '<shell command>'
 #   Not meant to be started by hand.
 #
@@ -36,7 +36,7 @@
 #      (in RAM, see ANSIBLE_LOCAL_TEMP below).
 #
 # Environment: VAULT_ADDR (set by the PC from config/lab.json); VAULT_CACERT defaults to
-# ~/lab-pki/root-ca.crt (copied there by Invoke-LabPlaybook.ps1).
+# ~/lab-pki/root-ca.crt (copied there by lab.ps1 run).
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then

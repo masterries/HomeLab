@@ -2,7 +2,7 @@
 #
 # Where it runs:
 #   Copied by ansible/playbooks/matrix-prepare.yml to ~/mdad/lab-setup.yml on ansible-control,
-#   next to MDAD's own setup.yml. .\scripts\Deploy-LabMatrix.ps1 runs it instead of setup.yml,
+#   next to MDAD's own setup.yml. .\lab.ps1 deploy matrix runs it instead of setup.yml,
 #   with the same tags MDAD's "just" recipes use, for example:
 #     ansible-playbook -i inventory/hosts lab-setup.yml --tags=install-all,ensure-matrix-users-created,start
 #   (= "just install-all", which would run setup.yml directly). It needs a run token from the PC
@@ -25,8 +25,8 @@
   connection: local
   gather_facts: false
   tasks:
-    # The task file lives in the lab's Ansible project, which Invoke-LabPlaybook.ps1 has just
-    # copied to ~/lab (Deploy-LabMatrix.ps1 runs matrix-prepare.yml first).
+    # The task file lives in the lab's Ansible project, which lab.ps1 run has just
+    # copied to ~/lab (lab.ps1 deploy matrix runs matrix-prepare.yml first).
     # openbao_existing_state: true: never generate here. matrix-prepare.yml has created any
     # missing secret before MDAD runs.
     - name: Read the secrets
