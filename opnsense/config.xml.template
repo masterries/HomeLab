@@ -1,0 +1,420 @@
+<?xml version="1.0"?>
+<!--
+  config.xml.template - the "golden configuration" of the lab firewall (OPNsense 26.7).
+
+  WHAT THIS IS
+  OPNsense keeps its whole configuration in one XML file, /conf/config.xml. The GUI, the REST
+  API and the console all read and write that file. This template is the lab's version of it:
+  scripts/New-LabFirewall.ps1 replaces the placeholders (upper-case names in double curly
+  braces: passwords, keys, certificates, addresses from config/lab.json) and the generated
+  blocks, checks that none is left over, and hands the result to OPNsense's configuration
+  importer on the very first boot, on a small ISO. The rendered file contains password hashes
+  and the GUI's private key, so it is never kept: the script deletes the ISO after the import.
+
+  WHY A TEMPLATE (CONFIGURATION AS CODE)
+  The firewall is built from this file every time (Remove-Lab.ps1 + Initialize-Lab.ps1), so the
+  repository describes the firewall completely: what is in Git is what runs. Changes made later
+  in the GUI are NOT written back here; they last until the next rebuild. Day-2 changes are
+  meant to go through the REST API (Ansible) or into this template. Enterprise equivalent: a
+  golden config in version control, deployed by automation, with the GUI used read-only.
+
+  HOW IT WAS WRITTEN
+  Based on OPNsense's factory config (src/etc/config.xml.sample, stable/26.7) and the data
+  models in src/opnsense/mvc/app/models. Model "version" attributes are left out on purpose:
+  at every boot OPNsense runs its model migrations (pluginctl -M), which bring older or
+  version-less sections up to the current format.
+
+  INTERFACES (Hyper-V adapters are added in this order, so FreeBSD names them hn0, hn1, hn2):
+    wan   hn0  Default Switch  DHCP: internet access through Windows' NAT
+    lan   hn1  LabNet          {{LAN_IP}}/24: the private lab network (gateway, DHCP, DNS)
+    opt1  hn2  LabHost         {{HOST_IP}}/24 (management: GUI, SSH, DNS) plus one virtual IP
+                               per published lab VM ("published" in config/lab.json), whose
+                               ports are forwarded to that VM
+-->
+<opnsense>
+  <theme>opnsense</theme>
+  <!-- No <trigger_initial_wizard/>: the setup wizard would otherwise greet the first GUI login. -->
+  <system>
+    <optimization>normal</optimization>
+    <hostname>firewall</hostname>
+    <domain>{{DOMAIN}}</domain>
+    <!-- Upstream DNS servers come from the WAN DHCP lease (the Default Switch). They change
+         with the Default Switch's subnet after every Windows reboot, so they are not pinned. -->
+    <dnsallowoverride>1</dnsallowoverride>
+    <dnsallowoverride_exclude/>
+    <!-- Group "admins" has the privilege page-all (full administrator). Only page-all members
+         get a login shell and membership in the Unix group wheel, and OPNsense's sshd allows
+         only wheel ("AllowGroups wheel"). uid 0 = root, uid 2000 = ansible. -->
+    <group>
+      <name>admins</name>
+      <description>System Administrators</description>
+      <scope>system</scope>
+      <gid>1999</gid>
+      <member>0,2000</member>
+      <priv>page-all</priv>
+    </group>
+    <!-- root: the GUI login. Its random password is generated once and kept DPAPI-encrypted
+         on the PC (keys\opnsense\root-password.dpapi; see it with
+         .\scripts\Show-LabSecret.ps1 -Pc opnsense/root-password); only its SHA-512-crypt hash
+         is stored here. -->
+    <user>
+      <name>root</name>
+      <descr>System Administrator</descr>
+      <scope>system</scope>
+      <groupname>admins</groupname>
+      <password>{{ROOT_PASSWORD_HASH}}</password>
+      <uid>0</uid>
+    </user>
+    <!-- ansible: the account the rest of the lab uses.
+         - SSH jump host: your PC and Vagrant log in with the lab key (authorizedkeys, base64)
+           and tunnel on to the lab VMs (ProxyJump / ssh -W). OPNsense never disables TCP
+           forwarding in its sshd_config, so this works without extra settings.
+         - REST API: the line in <apikeys> is "key|hash"; the secret itself is kept
+           DPAPI-encrypted on the PC (keys\opnsense\api-ansible.dpapi).
+         LAB SHORTCUT: one full-admin account does both jobs. Enterprise: a restricted jump
+         account (e.g. a Match block with PermitOpen in sshd_config.d) and a separate,
+         least-privilege API user per automation tool. -->
+    <user>
+      <name>ansible</name>
+      <descr>Lab automation and SSH jump host</descr>
+      <scope>user</scope>
+      <password>{{ANSIBLE_PASSWORD_HASH}}</password>
+      <uid>2000</uid>
+      <shell>/bin/sh</shell>
+      <authorizedkeys>{{ANSIBLE_AUTHORIZED_KEYS_B64}}</authorizedkeys>
+      <apikeys>{{ANSIBLE_APIKEYS}}</apikeys>
+    </user>
+    <nextuid>2001</nextuid>
+    <nextgid>2000</nextgid>
+    <timezone>{{TIMEZONE}}</timezone>
+    <timeservers>0.opnsense.pool.ntp.org 1.opnsense.pool.ntp.org 2.opnsense.pool.ntp.org 3.opnsense.pool.ntp.org</timeservers>
+    <!-- Web GUI and REST API (same web server). HTTPS on port 443, listening only on the LAN and
+         HOST addresses; the virtual IPs are excluded (nobind on each <vip>), so 443 there can
+         be forwarded to the published lab VMs. The certificate is issued by the lab CA, which
+         Windows already trusts, so https://firewall.lab.internal opens without a warning.
+         disablehttpredirect: no listener on port 80 at all.
+         noantilockout: OPNsense normally adds a hidden "anti-lockout" rule on its first
+         interface (here LAN) that passes SSH and HTTPS to EVERY firewall address, before any
+         rule of ours. It protects beginners from locking themselves out, but it would also let
+         the lab reach the firewall's HOST side, which our first LAN rule blocks. Here the
+         filter rules below are written explicitly (LAN may reach 10.10.10.1, the PC may reach
+         10.10.99.2), so the implicit rule is switched off: every allowed path is visible in
+         this file. Enterprise firewalls work the same way: management access is an explicit,
+         reviewed rule. -->
+    <webgui>
+      <protocol>https</protocol>
+      <ssl-certref>{{GUI_CERT_REFID}}</ssl-certref>
+      <interfaces>lan,opt1</interfaces>
+      <disablehttpredirect>1</disablehttpredirect>
+      <noantilockout>1</noantilockout>
+    </webgui>
+    <!-- LAB SHORTCUT: admins may use sudo without a password (2 = "No password"). The build
+         script and Ansible need root rights over SSH. Enterprise: sudo with a password or
+         narrowly scoped rules, and personal admin accounts. -->
+    <sudo_allow_wheel>2</sudo_allow_wheel>
+    <disablenatreflection>yes</disablenatreflection>
+    <usevirtualterminal>1</usevirtualterminal>
+    <!-- The console asks for a login instead of opening the menu directly. -->
+    <disableconsolemenu/>
+    <!-- Console on the serial port first (the build script talks to it through a Hyper-V
+         named pipe), VGA second (the "Connect" window in Hyper-V Manager). -->
+    <primaryconsole>serial</primaryconsole>
+    <secondaryconsole>video</secondaryconsole>
+    <serialspeed>115200</serialspeed>
+    <powerd_ac_mode>hadp</powerd_ac_mode>
+    <powerd_battery_mode>hadp</powerd_battery_mode>
+    <powerd_normal_mode>hadp</powerd_normal_mode>
+    <bogons>
+      <interval>monthly</interval>
+    </bogons>
+    <pf_share_forward>1</pf_share_forward>
+    <lb_use_sticky>1</lb_use_sticky>
+    <!-- SSH: on, key only (no <passwordauth/>, no <permitrootlogin/>: in OPNsense these flags
+         are switched on by their mere presence), listening on LAN and HOST only. -->
+    <ssh>
+      <group>admins</group>
+      <enabled>enabled</enabled>
+      <noauto>1</noauto>
+      <interfaces>lan,opt1</interfaces>
+    </ssh>
+  </system>
+  <interfaces>
+    <!-- No <blockpriv>: the Default Switch itself uses private addresses (172.16.0.0/12), so
+         "block private networks" on WAN would block the upstream network. Nothing is allowed
+         in on WAN anyway: there is no pass rule for it, and pf's default is to block. -->
+    <wan>
+      <enable>1</enable>
+      <if>hn0</if>
+      <descr>WAN</descr>
+      <spoofmac/>
+      <ipaddr>dhcp</ipaddr>
+      <blockbogons>1</blockbogons>
+      <dhcphostname/>
+    </wan>
+    <lan>
+      <enable>1</enable>
+      <if>hn1</if>
+      <descr>LAN</descr>
+      <spoofmac/>
+      <ipaddr>{{LAN_IP}}</ipaddr>
+      <subnet>24</subnet>
+    </lan>
+    <opt1>
+      <enable>1</enable>
+      <if>hn2</if>
+      <descr>HOST</descr>
+      <spoofmac/>
+      <ipaddr>{{HOST_IP}}</ipaddr>
+      <subnet>24</subnet>
+    </opt1>
+  </interfaces>
+  <!-- Virtual IPs (IP aliases) for published services: further addresses on the HOST interface,
+       one per published lab VM (generated from "published" in config/lab.json). Separating the
+       management address (GUI/SSH on {{HOST_IP}}) from the service addresses is a common
+       enterprise pattern, and one address per VM lets several VMs offer the same port (443):
+       a port forward is chosen by destination address and port, so 10.10.99.3:443 and
+       10.10.99.4:443 can lead to different VMs. nobind=1 ("deny service binding") keeps the
+       web GUI and sshd off these addresses. dnsmasq (DNS, DHCP) and ntpd still listen on every
+       address, the virtual IPs included: what keeps them closed there are the filter rules
+       below (the PC rules name {{HOST_IP}} only; nothing else passes to a virtual IP except
+       the forwarded ports). -->
+  <virtualip>
+<!--{{VIRTUAL_IPS}}-->
+  </virtualip>
+  <!-- Dnsmasq: DHCP for the lab network and DNS for the lab network and your PC (port 53).
+       - DHCP only on LAN (no_interface=opt1), authoritative, pool .100-.199, 12 h leases.
+         Each lab VM has a reservation (its static MAC -> its fixed IP, generated below).
+       - DNS: names under {{DOMAIN}} are answered locally and never forwarded ("local"), all
+         other names go to the upstream servers learned on WAN. bogus-priv (no_private_reverse)
+         answers reverse lookups of private addresses locally instead of forwarding them.
+       - Split-horizon DNS: a published name has two addresses (the VM's lab IP and its
+         published address on the HOST network).
+         The setting "localise-queries" makes dnsmasq answer each client with the address in
+         its own subnet. OPNsense has no GUI field for it, so New-LabFirewall.ps1 installs it as
+         a drop-in file (opnsense/dnsmasq.conf.d/10-lab.conf).
+       Unbound (OPNsense's other DNS server) stays off: one DNS server is simpler to follow. -->
+  <dnsmasq>
+    <enable>1</enable>
+    <interface>lan,opt1</interface>
+    <domain_needed>1</domain_needed>
+    <no_private_reverse>1</no_private_reverse>
+    <dhcp>
+      <no_interface>opt1</no_interface>
+      <fqdn>1</fqdn>
+      <domain>{{DOMAIN}}</domain>
+      <local>1</local>
+      <authoritative>1</authoritative>
+      <default_fw_rules>1</default_fw_rules>
+    </dhcp>
+    <dhcp_ranges>
+      <interface>lan</interface>
+      <start_addr>{{LAN_POOL_START}}</start_addr>
+      <end_addr>{{LAN_POOL_END}}</end_addr>
+      <lease_time>43200</lease_time>
+    </dhcp_ranges>
+<!--{{DNSMASQ_HOSTS}}-->
+  </dnsmasq>
+  <!-- NAT
+       - Outbound (source) NAT "automatic": traffic from the lab to the internet leaves with the
+         firewall's WAN address (the same idea as masquerade).
+       - Destination NAT (port forwards), generated from "published" in config/lab.json: each
+         listed port on a VM's published address is forwarded to the same port on the VM's lab
+         address. pass=rule ("Register rule") creates the matching filter rule automatically;
+         without it the forward would translate the packets and the default deny would then
+         drop them. Behind one address, a reverse proxy on the VM (Traefik of the Matrix stack)
+         picks the site by host name (SNI), so several names can share port 443.
+         The forwards keep the port numbers unchanged. That matters for LiveKit's media ports
+         (Matrix calls, TCP 7881 / UDP 7882): HTTP(S) carries only the call's signalling, the
+         audio/video (WebRTC) goes directly between browser and LiveKit, and LiveKit announces
+         the published address with its real port numbers (livekit_server_config_rtc_node_ip
+         in ansible/matrix/). -->
+  <nat>
+    <outbound>
+      <mode>automatic</mode>
+    </outbound>
+<!--{{PORT_FORWARDS}}-->
+  </nat>
+  <filter>
+  </filter>
+  <rrd>
+    <enable/>
+  </rrd>
+  <ntpd>
+    <prefer>0.opnsense.pool.ntp.org</prefer>
+    <ispool>0.opnsense.pool.ntp.org 1.opnsense.pool.ntp.org 2.opnsense.pool.ntp.org 3.opnsense.pool.ntp.org</ispool>
+  </ntpd>
+  <!-- FILTER RULES (pf). Rules are evaluated per interface, for traffic coming IN on it, in
+       sequence order; "quick" = the first match wins. Anything not passed is blocked (default
+       deny). Replies to allowed connections pass automatically (stateful: statetype keep).
+       Rules OPNsense adds by itself: DHCP on LAN (dnsmasq default_fw_rules) and the rules
+       registered by the port forwards above. (Its anti-lockout rule is switched off, see
+       noantilockout in <webgui>.) See the active rule set with:
+         .\scripts\Connect-Lab.ps1 firewall 'sudo pfctl -sr' -->
+  <OPNsense>
+    <Firewall>
+      <Filter>
+        <rules>
+          <!-- LAN: the lab must not reach your PC's network (LabHost) ... -->
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>1</sequence>
+            <action>block</action>
+            <quick>1</quick>
+            <interface>lan</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>lan</source_net>
+            <destination_net>opt1</destination_net>
+            <log>1</log>
+            <description>Lab may not reach the PC network</description>
+          </rule>
+          <!-- ... nor the PC through the back door: the WAN side is the Hyper-V "Default Switch",
+               whose gateway (the firewall's way to the internet) is your PC itself. Without this
+               rule a lab VM could reach Windows services on the PC's Default Switch address via
+               outbound NAT. "wan" means the WAN network, whatever subnet Windows gives the Default
+               Switch after a reboot. Internet destinations lie outside that subnet and are not
+               affected; the firewall's own DNS queries to Windows do not enter on LAN either. -->
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>2</sequence>
+            <action>block</action>
+            <quick>1</quick>
+            <interface>lan</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>lan</source_net>
+            <destination_net>wan</destination_net>
+            <log>1</log>
+            <description>Lab may not reach the PC through the WAN network</description>
+          </rule>
+          <!-- ... everything else from the lab is allowed: internet (via outbound NAT) and the
+               firewall's own services (DNS, DHCP, SSH and API for ansible-control). -->
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>3</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interface>lan</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>any</protocol>
+            <source_net>lan</source_net>
+            <destination_net>any</destination_net>
+            <log>0</log>
+            <description>Lab to internet and firewall services</description>
+          </rule>
+          <!-- HOST (your PC): only these services, and only on the firewall's management address
+               {{HOST_IP}}. Not "opt1ip" (the HOST interface address): in pf that means every
+               address on the interface, including the published addresses (virtual IPs), so
+               DNS would answer there too. The published addresses carry only their forwarded
+               ports (port forwards above). -->
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>10</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>tcp</protocol>
+            <source_net>{{PC_IP}}</source_net>
+            <destination_net>{{HOST_IP}}</destination_net>
+            <destination_port>22</destination_port>
+            <log>0</log>
+            <description>PC: SSH (jump host)</description>
+          </rule>
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>11</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>tcp</protocol>
+            <source_net>{{PC_IP}}</source_net>
+            <destination_net>{{HOST_IP}}</destination_net>
+            <destination_port>443</destination_port>
+            <log>0</log>
+            <description>PC: web GUI and REST API</description>
+          </rule>
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>12</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>udp</protocol>
+            <source_net>{{PC_IP}}</source_net>
+            <destination_net>{{HOST_IP}}</destination_net>
+            <destination_port>53</destination_port>
+            <log>0</log>
+            <description>PC: DNS (udp)</description>
+          </rule>
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>13</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>tcp</protocol>
+            <source_net>{{PC_IP}}</source_net>
+            <destination_net>{{HOST_IP}}</destination_net>
+            <destination_port>53</destination_port>
+            <log>0</log>
+            <description>PC: DNS (tcp)</description>
+          </rule>
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>14</sequence>
+            <action>pass</action>
+            <quick>1</quick>
+            <interface>opt1</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>icmp</protocol>
+            <source_net>{{PC_IP}}</source_net>
+            <destination_net>{{HOST_IP}}</destination_net>
+            <log>0</log>
+            <description>PC: ping the firewall</description>
+          </rule>
+        </rules>
+        <snatrules/>
+        <npt/>
+        <onetoone/>
+      </Filter>
+    </Firewall>
+  </OPNsense>
+  <!-- CERTIFICATES (OPNsense's trust store, System > Trust). PEM data is stored base64-encoded.
+       <ca>: the lab root CA certificate only, never its key: the firewall does not issue
+       certificates, it only presents one. <cert>: the GUI certificate for
+       firewall.{{DOMAIN}}, signed by the offline root CA on your PC (New-LabFirewall.ps1 with
+       New-LabRootCA.ps1), together with its private key. On a running firewall,
+       New-LabFirewall.ps1 renews both in place (opnsense\lab-gui-cert.php). -->
+  <ca>
+    <refid>{{CA_REFID}}</refid>
+    <descr>DeployableServer Lab Root CA 2026</descr>
+    <crt>{{CA_CRT_B64}}</crt>
+  </ca>
+  <cert>
+    <refid>{{GUI_CERT_REFID}}</refid>
+    <descr>firewall.{{DOMAIN}} (web GUI)</descr>
+    <caref>{{CA_REFID}}</caref>
+    <crt>{{GUI_CRT_B64}}</crt>
+    <prv>{{GUI_KEY_B64}}</prv>
+  </cert>
+</opnsense>

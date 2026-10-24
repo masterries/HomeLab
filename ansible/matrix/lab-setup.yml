@@ -1,0 +1,58 @@
+# matrix/lab-setup.yml -- the lab's entry point into matrix-docker-ansible-deploy (MDAD)
+#
+# Where it runs:
+#   Copied by ansible/playbooks/matrix-prepare.yml to ~/mdad/lab-setup.yml on ansible-control,
+#   next to MDAD's own setup.yml. .\scripts\Deploy-LabMatrix.ps1 runs it instead of setup.yml,
+#   with the same tags MDAD's "just" recipes use, for example:
+#     ansible-playbook -i inventory/hosts lab-setup.yml --tags=install-all,ensure-matrix-users-created,start
+#   (= "just install-all", which would run setup.yml directly). It needs a run token from the PC
+#   with the policy "ansible-matrix" (bin/openbao-run).
+#
+# Why a wrapper around MDAD: MDAD expects its secrets as inventory variables. Here they live in
+# OpenBao, and only there. The first two plays read them into memory and hand them to the
+# Matrix server as host facts ("set_fact"); facts outlive their play for the whole run, so
+# MDAD's plays, imported afterwards, find vault_matrix_homeserver_generic_secret_key etc. as if
+# they were defined in the inventory - but nothing is written to disk on ansible-control. The
+# values do end up in the services' configuration files on the Matrix VM, where the running
+# services need them.
+# Enterprise equivalent: community.hashi_vault lookups in the inventory, or an inventory plugin
+# / Vault Agent that renders the variables at run time.
+#
+# tags: [always]: MDAD is always run with --tags (install-all, self-check, ...); tasks without a
+# matching tag would be skipped, and MDAD would then miss its secrets.
+- name: Matrix secrets from OpenBao (in memory, for this run)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    # The task file lives in the lab's Ansible project, which Invoke-LabPlaybook.ps1 has just
+    # copied to ~/lab (Deploy-LabMatrix.ps1 runs matrix-prepare.yml first).
+    # openbao_existing_state: true: never generate here. matrix-prepare.yml has created any
+    # missing secret before MDAD runs.
+    - name: Read the secrets
+      ansible.builtin.include_tasks:
+        file: "{{ lookup('ansible.builtin.env', 'HOME') }}/lab/playbooks/tasks/openbao-secrets.yml"
+        apply:
+          tags: [always]
+      vars:
+        openbao_existing_state: true
+        openbao_secrets:
+          - { path: matrix/generic-secret-key, field: value }
+          - { path: matrix/postgres, field: password }
+          - { path: keycloak/clients/matrix-authentication-service, field: secret }
+      tags: [always]
+
+- name: Hand the secrets to the Matrix server's variables
+  hosts: matrix_servers
+  gather_facts: false
+  tasks:
+    - name: Secrets as variables for MDAD (see host_vars/.../vars.yml)
+      ansible.builtin.set_fact:
+        vault_matrix_homeserver_generic_secret_key: "{{ hostvars['localhost'].lab_secrets['matrix/generic-secret-key'] }}"
+        vault_postgres_connection_password: "{{ hostvars['localhost'].lab_secrets['matrix/postgres'] }}"
+        vault_mas_keycloak_client_secret: "{{ hostvars['localhost'].lab_secrets['keycloak/clients/matrix-authentication-service'] }}"
+      no_log: true
+      tags: [always]
+
+- name: MDAD
+  ansible.builtin.import_playbook: setup.yml

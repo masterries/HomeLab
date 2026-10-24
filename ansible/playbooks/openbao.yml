@@ -1,0 +1,244 @@
+# playbooks/openbao.yml -- OpenBao, the lab's secrets manager and certificate authority
+#
+# Where it runs:
+#   On ansible-control, as user "ansible", against the vault VM. Normally started by
+#   .\scripts\Deploy-LabVault.ps1 (which first puts the server's TLS certificate in place and,
+#   after this playbook, initialises, unseals and configures OpenBao over its API).
+#
+# What OpenBao is:
+#   OpenBao is the open source fork of HashiCorp Vault (Linux Foundation, MPL 2.0). It stores
+#   secrets encrypted ("KV" engine), generates them, hands them out only to identities with a
+#   matching policy, logs every access (audit), and runs certificate authorities ("PKI" engine,
+#   including an ACME server like Let's Encrypt). Enterprise equivalent: HashiCorp Vault,
+#   CyberArk Conjur, or a cloud key vault (Azure Key Vault, AWS Secrets Manager).
+#
+# What this playbook does (the API configuration happens in Deploy-LabVault.ps1):
+#   - trust the new lab root CA on the VM
+#   - install OpenBao from its official package repository, with the signing key's
+#     fingerprint checked, at a pinned version
+#   - configuration (raft storage, TLS listener, audit log), log rotation, systemd service
+#   - nginx on port 80 for the public CA certificates and revocation lists only
+#
+# Idempotent: yes. The package is pinned and held; files change only when templates change.
+# A changed configuration is applied with "reload" (SIGHUP), which does NOT seal OpenBao.
+- name: OpenBao on the vault VM
+  hosts: vault_servers
+  become: true
+  vars:
+    # Pinned version: an upgrade is a deliberate change here (read the release notes first).
+    openbao_version: "2.7.1"
+    # Primary key fingerprint of OpenBao's release signing key (openbao.org/docs/install).
+    # The repository's key is downloaded and checked against it before apt trusts anything.
+    openbao_key_url: https://openbao.org/assets/openbao-gpg-pub-20240618.asc
+    openbao_key_fingerprint: 66D15FDD87287219C8E15478D200CD702853E6D0
+  tasks:
+    # Deploy-LabVault.ps1 creates the key and certificate BEFORE the package: the package would
+    # otherwise generate a self-signed certificate that nothing trusts.
+    - name: The TLS certificate for OpenBao is in place
+      ansible.builtin.stat:
+        path: "/opt/openbao/tls/{{ item }}"
+      loop: [tls.crt, tls.key]
+      register: openbao_tls_files
+
+    - name: Stop if it is not (run .\scripts\Deploy-LabVault.ps1, which creates it first)
+      ansible.builtin.assert:
+        that: openbao_tls_files.results | map(attribute='stat.exists') | min
+        fail_msg: /opt/openbao/tls/tls.crt or tls.key is missing. Run .\scripts\Deploy-LabVault.ps1.
+        quiet: true
+
+    # --- Trust the new lab root CA -----------------------------------------------------------
+    - name: Lab root CA 2026 in the VM's trust store
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+        mode: "0644"
+      notify: update CA bundle
+
+    - name: Apply the CA bundle now
+      ansible.builtin.meta: flush_handlers
+
+    # --- Package -----------------------------------------------------------------------------
+    - name: OpenBao package repository (deb822)
+      ansible.builtin.deb822_repository:
+        name: openbao
+        types: [deb]
+        uris: https://pkgs.openbao.org/deb/
+        suites: [stable]
+        components: [main]
+        signed_by: "{{ openbao_key_url }}"
+        install_python_debian: true
+      register: openbao_repo
+
+    # Trust on first use is not enough for a package source: the downloaded key must be the one
+    # OpenBao publishes. If not, the repository definition is removed again.
+    - name: Fingerprint of the repository's signing key
+      ansible.builtin.shell: >-
+        gpg --show-keys --with-colons /etc/apt/keyrings/openbao.*
+        | awk -F: '$1 == "fpr" { print $10 }'
+      register: openbao_key_fprs
+      changed_when: false
+
+    - name: The signing key is OpenBao's
+      block:
+        - name: Compare with the pinned fingerprint
+          ansible.builtin.assert:
+            that: openbao_key_fingerprint in openbao_key_fprs.stdout_lines
+            fail_msg: "Unexpected OpenBao signing key ({{ openbao_key_fprs.stdout_lines | join(', ') }}). Not trusting it."
+            quiet: true
+      rescue:
+        - name: Remove the repository again
+          ansible.builtin.deb822_repository:
+            name: openbao
+            state: absent
+        - name: Stop
+          ansible.builtin.fail:
+            msg: The OpenBao repository key did not match the pinned fingerprint; nothing was installed.
+
+    - name: Package lists refreshed after the repository changed
+      ansible.builtin.apt:
+        update_cache: true
+      when: openbao_repo is changed
+
+    - name: Exact package version for {{ openbao_version }}
+      ansible.builtin.shell: >-
+        apt-cache madison openbao | awk '{ print $3 }'
+        | grep -E '^{{ openbao_version | regex_escape }}(-|$)' | head -n 1
+      register: openbao_apt_version
+      changed_when: false
+      failed_when: openbao_apt_version.stdout == ''
+
+    - name: OpenBao installed at the pinned version
+      ansible.builtin.apt:
+        name: "openbao={{ openbao_apt_version.stdout }}"
+        state: present
+
+    # "hold": a general "apt upgrade" leaves OpenBao alone; upgrades happen here, on purpose.
+    - name: OpenBao held at that version
+      ansible.builtin.dpkg_selections:
+        name: openbao
+        selection: hold
+
+    # --- Files, owners, permissions ------------------------------------------------------------
+    # The package creates these with the right owners only when it generated its own certificate,
+    # so they are set explicitly. OpenBao runs as the system user "openbao".
+    - name: OpenBao folders
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: openbao
+        group: openbao
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /opt/openbao, mode: "0755" }
+        - { path: /opt/openbao/tls, mode: "0700" }
+        - { path: /opt/openbao/data, mode: "0700" }
+        - { path: /var/log/openbao, mode: "0750" }
+
+    - name: TLS files readable by OpenBao only (the key) and by everyone (the certificate)
+      ansible.builtin.file:
+        path: "/opt/openbao/tls/{{ item.name }}"
+        owner: openbao
+        group: openbao
+        mode: "{{ item.mode }}"
+      loop:
+        - { name: tls.key, mode: "0600" }
+        - { name: tls.crt, mode: "0644" }
+
+    - name: OpenBao configuration
+      ansible.builtin.template:
+        src: ../templates/openbao/openbao.hcl.j2
+        dest: /etc/openbao/openbao.hcl
+        owner: root
+        group: openbao
+        mode: "0640"
+      notify: reload openbao
+
+    - name: Log rotation for the audit log
+      ansible.builtin.template:
+        src: ../templates/openbao/logrotate.j2
+        dest: /etc/logrotate.d/openbao
+        mode: "0644"
+
+    # daemon_reload: with an existing certificate the package skips its own "systemctl
+    # daemon-reload", so systemd may not know the new unit yet.
+    - name: OpenBao enabled and started
+      ansible.builtin.systemd_service:
+        name: openbao
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # --- nginx on port 80: CA certificates and CRLs only --------------------------------------
+    - name: nginx installed
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Folder for the static PKI files
+      ansible.builtin.file:
+        path: /var/www/pki
+        state: directory
+        mode: "0755"
+
+    - name: Root CA certificate and CRL (DER, public)
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/pub/{{ item }}"
+        dest: "/var/www/pki/{{ item }}"
+        mode: "0644"
+      loop: [root-ca.crt, root-ca.crl]
+
+    - name: nginx site for the PKI files
+      ansible.builtin.template:
+        src: ../templates/openbao/nginx-pki.conf.j2
+        dest: /etc/nginx/sites-available/pki
+        mode: "0644"
+      notify: reload nginx
+
+    - name: PKI site enabled
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/pki
+        dest: /etc/nginx/sites-enabled/pki
+        state: link
+      notify: reload nginx
+
+    - name: Ubuntu's default site disabled
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    - name: Apply configuration changes now
+      ansible.builtin.meta: flush_handlers
+
+    # --- Checks -------------------------------------------------------------------------------
+    # sealedcode/uninitcode=200: OpenBao answers 503 while sealed and 501 before init; for this
+    # check any answer over valid TLS is enough.
+    - name: OpenBao answers over HTTPS with the lab certificate
+      ansible.builtin.uri:
+        url: "{{ lab_vault_url }}/v1/sys/health?sealedcode=200&uninitcode=200"
+        ca_path: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+      register: openbao_health
+      until: openbao_health.status == 200
+      retries: 12
+      delay: 5
+
+    - name: The root CRL is served on port 80
+      ansible.builtin.uri:
+        url: "http://vault.{{ lab_domain }}/pki/root-ca.crl"
+
+    - name: Nothing else is served on port 80 (the API is never reachable without TLS)
+      ansible.builtin.uri:
+        url: "http://vault.{{ lab_domain }}/v1/sys/health"
+        status_code: 404
+
+  handlers:
+    - name: update CA bundle
+      ansible.builtin.command: update-ca-certificates
+
+    - name: reload openbao
+      ansible.builtin.systemd_service:
+        name: openbao
+        state: reloaded
+
+    - name: reload nginx
+      ansible.builtin.shell: nginx -t && systemctl reload nginx

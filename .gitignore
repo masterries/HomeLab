@@ -1,0 +1,32 @@
+# .gitignore -- files Git must never track in this repository
+#
+# Infrastructure as code: the repository holds everything needed to rebuild the lab
+# (Vagrantfile, provisioning scripts, the OPNsense configuration template, Ansible playbooks),
+# but never secrets and never the local state of one particular PC. Both are created on the
+# Windows host when the lab is set up.
+
+# The lab's local secrets and SSH files (private keys!):
+#   ansible_ed25519, ansible_ed25519.pub  the lab SSH key pair (scripts/New-LabSshKey.ps1)
+#   ssh_config                            SSH client settings (scripts/Initialize-Lab.ps1)
+#   known_hosts                           the VMs' SSH host keys, recorded by ssh on first contact
+#                                         (accept-new); Initialize-Lab.ps1 resets it on each run
+#   pki/                                  the offline root CA: its key (encrypted), certificate,
+#                                         revocation list, issued certificates (New-LabRootCA.ps1)
+#   openbao/                              OpenBao's key shares and the PC's logins (DPAPI) and
+#                                         its snapshots (Deploy-LabVault.ps1, Backup-LabVault.ps1);
+#                                         openbao-retired-<date>/ after Remove-Lab.ps1 vault
+#   opnsense/                             the firewall's passwords and API key (DPAPI)
+#   ca/                                   the retired first lab CA (certificate only)
+# Everything that the services use at run time lives in OpenBao, not here.
+# Enterprise equivalent: secrets live in a secrets manager (HashiCorp Vault / OpenBao, Azure Key
+# Vault), and its own first key in an HSM or a cloud KMS - never as plain files next to the code.
+keys/
+# A whole keys\ folder moved aside (for example before a rebuild from scratch).
+keys-old-*/
+# Note: vendor/mdad is a git subtree. MDAD's own vendor/mdad/.gitignore ignores roles/galaxy/
+# (upstream installs the roles on demand); here they are tracked anyway, added with
+# "git add -f" by scripts/Update-LabMdad.ps1. Tracked files stay tracked whatever .gitignore says.
+
+# Vagrant's local state (machine IDs, Vagrant's own SSH keys for the VMs). Vagrant creates it
+# next to the Vagrantfile; here vagrant\.vagrant is a junction to drive G:.
+.vagrant/

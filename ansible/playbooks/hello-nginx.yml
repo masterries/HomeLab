@@ -1,0 +1,162 @@
+# playbooks/hello-nginx.yml -- demo deployment: nginx serves a Hello World page over HTTPS
+#
+# Where it runs:
+#   On ansible-control, as user "ansible". From there Ansible connects over SSH to the hosts in
+#   group "web" and uses sudo on them. The group is empty today: this was the lab's first demo,
+#   on a VM "server" that no longer exists (the Matrix stack and Keycloak have VMs of their
+#   own). To run it again, give it a VM of its own (README.md, section 6: "Add a VM" and "Run
+#   the hello-nginx demo on a VM of its own"), then start it from the Windows host with
+#     .\scripts\Invoke-LabPlaybook.ps1 hello-nginx.yml
+#
+# Result: open https://<host>.lab.internal in a browser on the Windows host (<host> = the
+#   inventory name of the VM in group "web", for example hello).
+#   How the request travels: the PC asks the firewall's DNS and gets the VM's published
+#   address in the LabHost network (for example 10.10.99.6, as in README section 6, "Add a
+#   VM"; split-horizon DNS: inside the lab
+#   the same name resolves to the VM's real address). The firewall (OPNsense) forwards ports
+#   80 and 443 on that address to the VM with DNAT (destination NAT; generated from
+#   "published" in config/lab.json; GUI: Firewall > NAT > Destination NAT).
+#   There is no certificate warning once Windows trusts the lab root CA
+#   (.\scripts\Install-LabRootCA.ps1, run once by you). The certificate comes from OpenBao's
+#   intermediate CA, role "web" (Deploy-LabVault.ps1), which allows the name hello.lab.internal:
+#   call the demo VM "hello", or add its name to that role. Invoke-LabPlaybook.ps1 hands the
+#   playbook a run token with the policy "ansible-web" (sign with that role, nothing else).
+#
+# Structure: one play. It installs nginx on the web servers, gets a certificate from OpenBao
+#   (tasks/openbao-certificate.yml) and publishes the page.
+#
+# Idempotent: yes. Each task describes a desired state ("nginx is installed", "this file has
+#   this content") and only acts if the host differs from it. A second run normally reports
+#   changed=0.
+#
+# Not on the Matrix VM: the Matrix stack (.\scripts\Deploy-LabMatrix.ps1) needs ports 80/443
+#   for its reverse proxy Traefik, so this playbook refuses to run on a host where the Matrix
+#   stack is installed (first task below). Publish the demo's VM in config\lab.json ("published",
+#   its own address with tcp 443 and 80) and rebuild the firewall
+#   (.\scripts\New-LabFirewall.ps1 -Rebuild).
+- name: nginx Hello World with HTTPS
+  hosts: web
+  # Every task in this play runs with sudo as root on the web server (apt, /etc, services),
+  # unless a task says otherwise. This play gathers facts (the default); the page below uses
+  # the server's IP address from them.
+  become: true
+  vars:
+    tls_dir: /etc/ssl/lab
+    # Only fully qualified names under lab.internal: the lab CA may not certify anything else
+    # (name constraints, and the OpenBao role "web"). Even a short name like "server" would be
+    # refused.
+    # The first entry becomes the certificate's common name (CN); all entries become Subject
+    # Alternative Names (SAN), which is what browsers actually check.
+    tls_names:
+      - "{{ inventory_hostname }}.{{ lab_domain }}"
+    # Renewal window: a certificate that expires within this time is reissued (see
+    # tasks/openbao-certificate.yml). To force a renewal now:
+    #   .\scripts\Invoke-LabPlaybook.ps1 hello-nginx.yml -e tls_renew_before=+400d
+    tls_renew_before: "+30d"
+  tasks:
+    # Two services cannot listen on the same port. MDAD installs every Matrix service as a
+    # systemd unit named matrix-*.service; Traefik's unit is the one that holds 80/443.
+    - name: Is the Matrix stack installed on this server?
+      ansible.builtin.stat:
+        path: /etc/systemd/system/matrix-traefik.service
+      register: matrix_traefik_unit
+
+    - name: hello-nginx and the Matrix stack cannot share ports 80/443
+      ansible.builtin.assert:
+        that: not matrix_traefik_unit.stat.exists
+        fail_msg: >-
+          The Matrix stack (Traefik) is installed on {{ inventory_hostname }} and uses ports 80/443.
+          hello-nginx would conflict with it, so it stops here. See the header of this playbook.
+        quiet: true
+
+    # cache_valid_time: refresh the package lists only if they are older than one hour, which
+    # keeps repeated runs fast.
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Directory for key and certificate
+      ansible.builtin.file:
+        path: "{{ tls_dir }}"
+        state: directory
+        mode: "0750"
+
+    # The key is generated on the server and never leaves it; the CA only signs the
+    # certificate signing request (CSR). This is the standard PKI pattern: whoever holds the
+    # private key can act as the server, so it is never copied around. The included task file
+    # makes key and CSR here, has OpenBao sign the CSR (from ansible-control, which holds the
+    # run token), and renews the certificate when it expires within tls_renew_before.
+    # notify: if the certificate changes, the handler "reload nginx" runs at the end of the
+    # play (see "handlers" below).
+    - name: Certificate from OpenBao
+      ansible.builtin.include_tasks: tasks/openbao-certificate.yml
+      vars:
+        openbao_cert_key: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+        openbao_cert_file: "{{ tls_dir }}/{{ inventory_hostname }}.crt"
+        openbao_cert_names: "{{ tls_names }}"
+        openbao_cert_role: web
+        openbao_cert_renew_before: "{{ tls_renew_before }}"
+        openbao_cert_notify: reload nginx
+
+    # The template module fills in the Jinja2 variables of the template on ansible-control and
+    # writes the result to the server. The src path is relative to this playbook's directory.
+    - name: Site configuration (HTTP redirects to HTTPS)
+      ansible.builtin.template:
+        src: ../templates/hello-nginx.conf.j2
+        dest: /etc/nginx/sites-available/hello
+        mode: "0644"
+      notify: reload nginx
+
+    # Debian/Ubuntu convention: site configurations live in sites-available, and a symbolic
+    # link in sites-enabled switches one on.
+    - name: Enable the site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/hello
+        dest: /etc/nginx/sites-enabled/hello
+        state: link
+      notify: reload nginx
+
+    # Ubuntu's default site also declares itself "default_server" on port 80; two default
+    # servers on the same port would make the nginx configuration invalid.
+    - name: Disable Ubuntu's default site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    # The variables in double curly braces are filled in by Ansible; ansible_facts comes from
+    # the facts gathered at the start of the play.
+    - name: Deploy the Hello World page
+      ansible.builtin.copy:
+        dest: /var/www/html/index.html
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="en">
+          <head><meta charset="utf-8"><title>Hello World</title></head>
+          <body>
+            <h1>Hello World</h1>
+            <p>Served by <b>{{ inventory_hostname }}</b>
+               ({{ ansible_facts['default_ipv4']['address'] }}) over HTTPS, deployed with
+               Ansible from ansible-control.</p>
+          </body>
+          </html>
+
+    - name: nginx is running and starts at boot
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+  # Handlers run only when a task that notifies them reported "changed", and only once at the
+  # end of the play, even if several tasks notified them. So nginx is reloaded only when its
+  # certificate or configuration actually changed.
+  handlers:
+    # "nginx -t" checks the configuration first; only if it is valid does the reload happen.
+    # A broken configuration is therefore never loaded: nginx keeps serving with the old one
+    # and the play fails, so you notice.
+    # The shell module is needed for "&&"; the command module does not use a shell.
+    - name: reload nginx
+      ansible.builtin.shell: nginx -t && systemctl reload nginx

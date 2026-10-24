@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# bin/openbao-run -- run one command on ansible-control with a short-lived OpenBao token
+#
+# Where it runs:
+#   On ansible-control, as user "ansible", started over SSH by the PC's scripts
+#   (Invoke-LabPlaybook.ps1, Deploy-LabMatrix.ps1, through Invoke-LabRunToken in LabSecrets.ps1):
+#     <wrapping token on stdin> | openbao-run '<shell command>'
+#   Not meant to be started by hand.
+#
+# Why: the playbooks read the lab's secrets from OpenBao at run time and keep them only in
+# memory. For that they need a token, and that token should exist only while they run, be valid
+# only from this machine, and allow only what that playbook needs. The PC creates one per run
+# (token role "ansible-run": 2 hours at most, bound to ansible-control's address, policies
+# ansible-keycloak and/or ansible-matrix) and hands it over WRAPPED:
+#
+# RESPONSE WRAPPING
+#   OpenBao does not return the new token itself, but a single-use "wrapping token" that is valid
+#   for two minutes and can do exactly one thing: be exchanged for the real token
+#   (sys/wrapping/unwrap). The real token never travels between the machines. If someone
+#   intercepted the wrapping token and used it first, this script's unwrap would fail - the theft
+#   would not go unnoticed. Enterprise equivalent: the same pattern in Vault/OpenBao ("secret
+#   zero" delivery by a CI system or an orchestrator), or Vault Agent with AppRole auto-auth.
+#
+# What it does:
+#   1. Reads the wrapping token from stdin (one line). Only token characters are kept, which also
+#      drops the CR and byte order mark Windows PowerShell may add when it pipes text.
+#   2. Unwraps it with curl over HTTPS, checking OpenBao's certificate against the lab root CA.
+#      Tokens are passed to curl on stdin ("-H @-"), never as command-line arguments: the command
+#      lines of running processes are visible to every user of the machine (ps, /proc).
+#   3. Exports VAULT_ADDR, VAULT_CACERT and VAULT_TOKEN - the standard variable names that the
+#      bao/vault CLI, Ansible's community.hashi_vault and the lab's playbooks
+#      (playbooks/tasks/openbao-secrets.yml) understand - and runs the command with stdin from
+#      /dev/null.
+#   4. On exit, also after a failure or Ctrl+C: revokes the token (auth/token/revoke-self), so
+#      it is useless even before its 2 hours are over, and removes Ansible's temporary folder
+#      (in RAM, see ANSIBLE_LOCAL_TEMP below).
+#
+# Environment: VAULT_ADDR (set by the PC from config/lab.json); VAULT_CACERT defaults to
+# ~/lab-pki/root-ca.crt (copied there by Invoke-LabPlaybook.ps1).
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: <wrapping token on stdin> | $0 '<shell command>'" >&2
+  exit 2
+fi
+: "${VAULT_ADDR:?VAULT_ADDR is not set}"
+export VAULT_ADDR
+export VAULT_CACERT="${VAULT_CACERT:-$HOME/lab-pki/root-ca.crt}"
+
+IFS= read -r wrapping_token || true
+wrapping_token="$(printf '%s' "$wrapping_token" | tr -cd 'A-Za-z0-9._-')"
+if [[ -z "$wrapping_token" ]]; then
+  echo "openbao-run: no wrapping token on stdin" >&2
+  exit 2
+fi
+
+# The JSON answer goes through python3 (always present on Ubuntu; jq is not installed).
+if ! response="$(printf 'X-Vault-Token: %s\n' "$wrapping_token" | curl -sS --fail-with-body --max-time 30 \
+      --cacert "$VAULT_CACERT" -H @- -X POST "$VAULT_ADDR/v1/sys/wrapping/unwrap")"; then
+  echo "openbao-run: unwrapping the run token failed (expired, already used, or OpenBao sealed?): $response" >&2
+  exit 1
+fi
+unset wrapping_token
+VAULT_TOKEN="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["auth"]["client_token"])' <<<"$response")"
+unset response
+export VAULT_TOKEN
+
+# Ansible's local temporary files (templates rendered before they are copied, for example the
+# env files with Keycloak's passwords) go to a private folder in RAM (tmpfs: the session's
+# XDG_RUNTIME_DIR, or /dev/shm), not to ~/.ansible/tmp on the disk, and the folder is removed at
+# the end. Module arguments do not need a file at all (pipelining, ansible.cfg).
+ANSIBLE_LOCAL_TEMP="$(mktemp -d "${XDG_RUNTIME_DIR:-/dev/shm}/ansible-local.XXXXXX")"
+export ANSIBLE_LOCAL_TEMP
+
+cleanup() {
+  printf 'X-Vault-Token: %s\n' "$VAULT_TOKEN" | curl -sS --max-time 15 --cacert "$VAULT_CACERT" \
+    -H @- -X POST "$VAULT_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
+  rm -rf "$ANSIBLE_LOCAL_TEMP"
+}
+trap cleanup EXIT
+
+# "bash -c": the PC passes one command line (for example "cd ~/mdad && ansible-playbook ...").
+bash -c "$1" </dev/null

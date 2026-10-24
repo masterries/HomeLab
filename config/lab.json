@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "lab.json - the main source of the lab's data: domain, networks, the lab VMs and what is",
+    "published to your PC. Read by vagrant/Vagrantfile (Ruby JSON.parse) to create the lab VMs, by",
+    "scripts/New-LabFirewall.ps1 (ConvertFrom-Json) to render the OPNsense configuration (DHCP",
+    "reservations, DNS names, virtual IPs, port forwards), by scripts/Initialize-Lab.ps1 (firewall",
+    "address, domain), by scripts/Remove-Lab.ps1 (vms: which leftover Hyper-V folders it may",
+    "delete) and by scripts/Deploy-LabKeycloak.ps1 and Deploy-LabMatrix.ps1 (domain: the URLs of",
+    "their checks and messages).",
+    "Copies kept by hand, to change together with this file: the PC address, DNS server and NRPT",
+    "namespace in scripts/Install-LabHostNetwork.ps1; the domain in lab_domain",
+    "(ansible/inventory/group_vars/all.yml) and in matrix_domain and the Matrix inventory's host",
+    "name (ansible/matrix/inventory/); the matrix entry's published address as",
+    "livekit_server_config_rtc_node_ip in ansible/matrix/inventory/host_vars/.../vars.yml.",
+    "",
+    "vms: the Ubuntu VMs behind the firewall (built by Vagrant). New VMs are created by",
+    "Initialize-Lab.ps1; the firewall needs a rebuild (New-LabFirewall.ps1 -Rebuild) to learn their",
+    "DHCP reservation and DNS name.",
+    "  mac: 12 hex digits without separators, as Hyper-V expects; 02 marks a locally administered",
+    "       address. By convention the last four bytes are the VM's IP in hex (0a0a0a1e = 10.10.10.30).",
+    "  cpus/memory (MB): the VM's size in Hyper-V. A change is applied with \"vagrant reload <vm>\" in",
+    "       the vagrant folder (the VM restarts).",
+    "  checkpoints (default true): false disables Hyper-V checkpoints. A checkpoint of a running VM",
+    "       saves its RAM to disk; for vault that RAM holds the unsealed OpenBao keys.",
+    "  consoleAutologin (default true): false keeps the normal login prompt on the Hyper-V console",
+    "       (no password-less root shell for whoever opens the console of vault).",
+    "",
+    "published: what your PC may reach in the lab, per VM. Your PC never reaches a lab VM directly;",
+    "it reaches a published address on the firewall's HOST network, and the firewall forwards the",
+    "listed ports to the VM (destination NAT). One address per VM, because two VMs may need the same",
+    "port (443). Each name becomes <name>.lab.internal (\"@\" is lab.internal itself, as in DNS zone",
+    "files) with two addresses: your PC gets the published address, the lab VMs get the VM's own",
+    "address (split-horizon DNS). Applied by New-LabFirewall.ps1 -Rebuild. Its final DNS check",
+    "resolves the first name of every entry from the PC.",
+    "  matrix:   matrix = Synapse (Matrix homeserver), Matrix Authentication Service (MAS) and the",
+    "            LiveKit signalling/JWT service; element = Element Web; @ = lab.internal, which serves",
+    "            /.well-known/matrix/... for the user IDs @name:lab.internal. 443/80 go to Traefik,",
+    "            7881/tcp and 7882/udp are LiveKit's media ports (voice/video calls). LiveKit",
+    "            announces the address itself (livekit_server_config_rtc_node_ip in vars.yml):",
+    "            after changing it here, change it there too and run Deploy-LabMatrix.ps1.",
+    "  keycloak: the identity provider (single sign-on); MAS sends browsers there to log in.",
+    "  vault:    OpenBao, the secrets manager and certificate authority (PKI); its web UI and API",
+    "            on 8200 (OpenBao's standard port), e.g. https://vault.lab.internal:8200/ui/. Port 80",
+    "            serves only CA certificates and revocation lists (CRLs): certificates name these",
+    "            plain-HTTP URLs, and clients such as Windows fetch them to check revocation.",
+    "For HTTPS without a warning, every name must also be on the service's TLS certificate (issued by",
+    "the lab CA in ansible/playbooks/matrix-prepare.yml and keycloak.yml)."
+  ],
+  "domain": "lab.internal",
+  "labNetwork": "10.10.10.0/24",
+  "hostNetwork": "10.10.99.0/24",
+  "firewall": {
+    "lanIp": "10.10.10.1",
+    "hostIp": "10.10.99.2",
+    "pcIp": "10.10.99.1"
+  },
+  "vms": [
+    { "name": "ansible-control", "mac": "02000A0A0A0A", "ip": "10.10.10.10", "cpus": 2, "memory": 2048 },
+    { "name": "matrix", "mac": "02000A0A0A1E", "ip": "10.10.10.30", "cpus": 4, "memory": 8192 },
+    { "name": "keycloak", "mac": "02000A0A0A28", "ip": "10.10.10.40", "cpus": 2, "memory": 4096 },
+    { "name": "vault", "mac": "02000A0A0A32", "ip": "10.10.10.50", "cpus": 2, "memory": 2048,
+      "checkpoints": false, "consoleAutologin": false }
+  ],
+  "published": [
+    {
+      "vm": "matrix",
+      "address": "10.10.99.3",
+      "names": ["matrix", "element", "@"],
+      "ports": [
+        { "protocol": "tcp", "port": 443, "description": "HTTPS (Traefik: Synapse, MAS, Element, LiveKit signalling)" },
+        { "protocol": "tcp", "port": 80, "description": "HTTP (Traefik redirects to HTTPS)" },
+        { "protocol": "udp", "port": 7882, "description": "LiveKit media (WebRTC over UDP)" },
+        { "protocol": "tcp", "port": 7881, "description": "LiveKit media (WebRTC over TCP, fallback)" }
+      ]
+    },
+    {
+      "vm": "keycloak",
+      "address": "10.10.99.4",
+      "names": ["keycloak"],
+      "ports": [
+        { "protocol": "tcp", "port": 443, "description": "HTTPS (Keycloak login pages and OIDC endpoints)" }
+      ]
+    },
+    {
+      "vm": "vault",
+      "address": "10.10.99.5",
+      "names": ["vault"],
+      "ports": [
+        { "protocol": "tcp", "port": 8200, "description": "HTTPS (OpenBao API, web UI and ACME directory)" },
+        { "protocol": "tcp", "port": 80, "description": "HTTP: CA certificates and revocation lists only (nginx allow-list)" }
+      ]
+    }
+  ]
+}

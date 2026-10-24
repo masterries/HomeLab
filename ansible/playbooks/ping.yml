@@ -1,0 +1,35 @@
+# playbooks/ping.yml -- smoke test: can Ansible reach and manage every lab machine?
+#
+# Where it runs:
+#   On ansible-control, as user "ansible". Started from the Windows host with
+#     .\scripts\Invoke-LabPlaybook.ps1 ping.yml
+#
+# What it checks for every host in the inventory (group "all"):
+#   - the DNS name resolves (dnsmasq on the firewall) and SSH login with the lab key works;
+#     ansible-control itself is reached locally, without SSH (ansible_connection=local)
+#   - Python is available on the host (Ansible copies its modules there and runs them)
+#   - sudo works without a password prompt (needed by every playbook that uses "become")
+# Run it first after building or rebuilding the lab: if this fails, every other playbook
+# would fail too, with a less obvious error.
+#
+# Idempotent: yes. It only reads and changes nothing, so it can run at any time.
+- name: Lab machines are reachable
+  hosts: all
+  # Facts are the system information Ansible collects at the start of a play (OS, IPs, ...).
+  # This test does not need them, so skipping them keeps it fast and minimal.
+  gather_facts: false
+  tasks:
+    # Not an ICMP ping: the module logs in, runs Python on the host and answers "pong".
+    - name: Connection and Python
+      ansible.builtin.ping:
+
+    # "become" = privilege escalation, by default with sudo to root. Without a password
+    # supplied, this only succeeds because user "ansible" may use sudo without one.
+    # LAB SHORTCUT: passwordless sudo. Enterprise equivalent: sudo with a password or
+    # restricted sudo rules, often granted through a privileged access management system.
+    - name: sudo works
+      ansible.builtin.command: whoami
+      become: true
+      # The command module always reports "changed", because Ansible cannot know what an
+      # arbitrary command did. This one only reads, so mark it as never changing anything.
+      changed_when: false

@@ -1,0 +1,38 @@
+# Managed by Ansible (playbooks/hello-nginx.yml); manual changes here will be lost.
+#
+# Source: ansible/templates/hello-nginx.conf.j2 in the lab repository, a Jinja2 template.
+# Ansible fills in its variables (tls_dir, inventory_hostname) on ansible-control and writes
+# the result to /etc/nginx/sites-available/hello on every host in group "web". nginx loads it
+# through the symbolic link /etc/nginx/sites-enabled/hello. After a change, the playbook's
+# handler "reload nginx" checks the configuration (nginx -t) and reloads nginx.
+#
+# Requests from the Windows host arrive here through the firewall's DNAT. Only the
+# destination address was rewritten, so nginx sees the PC's own address (10.10.99.1) as the
+# client. Replies go back through the firewall, the server's default gateway.
+
+# Port 80 (plain HTTP): redirect every request permanently (301) to HTTPS.
+# default_server: this block answers every request on the port that no other server block
+# claims by name (here all of them, as this is the only site); "_" is only a placeholder that
+# matches no real name. $host keeps the name the browser asked for.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+# Port 443 (HTTPS), for IPv4 and IPv6.
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+
+    # Certificate issued by the lab CA on ansible-control and copied here; the private key
+    # was generated on this server and has never left it.
+    ssl_certificate     {{ tls_dir }}/{{ inventory_hostname }}.crt;
+    ssl_certificate_key {{ tls_dir }}/{{ inventory_hostname }}.key;
+
+    # The Hello World page written by the playbook.
+    root /var/www/html;
+    index index.html;
+}

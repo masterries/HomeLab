@@ -1,0 +1,27 @@
+# matrix/inventory/hosts -- the inventory for matrix-docker-ansible-deploy (MDAD)
+#
+# What it is:
+#   MDAD (https://github.com/spantaleev/matrix-docker-ansible-deploy) is a large, community
+#   maintained Ansible playbook that installs a complete Matrix server: Synapse, PostgreSQL,
+#   Traefik, Element Web, LiveKit for calls and dozens of optional services, all as Docker
+#   containers managed by systemd. This lab does not copy that playbook into the repository; it
+#   pins one exact version (a git commit) and gives it OUR configuration: this inventory and
+#   host_vars/matrix.lab.internal/vars.yml. That is the usual way to consume a third-party
+#   playbook: upstream code stays upstream, your configuration stays in your repository.
+#
+# Where it is used:
+#   ansible/playbooks/matrix-prepare.yml copies this folder into ~/mdad/inventory/ on
+#   ansible-control (MDAD expects its inventory there, and ignores that folder in git).
+#   scripts/Deploy-LabMatrix.ps1 then runs MDAD there. Edit the files here, not on the VM.
+#
+# The group name "matrix_servers" is what MDAD's playbook targets. The host's inventory name
+# matrix.lab.internal follows MDAD's convention (the homeserver's FQDN); it selects the folder
+# host_vars/matrix.lab.internal/. The machine is the lab VM "matrix", reached by its DNS name
+# (ansible_host; inside the lab it resolves to the VM's own address 10.10.10.30), as user
+# "ansible" with the lab key (~/.ssh/id_ed25519 on ansible-control, ssh's default key file) and
+# sudo (become) to root.
+#
+# Note: keep comments on their own lines (see ansible/inventory/hosts.ini).
+
+[matrix_servers]
+matrix.lab.internal ansible_host=matrix.lab.internal ansible_user=ansible ansible_become=true ansible_become_user=root

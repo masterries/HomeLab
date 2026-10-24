@@ -1,0 +1,10 @@
+# .gitattributes - keeps every text file of this repository on LF line endings.
+#
+# Why: Git for Windows converts LF to CRLF on checkout by default (core.autocrlf=true). The
+# shell scripts in provision\, the Ansible files and the firewall's dnsmasq drop-in
+# (opnsense\dnsmasq.conf.d\) are copied to the Linux VMs or the FreeBSD firewall, where a
+# trailing "\r" breaks them (bash and dnsmasq choke on it). "text=auto eol=lf" lets Git
+# detect text files and always check them out with LF, whatever the user's autocrlf setting
+# is.
+# Windows PowerShell 5.1 runs .ps1 files with LF endings without problems, so they stay LF too.
+* text=auto eol=lf

@@ -1,0 +1,134 @@
+# playbooks/tasks/openbao-certificate.yml -- a TLS server certificate from OpenBao's
+# intermediate CA, with the private key made on the server that uses it
+#
+# Where it is used:
+#   Included by keycloak.yml (Keycloak) and hello-nginx.yml (the nginx demo), in a play that
+#   runs on that server with become: true. The signing request goes to OpenBao from
+#   ansible-control, which holds the run token (bin/openbao-run).
+#
+# The usual way to get a certificate from a CA without moving the private key:
+#   1. make the key on the server that uses it,
+#   2. make a certificate signing request (CSR) from it: names and public key, signed with the
+#      key to prove possession,
+#   3. send the CSR to the CA (OpenBao: pki_int/sign/<role>), which checks it against the role
+#      (which names, which key type, server use only) and returns the certificate.
+# On renewal a NEW key is made next to the current one (<key>.new); key and certificate replace
+# the current pair together only once the new certificate is there, so the service never sees a
+# key that does not match its certificate. Enterprise equivalent: the same flow with ACME or a
+# certificate agent on the server (cert-manager, Vault Agent, certmonger).
+#
+# Input (variables of the include):
+#   openbao_cert_key            path of the private key on the server
+#   openbao_cert_file           path of the certificate on the server (certificate followed by
+#                               the intermediate CA: the chain clients need, without the root)
+#   openbao_cert_names          DNS names; the first one is also the common name
+#   openbao_cert_role           OpenBao PKI role (Deploy-LabVault.ps1), e.g. keycloak
+#   openbao_cert_notify         handler to notify when the certificate changed
+#   openbao_cert_key_group      group of the key file (default root), and
+#   openbao_cert_key_mode       its mode (default 0600)
+#   openbao_cert_key_format     key format (default auto_ignore; pkcs8 for Java servers)
+#   openbao_cert_renew_before   renewal window (default +30d). Force a renewal now with
+#                               -e openbao_cert_renew_before=+400d
+#
+# Renewal happens when the certificate is missing, expires within the window, or was not issued
+# by the current issuing CA (its "authority key identifier" names the CA key that signed it).
+# The last case also moves a certificate of another CA (e.g. the retired first lab CA) over.
+- name: Current certificate
+  community.crypto.x509_certificate_info:
+    path: "{{ openbao_cert_file }}"
+    valid_at:
+      renewal: "{{ openbao_cert_renew_before | default('+30d') }}"
+  register: openbao_cert_current
+  failed_when: false
+
+# The CA certificate is public: OpenBao serves it without a token.
+- name: OpenBao's issuing CA certificate
+  ansible.builtin.uri:
+    url: "{{ lab_vault_url }}/v1/pki_int/ca/pem"
+    ca_path: "{{ lab_pki_dir }}/root-ca.crt"
+    return_content: true
+  delegate_to: ansible-control
+  become: false
+  register: openbao_cert_issuing_ca
+  # A read: it runs under --check too (uri would be skipped, and the next task needs it).
+  check_mode: false
+
+- name: Details of the issuing CA certificate
+  community.crypto.x509_certificate_info:
+    content: "{{ openbao_cert_issuing_ca.content }}"
+  register: openbao_cert_issuing_ca_info
+
+- name: Is a new certificate needed?
+  ansible.builtin.set_fact:
+    openbao_cert_needed: >-
+      {{ openbao_cert_current.valid_at is not defined
+         or not openbao_cert_current.valid_at.renewal
+         or openbao_cert_current.authority_key_identifier | default('') != openbao_cert_issuing_ca_info.subject_key_identifier }}
+
+- name: New certificate from OpenBao
+  when: openbao_cert_needed and not ansible_check_mode
+  block:
+    - name: New private key (next to the current one)
+      community.crypto.openssl_privatekey:
+        path: "{{ openbao_cert_key }}.new"
+        type: ECC
+        curve: secp256r1
+        format: "{{ openbao_cert_key_format | default('auto_ignore') }}"
+        owner: root
+        group: "{{ openbao_cert_key_group | default('root') }}"
+        mode: "{{ openbao_cert_key_mode | default('0600') }}"
+
+    - name: Certificate signing request for the new key
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: "{{ openbao_cert_key }}.new"
+        common_name: "{{ openbao_cert_names[0] }}"
+        subject_alt_name: "{{ openbao_cert_names | map('regex_replace', '^', 'DNS:') | list }}"
+      register: openbao_cert_csr
+
+    # From ansible-control, which holds the run token (no_log: the token is in the headers).
+    - name: OpenBao signs the request
+      ansible.builtin.uri:
+        url: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}/v1/pki_int/sign/{{ openbao_cert_role }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+        ca_path: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+        body_format: json
+        body:
+          csr: "{{ openbao_cert_csr.csr }}"
+          common_name: "{{ openbao_cert_names[0] }}"
+          alt_names: "{{ openbao_cert_names[1:] | join(',') }}"
+          format: pem
+      delegate_to: ansible-control
+      become: false
+      register: openbao_cert_signed
+      failed_when: false
+      no_log: true
+
+    - name: OpenBao issued the certificate
+      ansible.builtin.assert:
+        that: openbao_cert_signed.status == 200
+        fail_msg: >-
+          OpenBao did not sign the certificate for {{ openbao_cert_names | join(', ') }}
+          (role {{ openbao_cert_role }}, HTTP {{ openbao_cert_signed.status }}):
+          {{ openbao_cert_signed.json.errors | default([]) | join(' ') }}
+          {{ 'No run token? Start the playbook with .\scripts\Invoke-LabPlaybook.ps1.' if openbao_cert_signed.status in [400, 403] else '' }}
+        quiet: true
+
+    # The server sends its certificate followed by the issuing (intermediate) CA, so clients
+    # that only know the root can build the chain. The root itself is not sent.
+    - name: New certificate with the intermediate CA
+      ansible.builtin.copy:
+        dest: "{{ openbao_cert_file }}.new"
+        content: "{{ openbao_cert_signed.json.data.certificate }}\n{{ openbao_cert_signed.json.data.issuing_ca }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # "mv" within one file system replaces each file in one step.
+    - name: New key and certificate take over
+      ansible.builtin.shell: >-
+        mv -f {{ openbao_cert_key }}.new {{ openbao_cert_key }}
+        && mv -f {{ openbao_cert_file }}.new {{ openbao_cert_file }}
+      changed_when: true
+      notify: "{{ openbao_cert_notify }}"

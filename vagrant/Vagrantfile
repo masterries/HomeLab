@@ -1,0 +1,227 @@
+# Vagrantfile - the lab VMs behind the firewall (Ubuntu 24.04 LTS on Hyper-V)
+#
+# WHAT THIS IS
+#   Vagrant reads this file (it is Ruby code) on the Windows host every time a vagrant command
+#   runs. It declares the lab's Linux VMs: base image ("box"), CPUs and RAM, which Hyper-V switch
+#   each VM is connected to, and which provisioning scripts turn a fresh VM into its role.
+#   Describing machines in versioned text files instead of clicking them together in a GUI is
+#   called "infrastructure as code": the lab can be destroyed and rebuilt identically at any
+#   time, and every change is visible in the repository.
+#
+# WHERE IT RUNS
+#   On the Windows 10 host, read by vagrant.exe in an elevated PowerShell (the Hyper-V provider
+#   needs administrator rights). The provisioning scripts referenced below are copied into the
+#   VMs and run there.
+#
+# THE MACHINES
+#   firewall         NOT in this file: an OPNsense VM (open source firewall with web GUI), built
+#                    by scripts/New-LabFirewall.ps1 because there is no Vagrant box for OPNsense
+#                    on Hyper-V. The only way from your PC into the lab: DNS for *.lab.internal,
+#                    SSH jump host (bastion), port forwards to the published VMs, plus router/NAT
+#                    to the internet and DHCP for the lab.
+#   ansible-control  Ansible control node; all deployments are run from here
+#   matrix           The Matrix stack: Synapse, MAS, Element Web, LiveKit (Docker, deployed with
+#                    matrix-docker-ansible-deploy by scripts/Deploy-LabMatrix.ps1)
+#   keycloak         Keycloak, the identity provider (single sign-on) the Matrix logins go to
+#   The names, MACs, IPs and sizes of these VMs come from config/lab.json, which the firewall
+#   build reads as well (DHCP reservations, DNS names, published addresses and ports).
+#
+# NETWORK OVERVIEW
+#
+#                              Internet
+#                                 |
+#                 Windows NAT (Internet Connection Sharing)
+#                                 |
+#      Hyper-V "Default Switch"  (DHCP from Windows; new subnet after each Windows reboot)
+#                                 |
+#                             hn0 (WAN)
+#                           +----------+   hn2 (HOST) 10.10.99.2 management (GUI, SSH, DNS)
+#                           | firewall |              10.10.99.3 published: matrix
+#                           | OPNsense |              10.10.99.4 published: keycloak
+#                           +----------+              (switch "LabHost", shared with PC 10.10.99.1)
+#                             hn1 (LAN) 10.10.10.1
+#                                 |
+#      Hyper-V "LabNet"  (private switch: VMs only, your PC has no adapter on it)
+#            |                          |                          |
+#   ansible-control 10.10.10.10   matrix 10.10.10.30        keycloak 10.10.10.40
+#
+# Your PC does not reach the lab VMs directly, only through the firewall. From the PC only these
+# are open: SSH, the web GUI and DNS on 10.10.99.2, and the ports listed under "published" in
+# config/lab.json on each published address, which the firewall forwards (DNAT) to the VM. This
+# mirrors an enterprise perimeter: one hardened entry point, everything else in an internal
+# network. Names: <name>.lab.internal. The firewall's DNS answers depending on who asks
+# (split-horizon DNS): for published names your PC gets the published address, the lab the
+# VM's own IP.
+#
+# HOW TO USE IT (elevated PowerShell, in the project folder)
+#   .\scripts\Install-LabHostNetwork.ps1   once: LabHost network and DNS rule on your PC
+#   .\scripts\Initialize-Lab.ps1           build/update everything, in the right order
+#   .\scripts\Connect-Lab.ps1              SSH as "ansible" (default: ansible-control;
+#                                          also matrix, keycloak, firewall)
+#   .\scripts\Remove-Lab.ps1               delete all VMs (or: Remove-Lab.ps1 matrix)
+# Running vagrant directly in this folder works for status, ssh, halt, up, reload, provision and
+# destroy of these VMs. The firewall must be running: the VMs get their address from its
+# DHCP, and Vagrant reaches them through it (see proxy_command below).
+#
+# IDEMPOTENCY
+#   This file only declares the desired state; "vagrant up" on a VM that is already running
+#   changes nothing. Provisioners run on the first "vagrant up" of a new VM and again on
+#   "vagrant provision" (or "up/reload --provision"). Every provisioning script of this project
+#   is idempotent: it can run any number of times and always leaves the same result.
+#
+# STORAGE
+#   Boxes, VM disks and Hyper-V files live on drive G: to keep C: free. Initialize-Lab.ps1 sets
+#   VAGRANT_HOME=G:\Vagrant\home, makes vagrant\.vagrant a junction to G: and moves the Hyper-V
+#   configuration there with Move-VMStorage.
+
+require "json"
+
+# ---------------------------------------------------------------------------------------------
+# Paths and constants (__dir__ is the folder of this Vagrantfile, so the paths do not depend on
+# the current directory)
+# ---------------------------------------------------------------------------------------------
+
+# Key pair from scripts/New-LabSshKey.ps1.
+# LAB-ONLY SHORTCUT: one key without a passphrase is shared by the whole lab (your PC,
+# ansible-control, the "ansible" user on every VM). In an enterprise every person and every
+# automation system has its own key, ideally short-lived SSH certificates issued by an SSH CA,
+# or keys kept in a secrets manager or on a hardware token.
+LAB_KEY = File.expand_path("../keys/ansible_ed25519", __dir__)
+# Written by Initialize-Lab.ps1; contains the jump host "firewall" (used by proxy_command below).
+# It is used without quotes in the proxy command below, so the path must not contain spaces.
+SSH_CONFIG = File.expand_path("../keys/ssh_config", __dir__)
+# Provisioning scripts shared by all lab VMs
+PROVISION_DIR = File.expand_path("../provision", __dir__)
+# Upload folder inside the VMs. The file provisioner copies files as the SSH user "vagrant",
+# which cannot write to other users' home directories. The shell scripts (running as root)
+# install the files from there to their final place and delete the uploaded copies.
+KEY_STAGING = "/home/vagrant/ansible-keys"
+
+# The lab VMs from config/lab.json, e.g.
+#   { "matrix" => { mac: "02000A0A0A1E", ip: "10.10.10.30", cpus: 4, memory: 8192 } }
+# (memory in MB; without cpus/memory in lab.json a VM gets 2 vCPUs and 2048 MB).
+# The fixed MAC addresses make sure the firewall always gives each VM the same IP and name: a
+# DHCP reservation on the firewall maps MAC -> IP and name. DHCP reservations are common in
+# enterprise networks too: addresses stay stable, but they are managed in one central place
+# instead of being typed into every machine.
+LAB = JSON.parse(File.read(File.expand_path("../config/lab.json", __dir__)))
+LAB_VMS = LAB["vms"].map { |vm|
+  [vm["name"], { mac: vm["mac"], ip: vm["ip"], cpus: vm["cpus"] || 2, memory: vm["memory"] || 2048,
+                 # "false" in lab.json only for VMs that hold keys in RAM (vault): see below.
+                 checkpoints: vm.fetch("checkpoints", true),
+                 console_autologin: vm.fetch("consoleAutologin", true) }]
+}.to_h
+LAB_SWITCH = "LabNet"
+
+# Defines one VM with the settings that all lab VMs share; a block passed to lab_vm adds the
+# machine-specific parts (provisioners).
+#   switch:  Hyper-V switch for the network adapter. The Hyper-V provider cannot create
+#            networks; from a "public_network" it only uses "bridge" to pick the switch.
+#   mac:     fixed MAC for that adapter
+#   checkpoints: false disables Hyper-V checkpoints for the VM (CheckpointType Disabled). A
+#            checkpoint of a running VM writes its RAM to disk (G:, unencrypted); for vault that
+#            RAM holds OpenBao's unsealed keys. Applied by Vagrant on every start of the VM.
+def lab_vm(config, name, switch:, mac:, cpus: 2, memory: 2048, checkpoints: true)
+  config.vm.define name do |m|
+    m.vm.hostname = name
+    m.vm.network "public_network", bridge: switch
+    m.vm.provider "hyperv" do |h|
+      # Name of the VM in Hyper-V Manager
+      h.vmname = name
+      h.cpus = cpus
+      # RAM in MB; maxmemory = memory, so the VM never takes more host RAM than this
+      h.memory = memory
+      h.maxmemory = memory
+      h.mac = mac
+      # Linked clone: instead of copying the whole disk of the box, Vagrant creates a small
+      # differencing disk that only stores the changes against the box's disk (its parent,
+      # under VAGRANT_HOME). Faster to create and much smaller; the box must stay installed
+      # as long as VMs are based on it.
+      h.linked_clone = true
+      # No nested virtualization (no hypervisor inside the VMs needed)
+      h.enable_virtualization_extensions = false
+      h.enable_checkpoints = checkpoints
+    end
+    yield m if block_given?
+  end
+end
+
+Vagrant.configure("2") do |config|
+  # Settings on "config" itself (outside config.vm.define) apply to every VM.
+  # Provisioner order: Vagrant runs the outer provisioners first, in the order written here,
+  # and then the machine-specific ones from the lab_vm blocks further down.
+
+  # bento/ubuntu-24.04 offers no Hyper-V image, this box does.
+  config.vm.box = "gusztavvargadr/ubuntu-server-2404-lts"
+  # Up to 10 minutes (default: 5) for the VM to boot, report its IP and accept SSH
+  config.vm.boot_timeout = 600
+
+  # An SMB synced folder would interactively ask for Windows credentials. Files reach the VMs
+  # through the file provisioner instead; the Ansible project is copied to ansible-control by
+  # scripts/Invoke-LabPlaybook.ps1.
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # --- Provisioning shared by all VMs (runs first) -------------------------------------------
+  # Every provisioner has a name, so a single step can be re-run on its own, for example:
+  #   vagrant provision matrix --provision-with zsh
+  # "file" provisioners copy files as the SSH user "vagrant"; "shell" provisioners upload a
+  # script and run it as root (via sudo).
+  #
+  # All VMs: user "ansible", allowed to log in with the lab key. Ansible connects to every VM
+  # as this user; "vagrant" stays Vagrant's own account.
+  # If the key does not exist yet, the upload is skipped and bootstrap-ansible-user.sh aborts
+  # with a hint (unless an earlier run already installed a key); other vagrant commands
+  # (status, halt, destroy) still work.
+  if File.exist?("#{LAB_KEY}.pub")
+    config.vm.provision "lab-key-pub", type: "file",
+      source: "#{LAB_KEY}.pub", destination: "#{KEY_STAGING}/ansible_ed25519.pub"
+  end
+  config.vm.provision "ansible-user", type: "shell",
+    path: File.join(PROVISION_DIR, "bootstrap-ansible-user.sh")
+  # Own SSH host keys per VM (the box ships the same keys for every VM) and SSH logins with
+  # keys only (the box's "vagrant"/"vagrant" password would otherwise work over SSH).
+  # Runs after "ansible-user", so the lab key is in place before passwords are switched off.
+  config.vm.provision "ssh-hardening", type: "shell",
+    path: File.join(PROVISION_DIR, "harden-ssh.sh")
+  # Hyper-V Manager console: logged in directly as "ansible", without a password.
+  # LAB-ONLY SHORTCUT, see setup-console-autologin.sh.
+  config.vm.provision "console-autologin", type: "shell",
+    path: File.join(PROVISION_DIR, "setup-console-autologin.sh"), args: ["ansible"]
+  # zsh with history search for both login users ("vagrant ssh" logs in as "vagrant")
+  config.vm.provision "zsh", type: "shell",
+    path: File.join(PROVISION_DIR, "setup-zsh.sh"), args: ["vagrant", "ansible"]
+
+  # --- the lab VMs (ansible-control, matrix, keycloak) -----------------------------------------
+  # The lab VMs are connected only to the private LabNet. Vagrant reads their IP (10.10.10.x)
+  # from Hyper-V, but your PC has no adapter in LabNet, so Vagrant reaches them through the
+  # firewall as jump host (bastion), like an administrator in an enterprise network:
+  # proxy_command opens an SSH connection to the firewall (as "ansible" with the lab key,
+  # settings from keys/ssh_config), and "-W %h:%p" forwards it to the VM's IP (%h) and SSH
+  # port (%p). Through this tunnel Vagrant then logs in to the VM as "vagrant".
+  # LogLevel=ERROR keeps informational messages (such as "Permanently added ... to the list of
+  # known hosts") off stderr: Windows PowerShell 5.1 can turn stderr output of native programs
+  # into a terminating error when the output is redirected (e.g. Initialize-Lab.ps1 *> log).
+  LAB_VMS.each do |name, vm|
+    lab_vm(config, name, switch: LAB_SWITCH, mac: vm[:mac], cpus: vm[:cpus], memory: vm[:memory],
+           checkpoints: vm[:checkpoints]) do |m|
+      m.ssh.proxy_command = "ssh -F #{SSH_CONFIG} -o LogLevel=ERROR -W %h:%p firewall"
+      # A provisioner with the same name in the machine's own block replaces the shared one:
+      # VMs with "consoleAutologin": false in lab.json (vault) get the normal login prompt back.
+      unless vm[:console_autologin]
+        m.vm.provision "console-autologin", type: "shell",
+          path: File.join(PROVISION_DIR, "setup-console-autologin.sh"), args: ["--remove"]
+      end
+      if name == "ansible-control"
+        # Only the control VM gets the private key, to reach the other VMs (Ansible connects
+        # over SSH as "ansible"). These provisioners run after the shared ones above, so the
+        # user "ansible" and its ~/.ssh already exist.
+        if File.exist?(LAB_KEY)
+          m.vm.provision "lab-key", type: "file",
+            source: LAB_KEY, destination: "#{KEY_STAGING}/ansible_ed25519"
+        end
+        m.vm.provision "ansible-control", type: "shell",
+          path: File.join(PROVISION_DIR, "bootstrap-ansible-control.sh")
+      end
+    end
+  end
+end

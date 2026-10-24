@@ -1,0 +1,436 @@
+# playbooks/keycloak.yml -- Keycloak, the lab's identity provider (single sign-on)
+#
+# Where it runs:
+#   On ansible-control, as user "ansible". Normally started by .\scripts\Deploy-LabKeycloak.ps1;
+#   it can also run alone:  .\scripts\Invoke-LabPlaybook.ps1 keycloak.yml
+#   Either way the PC hands it a short-lived OpenBao token with the policy "ansible-keycloak"
+#   (bin/openbao-run): its secrets and its certificate come from OpenBao.
+#
+# What Keycloak is for here:
+#   Keycloak is an open source identity provider (IdP): it owns the user accounts and their
+#   passwords and shows the login page. Applications do not handle passwords themselves; they
+#   send the browser to Keycloak and get back a signed statement about who logged in (OpenID
+#   Connect, OIDC). In this lab the Matrix Authentication Service (MAS) is such an application:
+#   "Sign in" in Element leads to Keycloak's login page. That is single sign-on (SSO), the
+#   standard in enterprises (Keycloak, Microsoft Entra ID, Okta, ...): one central account per
+#   person, one place to disable it, password policies and MFA in one place.
+#
+# Structure: three plays.
+#   1. On ansible-control: trust the lab root CA, read the secrets from OpenBao (creating them
+#      on the very first run), remove the old plain-text secrets file.
+#   2. On the Keycloak VM: trust the lab root CA, install Docker, get Keycloak's TLS certificate
+#      from OpenBao's intermediate CA (the key is made on the VM and never leaves it), run
+#      Keycloak + PostgreSQL with Docker Compose (templates/keycloak/), wait until it is healthy.
+#   3. On ansible-control again: configure Keycloak through its admin API, as code: the realm
+#      "lab", the OIDC client for MAS and the users alice and bob.
+#
+# Secrets: never on disk on ansible-control. They are read from OpenBao into memory for the
+# run (tasks/openbao-secrets.yml) and written only where the running service needs them: the
+# env files on the Keycloak VM (0600, root) and Keycloak's own database.
+#
+# Idempotent: yes. Secrets are created only once, the certificate is renewed only near its
+# expiry (or when it was issued by another CA), Compose only recreates a container whose
+# configuration changed, and the keycloak_* modules only change what differs. A second run
+# normally reports changed=0.
+- name: Keycloak - preparation on ansible-control
+  hosts: control
+  gather_facts: false
+  vars:
+    # The Keycloak secrets in OpenBao (KV mount "lab"), see vars/keycloak-secrets.yml. The
+    # policy generates the value on the first run (letters and digits only: Docker Compose
+    # would interpret a "$" in the env files).
+    keycloak_openbao_secrets:
+      - { path: keycloak/db, field: password, policy: lab-alnum-48 }
+      - { path: keycloak/admin, field: password, policy: lab-alnum-24 }
+      - { path: keycloak/clients/lab-ansible, field: secret, policy: lab-alnum-48 }
+      - { path: keycloak/clients/matrix-authentication-service, field: secret, policy: lab-alnum-48 }
+      - { path: keycloak/users/alice, field: password, policy: lab-alnum-24 }
+      - { path: keycloak/users/bob, field: password, policy: lab-alnum-24 }
+  tasks:
+    # The keycloak_* modules in play 3 talk to https://keycloak.lab.internal and verify its
+    # certificate against the system trust store (they have no option for an extra CA file).
+    # The root comes from the PC (keys\pki\root-ca.crt, copied to ~/lab-pki by
+    # Invoke-LabPlaybook.ps1); its private key never leaves the PC.
+    - name: Lab root CA in ansible-control's trust store
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+        mode: "0644"
+      become: true
+      notify: update CA bundle
+
+    # The first lab CA ("DeployableServer Lab CA", single level, its key a plain file) is
+    # retired: every lab certificate now comes from the 2026 PKI, so it is no longer trusted.
+    - name: Retired first lab CA no longer trusted on ansible-control
+      ansible.builtin.file:
+        path: /usr/local/share/ca-certificates/lab-root-ca.crt
+        state: absent
+      become: true
+      notify: update CA bundle
+
+    # A database that already exists was initialised with the database password in OpenBao;
+    # a new one must not be generated then (tasks/openbao-secrets.yml refuses).
+    - name: Does Keycloak's database already exist?
+      ansible.builtin.stat:
+        path: /var/lib/docker/volumes/keycloak_pgdata
+      delegate_to: "{{ groups['keycloak_servers'][0] }}"
+      become: true
+      register: keycloak_database
+
+    - name: Keycloak secrets from OpenBao
+      ansible.builtin.include_tasks: tasks/openbao-secrets.yml
+      vars:
+        openbao_secrets: "{{ keycloak_openbao_secrets }}"
+        openbao_existing_state: "{{ keycloak_database.stat.exists }}"
+
+    # Before OpenBao, the secrets were a plain file here (generated once, backed up on the PC).
+    # They are in OpenBao now (scripts\Import-LabSecrets.ps1 moved them there unchanged), so
+    # the file is removed.
+    - name: Old plain-text secrets file removed
+      ansible.builtin.file:
+        path: "{{ keycloak_secrets_dir }}"
+        state: absent
+
+    # The retired first lab CA's files (its key was a plain file here) and the certificates it
+    # issued. Nothing uses them any more.
+    - name: Retired first lab CA removed from ansible-control
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'HOME') }}/lab-ca"
+        state: absent
+
+  handlers:
+    - name: update CA bundle
+      ansible.builtin.command: update-ca-certificates
+      become: true
+
+- name: Keycloak - container stack on the Keycloak VM
+  hosts: keycloak_servers
+  become: true
+  vars_files:
+    - vars/keycloak-secrets.yml
+  vars:
+    keycloak_stack_dir: /opt/keycloak-stack
+    keycloak_tls_dir: "{{ keycloak_stack_dir }}/tls"
+    keycloak_fqdn: "keycloak.{{ lab_domain }}"
+    # Renew the certificate when it expires within this window. Force a renewal now with
+    #   .\scripts\Invoke-LabPlaybook.ps1 keycloak.yml -e tls_renew_before=+400d
+    tls_renew_before: "+30d"
+    # Pinned versions: an upgrade is a deliberate change of these lines. Keycloak 26.8.1 (with
+    # security fixes over 26.8.0) supports PostgreSQL 14-18; never use ":latest" for a database.
+    # The Keycloak image is also pinned by its digest (sha256 of the image manifest): a tag like
+    # 26.8.1 can be re-pushed by its publisher (this one was, on 2026-10-23), a digest cannot
+    # change, so every rebuild of the lab gets bit-for-bit the same image.
+    keycloak_image: quay.io/keycloak/keycloak:26.8.1@sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b
+    keycloak_postgres_image: postgres:18.6
+  tasks:
+    - name: Lab root CA in the Keycloak VM's trust store
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+        mode: "0644"
+      notify: update CA bundle
+
+    - name: Retired first lab CA no longer trusted on the Keycloak VM
+      ansible.builtin.file:
+        path: /usr/local/share/ca-certificates/lab-root-ca.crt
+        state: absent
+      notify: update CA bundle
+
+    - name: Apply the CA bundle now, not at the end of the play
+      ansible.builtin.meta: flush_handlers
+
+    # --- Docker CE (the same packages MDAD installs on the Matrix VM) ----------------------
+    # Docker's own repository instead of Ubuntu's older docker.io package, as Docker documents
+    # for Ubuntu (https://docs.docker.com/engine/install/ubuntu/). deb822 is the modern APT
+    # source format; the repository's signing key is stored with it.
+    - name: Docker configuration folder
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: "0755"
+
+    # Docker's default log driver keeps container logs forever; rotate them (3 x 10 MB).
+    - name: Docker log rotation
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: '{"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}'
+      notify: restart docker
+
+    - name: Packages that conflict with Docker CE removed
+      ansible.builtin.apt:
+        name: [docker.io, docker-doc, docker-compose, docker-compose-v2, docker-buildx, podman-docker, containerd, runc]
+        state: absent
+
+    - name: Docker CE repository
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: [deb]
+        uris: https://download.docker.com/linux/ubuntu
+        suites: ["{{ ansible_facts['distribution_release'] }}"]
+        components: [stable]
+        architectures: [amd64]
+        signed_by: https://download.docker.com/linux/ubuntu/gpg
+        install_python_debian: true
+      register: docker_repo
+
+    - name: Package lists refreshed after the repository changed
+      ansible.builtin.apt:
+        update_cache: true
+      when: docker_repo is changed
+
+    - name: Docker CE with the Compose plugin
+      ansible.builtin.apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+        state: present
+
+    - name: Docker running and enabled at boot
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    # Apply daemon.json now if it changed, before containers start.
+    - name: Restart Docker now if its configuration changed
+      ansible.builtin.meta: flush_handlers
+
+    # --- Files of the stack ---------------------------------------------------------------
+    - name: Stack folders
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ keycloak_stack_dir }}", mode: "0750" }
+        - { path: "{{ keycloak_tls_dir }}", mode: "0750" }
+        - { path: "{{ keycloak_stack_dir }}/truststores", mode: "0755" }
+
+    # --- Keycloak's TLS certificate, from OpenBao's intermediate CA -------------------------
+    # The key is made here on the Keycloak VM and never leaves it; OpenBao signs the request
+    # (role "keycloak": only keycloak.lab.internal, EC P-256, server use). Details and renewal:
+    # tasks/openbao-certificate.yml. PKCS#8 ("BEGIN PRIVATE KEY") is the key format Java-based
+    # servers read most reliably. The Keycloak container runs as uid 1000 with group 0 (root):
+    # a key readable by group root (0640 root:root) is readable for Keycloak and for nobody else
+    # on the VM; with 0600 the container could not read it and would not start.
+    - name: Keycloak's certificate from OpenBao
+      ansible.builtin.include_tasks: tasks/openbao-certificate.yml
+      vars:
+        openbao_cert_key: "{{ keycloak_tls_dir }}/tls.key"
+        openbao_cert_file: "{{ keycloak_tls_dir }}/tls.crt"
+        openbao_cert_names: ["{{ keycloak_fqdn }}"]
+        openbao_cert_role: keycloak
+        openbao_cert_key_format: pkcs8
+        openbao_cert_key_mode: "0640"
+        openbao_cert_renew_before: "{{ tls_renew_before }}"
+        openbao_cert_notify: restart keycloak
+
+    # Keycloak trusts these CAs in addition to Java's defaults, for its own outgoing HTTPS: the
+    # back-channel logout call to MAS (https://matrix.lab.internal/auth/...). Keycloak loads
+    # every file in conf/truststores automatically.
+    - name: Lab root CA for Keycloak's outgoing HTTPS
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: "{{ keycloak_stack_dir }}/truststores/lab-root-ca-2026.pem"
+        mode: "0644"
+      notify: restart keycloak
+
+    - name: Retired first lab CA no longer trusted by Keycloak
+      ansible.builtin.file:
+        path: "{{ keycloak_stack_dir }}/truststores/lab-root-ca.pem"
+        state: absent
+      notify: restart keycloak
+
+    - name: Compose file and environment files
+      ansible.builtin.template:
+        src: "../templates/keycloak/{{ item.name }}.j2"
+        dest: "{{ keycloak_stack_dir }}/{{ item.name }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { name: compose.yml, mode: "0640" }
+        - { name: keycloak.env, mode: "0600" }
+        - { name: postgres.env, mode: "0600" }
+      loop_control:
+        label: "{{ item.name }}"
+      # The env files contain passwords: never show their content in --diff output.
+      diff: false
+
+    # "docker compose up" for the project: pulls missing images, creates or recreates the
+    # containers whose configuration changed, and with wait: true returns only when every
+    # container with a health check reports "healthy" (Keycloak's first start takes a while).
+    - name: Keycloak and PostgreSQL up
+      community.docker.docker_compose_v2:
+        project_src: "{{ keycloak_stack_dir }}"
+        state: present
+        pull: missing
+        wait: true
+        wait_timeout: 600
+      register: keycloak_compose
+
+    # A changed certificate or trust store restarts Keycloak now (handler "restart keycloak"),
+    # so that the readiness check below waits for the restarted Keycloak. Not needed when the
+    # task above has just (re)created the container: it started with the new files anyway.
+    - name: Restart Keycloak now if its certificate or trust store changed
+      ansible.builtin.meta: flush_handlers
+
+    # Keycloak opens its ports before it is fully started, so the readiness endpoint decides.
+    - name: Keycloak is ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9000/health/ready
+      register: keycloak_ready
+      until: keycloak_ready.status == 200
+      retries: 60
+      delay: 5
+
+    # Proves three things at once: the name resolves, the certificate is trusted, and Keycloak
+    # builds its URLs from the configured hostname.
+    - name: Keycloak publishes the expected issuer under its real name
+      ansible.builtin.uri:
+        url: "{{ lab_keycloak_url }}/realms/master/.well-known/openid-configuration"
+        return_content: true
+      register: keycloak_master
+      # Check the status first: a failed request (DNS, TLS) has no "json", and the real error
+      # message would otherwise be replaced by a template error.
+      failed_when: >-
+        keycloak_master.status != 200
+        or keycloak_master.json.issuer != lab_keycloak_url ~ '/realms/master'
+
+  handlers:
+    - name: update CA bundle
+      ansible.builtin.command: update-ca-certificates
+
+    - name: restart docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+
+    # Keycloak reads certificate and trust store at start (the certificate also hourly).
+    - name: restart keycloak
+      community.docker.docker_compose_v2:
+        project_src: "{{ keycloak_stack_dir }}"
+        services: [keycloak]
+        state: restarted
+      when: not (keycloak_compose.changed | default(false))
+
+- name: Keycloak - realm, client and users as code
+  hosts: control
+  gather_facts: false
+  vars_files:
+    - vars/keycloak-secrets.yml
+  # Connection settings shared by all keycloak_* modules (an Ansible "action group"). They log
+  # in with the OAuth2 client-credentials grant as the service-account client created at
+  # Keycloak's first start: an automation identity, no person's password involved.
+  module_defaults:
+    group/community.general.keycloak:
+      auth_keycloak_url: "{{ lab_keycloak_url }}"
+      auth_realm: master
+      auth_client_id: "{{ lab_keycloak_ansible_client_id }}"
+      auth_client_secret: "{{ vault_keycloak_ansible_client_secret }}"
+      validate_certs: true
+  vars:
+    # The lab's users. Email and first/last name are set, because Keycloak's user profile
+    # requires them in a normal realm; without them the first login would stop at an "update
+    # your profile" page. The username becomes the Matrix user ID (@alice:lab.internal).
+    lab_keycloak_users:
+      - { username: alice, first_name: Alice, last_name: Lab, email: "alice@{{ lab_domain }}", password_var: vault_keycloak_alice_password }
+      - { username: bob, first_name: Bob, last_name: Lab, email: "bob@{{ lab_domain }}", password_var: vault_keycloak_bob_password }
+  tasks:
+    - name: Realm "lab"
+      community.general.keycloak_realm:
+        id: "{{ lab_keycloak_realm }}"
+        realm: "{{ lab_keycloak_realm }}"
+        enabled: true
+        display_name: Lab
+        # Every access is HTTPS anyway; "all" makes Keycloak refuse anything else.
+        ssl_required: all
+        # Accounts exist only as code (below), nobody can sign up on the login page.
+        registration_allowed: false
+        login_with_email_allowed: true
+        duplicate_emails_allowed: false
+        # The username becomes the Matrix ID; it must not change later.
+        edit_username_allowed: false
+        # The lab has no mail server, so no "forgot password" mails and no email verification.
+        reset_password_allowed: false
+        verify_email: false
+        remember_me: false
+        # Temporarily locks an account after repeated wrong passwords (unlock in the console).
+        brute_force_protected: true
+        state: present
+
+    # A "confidential" client: MAS proves its identity to Keycloak with a secret (only a server
+    # can keep one; a browser app could not). Values as in MAS's Keycloak guide. The redirect
+    # URI is the only address Keycloak sends logged-in users back to: an exact allow-list that
+    # stops an attacker from redirecting the login result to their own site.
+    - name: OIDC client for the Matrix Authentication Service
+      community.general.keycloak_client:
+        realm: "{{ lab_keycloak_realm }}"
+        client_id: "{{ lab_mas_keycloak_client_id }}"
+        name: Matrix Authentication Service
+        protocol: openid-connect
+        enabled: true
+        public_client: false
+        client_authenticator_type: client-secret
+        secret: "{{ vault_mas_keycloak_client_secret }}"
+        # Authorization code flow only (the browser gets a short-lived code, MAS exchanges it for
+        # tokens server-to-server); no password grant, no implicit flow.
+        standard_flow_enabled: true
+        implicit_flow_enabled: false
+        direct_access_grants_enabled: false
+        service_accounts_enabled: false
+        consent_required: false
+        # MAS needs no Keycloak roles in its tokens; "full scope" would put all of them in
+        # (least privilege, and Keycloak 26.8 deprecates full scope).
+        full_scope_allowed: false
+        redirect_uris:
+          - "{{ lab_mas_public_base }}upstream/callback/{{ lab_mas_keycloak_provider_id }}"
+        web_origins: []
+        # Logout: Keycloak tells MAS server-to-server when a Keycloak session ends.
+        frontchannel_logout: false
+        backchannel_logout_url: "{{ lab_mas_public_base }}upstream/backchannel-logout/{{ lab_mas_keycloak_provider_id }}"
+        attributes:
+          backchannel.logout.session.required: "true"
+          backchannel.logout.revoke.offline.tokens: "false"
+          # PKCE (S256): protects the authorization code against interception.
+          pkce.code.challenge.method: S256
+        state: present
+      # No task-level no_log: the module masks "secret" in its output itself, and Keycloak's
+      # error messages (e.g. a rejected redirect URI) stay visible.
+
+    # Never "force: true" here: it deletes and re-creates the user, which gives it a new
+    # internal ID ("sub" in OIDC), and MAS links Matrix accounts by that ID.
+    # Note: the module does not compare passwords. A password changed later in OpenBao is
+    # applied only when another attribute of the user changes in the same run; to change a
+    # password deliberately, use the admin console (realm lab > Users > Credentials).
+    # no_log: the task's output would contain the passwords.
+    - name: Lab users
+      community.general.keycloak_user:
+        realm: "{{ lab_keycloak_realm }}"
+        username: "{{ item.username }}"
+        first_name: "{{ item.first_name }}"
+        last_name: "{{ item.last_name }}"
+        email: "{{ item.email }}"
+        email_verified: true
+        enabled: true
+        required_actions: []
+        credentials:
+          - type: password
+            value: "{{ lookup('ansible.builtin.vars', item.password_var) }}"
+            temporary: false
+        state: present
+      loop: "{{ lab_keycloak_users }}"
+      loop_control:
+        label: "{{ item.username }}"
+      no_log: true
+
+    # MAS compares the issuer character by character with its configuration.
+    - name: Realm "lab" publishes exactly the issuer MAS is configured with
+      ansible.builtin.uri:
+        url: "{{ lab_keycloak_issuer }}/.well-known/openid-configuration"
+        return_content: true
+      register: keycloak_lab
+      failed_when: >-
+        keycloak_lab.status != 200
+        or keycloak_lab.json.issuer != lab_keycloak_issuer

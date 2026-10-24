@@ -1,0 +1,328 @@
+# playbooks/matrix-prepare.yml -- everything the Matrix stack needs before
+# matrix-docker-ansible-deploy (MDAD) can run
+#
+# Where it runs:
+#   On ansible-control, as user "ansible". Normally started by .\scripts\Deploy-LabMatrix.ps1,
+#   which runs MDAD right after it; it can also run alone:
+#     .\scripts\Invoke-LabPlaybook.ps1 matrix-prepare.yml
+#   Either way the PC hands it a short-lived OpenBao token with the policy "ansible-matrix"
+#   (bin/openbao-run).
+#
+# Why a preparation playbook: MDAD installs and configures the Matrix services, but it assumes
+# a few things about its surroundings that a public server gets for free and this lab does not:
+# a CA that issues certificates for its names (here OpenBao's ACME server instead of Let's
+# Encrypt), DNS names that resolve, and here also the connection to Keycloak, the identity
+# provider. This playbook provides them, and it checks the pinned MDAD version and puts our
+# configuration in place on ansible-control. Keycloak must be deployed first
+# (.\scripts\Deploy-LabKeycloak.ps1): it creates the client secret that MAS needs.
+#
+# Structure: two plays.
+#   1. On ansible-control: trust the lab root CA, check that ~/mdad holds the pinned MDAD version
+#      (copied there from the repository, vendor\mdad, by Deploy-LabMatrix.ps1), put our
+#      inventory and the entry point lab-setup.yml in place, make sure the Matrix secrets exist
+#      in OpenBao (created on the very first run), remove the old plain-text secret files.
+#   2. On the Matrix VM: trust the lab root CA, check DNS, check that Keycloak is reachable and
+#      trusted from there (MAS will call it), and that OpenBao's ACME directory is (Traefik will
+#      get its certificates there).
+#
+# Secrets: never on disk on ansible-control. This playbook only makes sure they exist in OpenBao;
+# MDAD's run (lab-setup.yml) reads them into memory again.
+#
+# Idempotent: yes. A second run changes nothing unless something drifted; secrets are created
+# only once.
+- name: Matrix stack - preparation on ansible-control
+  hosts: control
+  gather_facts: false
+  vars:
+    # The pinned MDAD version. MDAD has no releases or tags; every commit on its master branch
+    # is a version, so the lab pins one exact commit. Same idea as pinning a container image by
+    # digest: every run (and every rebuild of the lab) installs exactly the same code. The code
+    # itself is in the repository (vendor\mdad); this line must name the commit that is there
+    # (vendor\mdad\.lab-vendored-commit). An upgrade: .\scripts\Update-LabMdad.ps1 -Commit <sha>,
+    # then change this line and matrix_playbook_migration_validated_version in
+    # ansible/matrix/.../vars.yml (after reading MDAD's CHANGELOG.md).
+    mdad_version: a52e9876526aa6dcd41075b3a83d5eea7c31887b
+    mdad_dir: "{{ lookup('env', 'HOME') }}/mdad"
+    mdad_host_vars_dir: "{{ mdad_dir }}/inventory/host_vars/matrix.{{ lab_domain }}"
+    # The Matrix secrets in OpenBao (KV mount "lab"). MDAD derives the database passwords, MAS's
+    # encryption key and other keys from the generic secret key, so neither may ever change on
+    # an existing installation. (User passwords are not here: users log in with Keycloak.)
+    # The client secret for MAS belongs to Keycloak (no policy: it is never created here).
+    matrix_openbao_secrets:
+      - { path: matrix/generic-secret-key, field: value, policy: lab-alnum-64 }
+      - { path: matrix/postgres, field: password, policy: lab-alnum-64 }
+      - { path: keycloak/clients/matrix-authentication-service, field: secret }
+  tasks:
+    # --- Trust the lab root CA on ansible-control -------------------------------------------
+    # MDAD's self-checks for Synapse and Element run here on ansible-control and fetch
+    # https://matrix.lab.internal and https://element.lab.internal with certificate
+    # verification. Ubuntu builds its system-wide CA bundle (/etc/ssl/certs/ca-certificates.crt)
+    # from /usr/local/share/ca-certificates/*.crt with update-ca-certificates.
+    # Enterprise equivalent: the internal root CA distributed to every machine by configuration
+    # management or group policy.
+    - name: Lab root CA in ansible-control's trust store
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+        mode: "0644"
+      become: true
+      notify: update CA bundle
+
+    # The first lab CA ("DeployableServer Lab CA", single level, its key a plain file) is
+    # retired: every lab certificate now comes from the 2026 PKI, so it is no longer trusted.
+    - name: Retired first lab CA no longer trusted on ansible-control
+      ansible.builtin.file:
+        path: /usr/local/share/ca-certificates/lab-root-ca.crt
+        state: absent
+      become: true
+      notify: update CA bundle
+
+    # Its files (its key was a plain file here) and the certificates it issued.
+    - name: Retired first lab CA removed from ansible-control
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'HOME') }}/lab-ca"
+        state: absent
+
+    # --- MDAD at the pinned version ---------------------------------------------------------
+    # MDAD's code is part of this repository (vendor\mdad, with its roles; see vendor\README.md),
+    # and Deploy-LabMatrix.ps1 copies it to ~/mdad before this playbook runs - nothing is
+    # downloaded from GitHub at deployment time. This only checks that the copy is the version
+    # this playbook expects (the marker file comes with it).
+    - name: Which MDAD version is in ~/mdad?
+      ansible.builtin.slurp:
+        src: "{{ mdad_dir }}/.lab-vendored-commit"
+      register: mdad_marker
+      failed_when: false
+
+    - name: MDAD in ~/mdad is the pinned version
+      ansible.builtin.assert:
+        that:
+          - mdad_marker.content is defined
+          - (mdad_marker.content | b64decode | trim) == mdad_version
+        fail_msg: >-
+          ~/mdad does not hold MDAD {{ mdad_version }} (found:
+          {{ (mdad_marker.content | default('') | b64decode | trim) or 'nothing' }}). Run
+          .\scripts\Deploy-LabMatrix.ps1, which copies vendor\mdad from the repository there first;
+          after an upgrade (Update-LabMdad.ps1) also change mdad_version in this playbook.
+        quiet: true
+
+    # --- Our configuration ------------------------------------------------------------------
+    # The inventory and the entry point are copied from the repository (~/lab is the copy
+    # Invoke-LabPlaybook.ps1 makes of ansible\), so the repository stays the single source of
+    # truth.
+    - name: MDAD inventory folders
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ mdad_dir }}/inventory"
+        - "{{ mdad_host_vars_dir }}"
+
+    - name: MDAD inventory and the lab's entry point (lab-setup.yml) from the repository
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../matrix/{{ item.src }}"
+        dest: "{{ mdad_dir }}/{{ item.dest }}"
+        mode: "0600"
+      loop:
+        - { src: inventory/hosts, dest: inventory/hosts }
+        - { src: "inventory/host_vars/matrix.{{ lab_domain }}/vars.yml", dest: "inventory/host_vars/matrix.{{ lab_domain }}/vars.yml" }
+        - { src: lab-setup.yml, dest: lab-setup.yml }
+      loop_control:
+        label: "{{ item.dest }}"
+
+    # Values the Matrix configuration shares with the lab's own inventory (group_vars/all.yml):
+    # the "contract" with Keycloak (issuer, client ID, provider ID) and OpenBao's address. No
+    # secrets: the client secret comes from OpenBao at run time (lab-setup.yml).
+    - name: Shared lab values for MDAD (lab-shared.yml next to vars.yml)
+      ansible.builtin.copy:
+        dest: "{{ mdad_host_vars_dir }}/lab-shared.yml"
+        mode: "0600"
+        content: |
+          # Generated by ansible/playbooks/matrix-prepare.yml from ansible/inventory/group_vars/all.yml.
+          # Do not edit here; it is rewritten on every run.
+          lab_keycloak_issuer: {{ lab_keycloak_issuer | to_json }}
+          lab_mas_keycloak_provider_id: {{ lab_mas_keycloak_provider_id | to_json }}
+          lab_mas_keycloak_client_id: {{ lab_mas_keycloak_client_id | to_json }}
+          lab_vault_url: {{ lab_vault_url | to_json }}
+
+    # --- Secrets in OpenBao -----------------------------------------------------------------
+    # An installation that already exists (MDAD keeps everything below /matrix on the VM) was
+    # set up with the secrets in OpenBao; new ones must not be generated then.
+    - name: Does the Matrix installation already exist?
+      ansible.builtin.stat:
+        path: /matrix/postgres
+      delegate_to: "{{ groups['matrix_servers'][0] }}"
+      become: true
+      register: matrix_installation
+
+    - name: Matrix secrets exist in OpenBao
+      ansible.builtin.include_tasks: tasks/openbao-secrets.yml
+      vars:
+        openbao_secrets: "{{ matrix_openbao_secrets }}"
+        openbao_existing_state: "{{ matrix_installation.stat.exists }}"
+
+    # Before OpenBao, the secrets were plain files here (generated once, backed up on the PC),
+    # and the client secret for MAS was in keycloak-upstream.yml. They are in OpenBao now
+    # (scripts\Import-LabSecrets.ps1 moved them there unchanged), so the files are removed.
+    - name: Old plain-text secret files removed
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ lookup('env', 'HOME') }}/matrix-secrets"
+        - "{{ mdad_host_vars_dir }}/secrets.yml"
+        - "{{ mdad_host_vars_dir }}/keycloak-upstream.yml"
+
+  handlers:
+    - name: update CA bundle
+      ansible.builtin.command: update-ca-certificates
+      become: true
+
+- name: Matrix stack - preparation on the Matrix VM
+  hosts: matrix_servers
+  become: true
+  tasks:
+    # MAS and the LiveKit JWT service get the VM's CA bundle mounted into their containers
+    # (vars.yml); MDAD's well-known self-check runs here too, and Traefik gets the root itself
+    # mounted, to trust OpenBao's ACME server. All need the root BEFORE MDAD starts them.
+    - name: Lab root CA in the Matrix VM's trust store
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+        mode: "0644"
+      notify: update CA bundle
+
+    - name: Retired first lab CA no longer trusted on the Matrix VM
+      ansible.builtin.file:
+        path: /usr/local/share/ca-certificates/lab-root-ca.crt
+        state: absent
+      notify: update CA bundle
+
+    - name: Apply the CA bundle now, not at the end of the play
+      ansible.builtin.meta: flush_handlers
+
+    # Inside the lab, every Matrix name must resolve to the VM's own LabNet address (the lab
+    # view of the firewall's split-horizon DNS). The LiveKit JWT service, for example, calls
+    # https://lab.internal and https://matrix.lab.internal from the VM itself, and OpenBao's ACME
+    # server checks each name over http://<name>/.well-known/acme-challenge/ from the vault VM.
+    # getent asks the same resolver as every program on the VM.
+    - name: Look up the Matrix names on the Matrix VM
+      ansible.builtin.command: getent ahostsv4 {{ item }}
+      loop:
+        - "matrix.{{ lab_domain }}"
+        - "element.{{ lab_domain }}"
+        - "{{ lab_domain }}"
+      register: matrix_dns
+      changed_when: false
+      failed_when: false
+      # Only reads: runs under --check too (a command task would be skipped there).
+      check_mode: false
+
+    - name: The Matrix names resolve to this server
+      ansible.builtin.assert:
+        that: ansible_facts['default_ipv4']['address'] in item.stdout
+        fail_msg: >-
+          {{ item.item }} does not resolve to {{ ansible_facts['default_ipv4']['address'] }} on the
+          Matrix VM (got: {{ item.stdout_lines | first | default('nothing') }}). Are matrix, element
+          and @ under "published" in config\lab.json, and was the firewall rebuilt since
+          (.\scripts\New-LabFirewall.ps1 -Rebuild)?
+        quiet: true
+      loop: "{{ matrix_dns.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # MAS will fetch Keycloak's discovery document from this VM. If that fails, MAS still
+    # starts and only logs an error, and logins fail later with a vague message, so the whole
+    # path (DNS -> 10.10.10.40, HTTPS with the lab root CA, the exact issuer) is checked now.
+    - name: Keycloak is reachable and trusted from the Matrix VM, with the expected issuer
+      ansible.builtin.uri:
+        url: "{{ lab_keycloak_issuer }}/.well-known/openid-configuration"
+        return_content: true
+      register: keycloak_discovery
+      failed_when: >-
+        keycloak_discovery.status != 200
+        or keycloak_discovery.json.issuer != lab_keycloak_issuer
+
+    # Traefik (in its container) will ask this directory for certificates.
+    - name: OpenBao's ACME directory is reachable and trusted from the Matrix VM
+      ansible.builtin.uri:
+        url: "{{ lab_vault_url }}/v1/pki_int/roles/acme-matrix/acme/directory"
+        return_content: true
+      register: acme_directory
+      failed_when: acme_directory.status != 200 or acme_directory.json.newOrder is not defined
+
+    # The certificate files from before ACME (issued by the old lab CA, copied by MDAD's "aux"
+    # role). Removed only once Traefik has its ACME store (acme.json), i.e. from the second
+    # deployment with ACME on; until then they do no harm.
+    - name: Has Traefik got certificates through ACME yet?
+      ansible.builtin.stat:
+        path: /matrix/traefik/ssl/acme.json
+      register: traefik_acme_store
+
+    # After a NEW intermediate CA (a rotation by Deploy-LabVault.ps1, or a rebuilt vault VM),
+    # Traefik would keep serving certificates from the old one until their regular renewal -
+    # and a rebuilt OpenBao does not even know Traefik's ACME account any more. So: which CA
+    # issued the certificate Traefik serves now? The "authority key identifier" in a certificate
+    # names the key that signed it; it must match the current CA's "subject key identifier".
+    # If not, acme.json (Traefik's ACME account and certificates) is removed and Traefik
+    # restarted: it registers again and gets new certificates from the current CA.
+    - name: OpenBao's current issuing CA certificate
+      ansible.builtin.uri:
+        url: "{{ lab_vault_url }}/v1/pki_int/ca/pem"
+        return_content: true
+      register: matrix_issuing_ca
+      check_mode: false
+      when: traefik_acme_store.stat.exists
+
+    - name: Details of the issuing CA certificate
+      community.crypto.x509_certificate_info:
+        content: "{{ matrix_issuing_ca.content }}"
+      register: matrix_issuing_ca_info
+      when: traefik_acme_store.stat.exists
+
+    - name: The certificate Traefik serves now
+      community.crypto.get_certificate:
+        host: "matrix.{{ lab_domain }}"
+        port: 443
+      register: traefik_served
+      failed_when: false
+      when: traefik_acme_store.stat.exists
+
+    - name: Details of the served certificate
+      community.crypto.x509_certificate_info:
+        content: "{{ traefik_served.cert }}"
+      register: traefik_served_info
+      when: traefik_served.cert is defined
+
+    # Only for a certificate from a lab intermediate CA: Traefik's own self-signed default
+    # certificate (while ACME has not succeeded yet) is no reason to start over.
+    - name: Traefik starts over with ACME when its certificate comes from an older CA
+      ansible.builtin.file:
+        path: /matrix/traefik/ssl/acme.json
+        state: absent
+      when:
+        - traefik_served_info.issuer is defined
+        - (traefik_served_info.issuer.commonName | default('')) is match('DeployableServer Lab Intermediate CA')
+        - traefik_served_info.authority_key_identifier != matrix_issuing_ca_info.subject_key_identifier
+      notify: restart traefik
+
+    - name: Old certificate files of Traefik removed
+      ansible.builtin.file:
+        path: "/matrix/traefik/ssl/{{ item }}"
+        state: absent
+      loop: [cert.pem, privkey.pem]
+      when: traefik_acme_store.stat.exists
+
+  handlers:
+    # update-ca-certificates writes a NEW bundle file. MAS and the LiveKit JWT service have the
+    # old one bind-mounted (a mount of a single file keeps showing the file it was made with) and
+    # read it only at start, so both are restarted - if they exist yet (not on the first run).
+    - name: update CA bundle
+      ansible.builtin.shell: >-
+        update-ca-certificates
+        && for unit in matrix-authentication-service matrix-livekit-jwt-service; do
+        if systemctl is-active --quiet $unit; then systemctl restart $unit; fi; done
+
+    - name: restart traefik
+      ansible.builtin.shell: if systemctl is-active --quiet matrix-traefik; then systemctl restart matrix-traefik; fi
