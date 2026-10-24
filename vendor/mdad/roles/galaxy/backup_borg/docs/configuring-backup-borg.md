@@ -1,0 +1,273 @@
+<!--
+SPDX-FileCopyrightText: 2022 MDAD project contributors
+SPDX-FileCopyrightText: 2022, 2023 Julian-Samuel Gebühr
+SPDX-FileCopyrightText: 2022-2024 Slavi Pantaleev
+SPDX-FileCopyrightText: 2022-2025 Nikita Chernyi
+SPDX-FileCopyrightText: 2024-2026 Suguru Hirahara
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+# Setting up BorgBackup
+
+This is an [Ansible](https://www.ansible.com/) role which installs and configures [BorgBackup](https://www.borgbackup.org/) (short: Borg) with [borgmatic](https://torsion.org/borgmatic/) in a [Docker](https://www.docker.com/) container wrapped in a systemd service.
+
+BorgBackup is a deduplicating backup program with optional compression and encryption. That means your daily incremental backups can be stored in a fraction of the space and is safe whether you store it at home or on a cloud service.
+
+See the borgmatic's [documentation](https://torsion.org/borgmatic/reference/configuration/) to learn what BorgBackup does and why it might be useful to you.
+
+## Prerequisites
+
+### Set up a remote server for storing backups
+
+You will need a remote server where BorgBackup will store the backups. There are hosted, BorgBackup compatible solutions available, such as [BorgBase](https://www.borgbase.com).
+
+### Check the Postgres version
+
+For some playbooks, if you're using the integrated Postgres database server, backups with BorgBackup will also include dumps of your Postgres database by default.
+
+Unless you disable the Postgres-backup support, make sure that the Postgres version of your homeserver's database is compatible with borgmatic. You can check the compatible versions on [`defaults/main.yml`](../defaults/main.yml).
+
+An alternative solution for backing up the Postgres database is [Postgres backup](https://github.com/mother-of-all-self-hosting/ansible-role-postgres-backup). If you decide to go with another solution, you can disable Postgres-backup support for BorgBackup using the `backup_borg_postgresql_enabled` variable.
+
+### Image versions
+
+The default `backup_borg_image_version` selects a Borg/borgmatic pair, such as `1.4.5-2.1.9`. With Postgres v18, the role pulls `ghcr.io/etkecc/borgmatic:18-1.4.5-2.1.9`. Without a detected Postgres version, it continues to pull the moving `latest` tag, which uses the image's default Postgres client. The version pair does not pin that fallback.
+
+The role's Renovate updates follow published Postgres-prefixed GHCR image tags. CI checks that the selected pair exists for every supported Postgres version before merge. If you override `backup_borg_borg_version`, `backup_borg_borgmatic_version`, or `backup_borg_version` yourself, choose a tag that exists in the registry.
+
+### Create a new SSH key
+
+Run the command below on any machine to create a new SSH key:
+
+```bash
+ssh-keygen -t ed25519 -N '' -f borg-backup -C borg-backup
+```
+
+You don't need to place the key in the `.ssh` folder.
+
+### Add the public key
+
+Next, add the **public** part of this SSH key (the `borg-backup.pub` file) to your BorgBackup provider/server.
+
+If you are using a hosted solution, follow their instructions. If you have your own server, copy the key to it with the command like below:
+
+```sh
+# Example to append the new PUBKEY contents, where:
+# - PUBKEY is path to the public key
+# - USER is a SSH user on a provider / server
+# - HOST is a SSH host of a provider / server
+cat PUBKEY | ssh USER@HOST 'dd of=.ssh/authorized_keys oflag=append conv=notrunc'
+```
+
+The **private** key needs to be added to `backup_borg_ssh_key_private` on your `vars.yml` file as below.
+
+## Adjusting the playbook configuration
+
+To enable BorgBackup, add the following configuration to your `vars.yml` file (adapt to your needs).
+
+**Note**: the path should be something like `inventory/host_vars/matrix.example.com/vars.yml` if you use the [matrix-docker-ansible-deploy (MDAD)](https://github.com/spantaleev/matrix-docker-ansible-deploy) or [Mother-of-All-Self-Hosting (MASH)](https://github.com/mother-of-all-self-hosting/mash-playbook) Ansible playbook.
+
+```yaml
+########################################################################
+#                                                                      #
+# backup_borg                                                          #
+#                                                                      #
+########################################################################
+
+backup_borg_enabled: true
+
+# Set the repository location, where:
+# - USER is a SSH user on a provider / server
+# - HOST is a SSH host of a provider / server
+# - REPO is a BorgBackup repository name
+backup_borg_location_repositories:
+ - ssh://USER@HOST/./REPO
+
+# Generate a strong password used for encrypting backups. You can create one with a command like `pwgen -s 64 1`.
+backup_borg_storage_encryption_passphrase: "PASSPHRASE"
+
+# Add the content of the **private** part of the SSH key you have created.
+# Note: the whole key (all of its belonging lines) under the variable needs to be indented with 2 spaces.
+backup_borg_ssh_key_private: |
+  -----BEGIN OPENSSH PRIVATE KEY-----
+  TG9yZW0gaXBzdW0gZG9sb3Igc2l0IGFtZXQsIGNvbnNlY3RldHVyIGFkaXBpc2NpbmcgZW
+  xpdCwgc2VkIGRvIGVpdXNtb2QgdGVtcG9yIGluY2lkaWR1bnQgdXQgbGFib3JlIGV0IGRv
+  bG9yZSBtYWduYSBhbGdlxdWEuIFV0IGVuaW0gYWQgbWluaW0gdmVuaWFtLCBxdWlzIG5vc3
+  RydWQgZXhlcmNpdGF0aW9uIHVsbGFtY28gbGFib3JpcyBuaXNpIHV0IGFsaXF1aXAgZXgg
+  ZWEgY29tbW9kbyBjb25zZXF1YXQuIA==
+  -----END OPENSSH PRIVATE KEY-----
+
+########################################################################
+#                                                                      #
+# /backup_borg                                                         #
+#                                                                      #
+########################################################################
+```
+
+**Note**: `REPO` will be initialized on backup start, for example: `matrix`. Refer to [Remote repositories](https://borgbackup.readthedocs.io/en/stable/usage/general.html#repository-urls) for the syntax.
+
+### Set backup archive name (optional)
+
+You can specify the backup archive name format. To set it, add the following configuration to your `vars.yml` file (adapt to your needs):
+
+```yaml
+backup_borg_storage_archive_name_format: backup-borg-{now:%Y-%m-%d-%H%M%S}
+```
+
+### Configure retention policy (optional)
+
+It is also possible to configure a retention strategy. To configure it, add the following configuration to your `vars.yml` file (adapt to your needs):
+
+```yaml
+backup_borg_retention_keep_hourly: 0
+backup_borg_retention_keep_daily: 7
+backup_borg_retention_keep_weekly: 4
+backup_borg_retention_keep_monthly: 12
+backup_borg_retention_keep_yearly: 2
+```
+
+### Edit the schedule (optional)
+
+By default the task will run 4 a.m. every day based on the `backup_borg_schedule` variable. It is defined in the format of systemd timer calendar.
+
+To edit the schedule, add the following configuration to your `vars.yml` file (adapt to your needs):
+
+```yaml
+backup_borg_schedule: "*-*-* 04:00:00"
+```
+
+**Note**: the actual job may run with a delay. See `backup_borg_schedule_randomized_delay_sec` on [`defaults/main.yml`](https://github.com/mother-of-all-self-hosting/ansible-role-backup_borg/blob/f5d5b473d48c6504be10b3d946255ef5c186c2a6/defaults/main.yml#L50) for its default value.
+
+### Set include and/or exclude directories (optional)
+
+`backup_borg_location_source_directories` defines the list of directories to back up.
+
+You might also want to exclude certain directories or file patterns from the backup using the `backup_borg_location_exclude_patterns` variable.
+
+>[!NOTE]
+> If you use multiple playbooks which utliize this role, you should make sure by yourself that the all of the directories to be backed up which those playbooks manage are correctly specified to `backup_borg_location_source_directories`.
+>
+> For example, backing up data directories of the [matrix-docker-ansible-deploy Ansible playbook](https://github.com/spantaleev/matrix-docker-ansible-deploy) and the [Mother-of-All-Self-Hosting Ansible playbook](https://github.com/mother-of-all-self-hosting/mash-playbook) requires both `matrix_base_data_path` and `mash_playbook_base_path` to be specified. Refer to the configuration files of the playbooks for details.
+
+### Configuring ntfy integration (optional)
+
+You can also have the service send push notifications to your self-hosted [ntfy](https://ntfy.sh/) instance. To enable it, it is necessary to specify the topic to send them, the server's hostname, and login credentials (username and password, or access token) by adding the following configuration to your `vars.yml` file (adapt to your needs):
+
+```yaml
+backup_borg_ntfy_topic: YOUR_NTFY_TOPIC_HERE
+backup_borg_ntfy_server: YOUR_NTFY_INSTANCE_HOSTNAME_HERE
+
+# Specify username and password
+backup_borg_ntfy_access_username: ""
+backup_borg_ntfy_access_password: ""
+
+# Otherwise, specify the access token
+backup_borg_ntfy_access_token: ""
+```
+
+Refer to [this page](https://torsion.org/borgmatic/reference/configuration/monitoring/ntfy/) on the official documentation for details.
+
+If you are looking for an Ansible role for ntfy, you can check out [ansible-role-ntfy](https://github.com/mother-of-all-self-hosting/ansible-role-ntfy) maintained by the [Mother-of-All-Self-Hosting (MASH)](https://github.com/mother-of-all-self-hosting) team.
+
+### Include mounted directories in the backup (optional)
+
+By default, this role passes [`one_file_system: true`](https://borgbackup.readthedocs.io/en/stable/usage/create.html) to Borg, which makes it stay within the same filesystem and not cross mount point boundaries. If your source directories span multiple filesystems (e.g. bind mounts), you may want to disable this.
+
+To do so, add the following configuration to your `vars.yml` file:
+
+```yaml
+backup_borg_location_one_file_system: false
+```
+
+### Extending the configuration
+
+There are some additional things you may wish to configure about the service.
+
+Take a look at:
+
+- [`defaults/main.yml`](../defaults/main.yml) for some variables that you can customize via your `vars.yml` file. You can override settings (even those that don't have dedicated playbook variables) using the `backup_borg_configuration_extension_yaml` variable
+
+## Installing
+
+After configuring the playbook, run the installation command of your playbook as below:
+
+```sh
+ansible-playbook -i inventory/hosts setup.yml --tags=setup-all,start
+```
+
+If you use the MDAD / MASH playbook, the shortcut commands with the [`just` program](https://github.com/spantaleev/matrix-docker-ansible-deploy/blob/master/docs/just.md) are also available: `just install-all` or `just setup-all`
+
+## Usage
+
+After installation, `backup-borg` will run automatically every day at `04:00:00` (as defined in `backup_borg_schedule` by default).
+
+### Manually start the task
+
+Sometimes it can be helpful to run the backup as you'd like, avoiding to wait until 4 a.m., like when you test your configuration.
+
+If you want to run it immediately, log in to the server with SSH and run `systemctl start backup-borg` (or how you/your playbook named the service, e.g. `matrix-backup-borg`).
+
+This will not return until the backup is done, so it can possibly take a long time. Consider using [tmux](https://en.wikipedia.org/wiki/Tmux) if your SSH connection is unstable.
+
+### Example playbook
+
+```yaml
+- hosts: servers
+  roles:
+    - role: galaxy/com.devture.ansible.role.systemd_docker_base
+
+    # This role is not required. We just use it in our example.
+    - role: galaxy/postgres
+
+    - role: galaxy/ansible.role.backup_borg
+
+    - role: another_role
+```
+
+Example playbook configuration (`group_vars/servers` or other):
+
+>[!NOTE]
+> The configuration below wires the BorgBackup role with [this MASH/Postgres role](https://github.com/mother-of-all-self-hosting/ansible-role-postgres). Note that this is just an example. You can use this role without it Postgres integration or with another Postgres instance.
+
+```yaml
+backup_borg_enabled: false
+
+backup_borg_identifier: my-borgbackup
+
+backup_borg_base_path: "{{ my_base_path }}/backup_borg"
+
+backup_borg_username: "{{ my_username }}"
+backup_borg_uid: "{{ my_uid }}"
+backup_borg_gid: "{{ my_gid }}"
+
+# We assume Postgres is installed via the `com.devture.ansible.role.postgres` role.
+# Remove this and any `postgres_*` reference below, if that's not the case.
+backup_borg_postgresql_version_detection_postgres_role_name: galaxy/com.devture.ansible.role.postgres
+
+# If you will use this without `com.devture.ansible.role.postgres`, you'll need to set the major Postgres version manually instead.
+# backup_borg_postgres_version: 15
+
+backup_borg_container_network: "{{ postgres_container_network if postgres_enabled else backup_borg_identifier }}"
+
+backup_borg_container_image_self_build: "{{ architecture not in ['amd64', 'arm32', 'arm64'] }}"
+
+backup_borg_postgresql_enabled: "{{ postgres_enabled }}"
+backup_borg_postgresql_databases_hostname: "{{ postgres_connection_hostname if postgres_enabled else '' }}"
+backup_borg_postgresql_databases_username: "{{ postgres_connection_username if postgres_enabled else '' }}"
+backup_borg_postgresql_databases_password: "{{ postgres_connection_password if postgres_enabled else '' }}"
+backup_borg_postgresql_databases_port: "{{ postgres_connection_port if postgres_enabled else 5432 }}"
+backup_borg_postgresql_databases: "{{ postgres_managed_databases | map(attribute='name') if postgres_enabled else [] }}"
+
+backup_borg_location_source_directories:
+  - "{{ my_data_path }}"
+
+backup_borg_systemd_required_services_list_auto: |
+  {{
+    ([postgres_identifier ~ '.service'] if postgres_enabled else [])
+  }}
+```
+
+## Troubleshooting
+
+You can find the logs in [systemd-journald](https://www.freedesktop.org/software/systemd/man/systemd-journald.service.html) by logging in to the server with SSH and running `journalctl -fu backup-borg`.

@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+#
+# Tasks related to configuring Jitsi internal authentication on a running Prosody instance.
+#
+
+- name: Ensure Jitsi internal authentication users are configured
+  # Since upstream stable-11146 (rootless containers), the effective Prosody configuration is
+  # rendered into /run/prosody/config/ (tmpfs), instead of being used from /config directly.
+  ansible.builtin.command: "{{ devture_systemd_docker_base_host_command_docker }} exec {{ jitsi_identifier }}-prosody prosodyctl --config /run/prosody/config/prosody.cfg.lua register {{ item.username | quote }} meet.jitsi {{ item.password | quote }}"
+  with_items: "{{ jitsi_prosody_auth_internal_accounts }}"
+  when:
+    - jitsi_prosody_auth_internal_accounts|length > 0
+  register: jitsi_user_configuration_result
+  changed_when: jitsi_user_configuration_result.rc == 0
+  no_log: true
+
+#
+# Tasks related to clean up after configuring internal authentication.
+#

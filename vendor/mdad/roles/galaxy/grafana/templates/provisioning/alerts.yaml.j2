@@ -1,0 +1,11 @@
+{#
+SPDX-FileCopyrightText: 2025 spatterlight
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+apiVersion: 1
+
+groups: {{ grafana_provisioning_alerts_groups | to_json }}
+
+deleteRules: {{ grafana_provisioning_alerts_deleteRules | to_json }}

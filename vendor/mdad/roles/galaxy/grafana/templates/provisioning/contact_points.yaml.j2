@@ -1,0 +1,11 @@
+{#
+SPDX-FileCopyrightText: 2025 spatterlight
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+apiVersion: 1
+
+contactPoints: {{ grafana_provisioning_contact_points_contactPoints | to_json }}
+
+deleteContactPoints: {{ grafana_provisioning_contact_points_deleteContactPoints | to_json }}

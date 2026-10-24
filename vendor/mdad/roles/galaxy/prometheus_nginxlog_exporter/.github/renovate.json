@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>mother-of-all-self-hosting/renovate-config#v1.1.0",
+    "github>mother-of-all-self-hosting/renovate-config//patch-automerge#v1.1.0"
+  ],
+  "packageRules": [
+    {
+      "description": "The exporter publishes only architecture-suffixed tags (v1.11.0-amd64, v1.11.0-arm64) from v1.10.0 onwards, which semver reads as prereleases of an unreleased version. Recover the version from the amd64 tag, which the role's image tag is built from.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/martin-helmich/prometheus-nginxlog-exporter/exporter"],
+      "extractVersion": "^(?<version>v\\d+\\.\\d+\\.\\d+)-amd64$"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2023 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 spatterlight
+# SPDX-FileCopyrightText: 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: (Deprecation) Catch and report renamed settings
+  ansible.builtin.fail:
+    msg: >-
+      Your configuration contains a variable, which now has a different name.
+      Please change your configuration to rename the variable (`{{ item.old }}` -> `{{ item.new }}`).
+  when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+  with_items:
+    - { "old": "grafana_container_tmp_size", "new": "grafana_container_tmpfs_tmp_size" }
+    - { "old": "grafana_container_additional_networks_additional", "new": "grafana_container_additional_networks_custom" }
+    - { "old": "grafana_smtp_enabled", "new": "grafana_mailer_enabled" }
+    - { "old": "grafana_mailer_smtp_enabled", "new": "grafana_mailer_enabled" }
+    - { "old": "grafana_smtp_host", "new": "grafana_config_smtp_host" }
+    - { "old": "grafana_smtp_port", "new": "grafana_config_smtp_port" }
+    - { "old": "grafana_smtp_user", "new": "grafana_config_smtp_user" }
+    - { "old": "grafana_smtp_password", "new": "grafana_config_smtp_password" }
+    - { "old": "grafana_smtp_from_address", "new": "grafana_config_smtp_from_address" }
+    - { "old": "grafana_provisioning_datasources", "new": "grafana_provisioning_datasources_datasources" }
+    - { "old": "grafana_provisioning_dashboard_providers", "new": "grafana_provisioning_dashboards_providers" }
+    - { "old": "grafana_http_header_content_permission_policy", "new": "grafana_http_header_permissions_policy" }
+    - { "old": "grafana_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+
+- name: Fail if required Grafana settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`).
+  when: "lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - grafana_identifier
+    - grafana_uid
+    - grafana_gid
+    - grafana_hostname
+    - grafana_path_prefix
+    - grafana_container_network
+
+- name: Fail if SMTP settings are missing (and SMTP is enabled by setting host)
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`) to correctly set up email via SMTP.
+  when: "grafana_mailer_enabled | bool and lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - grafana_config_smtp_host
+    - grafana_config_smtp_port
+    - grafana_config_smtp_from_address
+
+- name: Run if Traefik is enabled
+  when: grafana_container_labels_traefik_enabled | bool
+  block:
+    - name: Fail if Traefik settings required for Grafana are not defined
+      ansible.builtin.fail:
+        msg: >-
+          You need to define a required configuration setting (`{{ item.name }}`).
+      when: "item.when | bool and lookup('vars', item.name, default='') | string | length == 0"
+      with_items:
+        - { "name": "grafana_container_labels_traefik_hostname", when: true }
+        - { "name": "grafana_container_labels_traefik_path_prefix", when: true }
+        - { "name": "grafana_container_labels_traefik_middleware_basic_auth_users", when: "{{ grafana_container_labels_traefik_middleware_basic_auth_enabled }}" }
+
+    # We ensure it doesn't end with a slash, because we handle both (slash and no-slash).
+    # Knowing that `grafana_container_labels_traefik_path_prefix` does not end with a slash
+    # ensures we know how to set these routes up without having to do "does it end with a slash" checks elsewhere.
+    - name: Fail if grafana_container_labels_traefik_path_prefix ends with a slash
+      ansible.builtin.fail:
+        msg: >-
+          grafana_container_labels_traefik_path_prefix (`{{ grafana_container_labels_traefik_path_prefix }}`) must either be `/` or not end with a slash (e.g. `/grafana`).
+      when: "grafana_container_labels_traefik_path_prefix != '/' and grafana_container_labels_traefik_path_prefix[-1] == '/'"

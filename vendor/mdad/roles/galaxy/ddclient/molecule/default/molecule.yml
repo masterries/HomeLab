@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 spatterlight
+# SPDX-FileCopyrightText: 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: requirements.yml
+    force: true
+driver:
+  name: docker
+platforms:
+  - name: ddclient-${MOLECULE_DISTRO:-ubuntu2604}-default
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-ubuntu2604}-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Docker inside the instance stores images via containerd. Its storage
+      # cannot use overlay on top of the instance's own overlay filesystem, so a
+      # volume puts it on a real filesystem.
+      - /var/lib/containerd
+    # Remove volumes along with the instance, so that local runs do not leave
+    # gigabytes behind.
+    keep_volumes: false
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callback_result_format: yaml
+  inventory:
+    group_vars:
+      all:
+        # Helper variables
+        ddclient_debug_service_enabled: false
+        ddclient_restarts_check_enabled: true
+
+        # The host directory mounted into the container through
+        # `ddclient_container_additional_volumes_custom`, and the file placed in it by
+        # prepare.yml. Reading that file from inside the container is what
+        # proves the additional volumes reach the systemd unit rather than
+        # being merely declared in defaults/main.yml.
+        ddclient_molecule_extra_volume_src: /ddclient-molecule-extra
+        ddclient_molecule_extra_volume_dst: /molecule-extra
+        ddclient_molecule_extra_volume_marker: only-a-real-bind-mount-can-read-this
+
+        # Files placed on the host under the paths the role bind-mounts. ddclient
+        # itself is asked to list them back, so a mount that docker accepted but
+        # the process cannot see does not pass.
+        ddclient_molecule_marker_filename: ddclient-molecule-marker.txt
+
+        # Variables for ddclient
+        #
+        # Deliberately not 1000: the linuxserver.io PUID/PGID pattern has left a
+        # needed directory unwritable in other roles of this fleet, and a uid
+        # that exists in the test image by accident would hide that.
+        ddclient_uid: 1717
+        ddclient_gid: 1717
+
+        ddclient_container_additional_volumes_custom:
+          - type: bind
+            src: "{{ ddclient_molecule_extra_volume_src }}"
+            dst: "{{ ddclient_molecule_extra_volume_dst }}"
+            options: readonly
+
+        # ddclient is a dynamic DNS updater, so the one thing this scenario
+        # must never do is update a DNS record somewhere. The values below are
+        # chosen so that an update cannot happen even if something goes wrong:
+        # the provider lives under the `.invalid` top-level domain, which
+        # RFC 6761 guarantees will never resolve, and the domain being updated
+        # is under `example.net`, which is reserved for documentation. The
+        # checks in verify.yml then use ddclient's own `--noexec` dry-run mode,
+        # which reports what it would send without sending anything.
+        ddclient_verify_provider: molecule-provider.invalid
+        ddclient_verify_protocol: dyndns2
+        ddclient_verify_domain: molecule-probe.example.net
+
+        # The container image ships a fallback configuration which it installs
+        # whenever the role's file fails to arrive, and that fallback specifies
+        # `daemon=300`. Picking an interval nothing else would produce turns
+        # the running daemon's own sleep interval into evidence of which of the
+        # two configurations it actually read.
+        ddclient_daemon_interval: "1847"
+
+        # Left to itself, ddclient discovers the external IP address by asking
+        # a public service (checkip.dyndns.org and friends). Pointing it at the
+        # local discard port keeps that lookup on the loopback interface, so a
+        # test run reaches no third party at all. Nothing answers there, which
+        # is fine: the dry run in verify.yml supplies an address of its own.
+        ddclient_use: web
+        ddclient_web: "http://127.0.0.1:9/"
+
+        ddclient_domain_configurations:
+          - provider: "{{ ddclient_verify_provider }}"
+            protocol: "{{ ddclient_verify_protocol }}"
+            username: molecule-username
+            password: molecule-password
+            domain: "{{ ddclient_verify_domain }}"
+
+        # Neither the role's default of Etc/UTC nor the test host's zone, so
+        # that the timezone the container ends up in can only have come from
+        # templates/env.j2.
+        ddclient_environment_variables_tz: Asia/Tokyo
+  env:
+    # Workaround for https://github.com/ansible/molecule/issues/4391
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/..:/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles:~/.ansible/roles
+scenario:
+  # See: https://docs.ansible.com/projects/molecule/configuration/?h=test_sequence#scenario
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    # Idempotence is disabled because the role renders ddclient.conf with mode
+    # 0644, while the container image chmods everything under /config to 0600
+    # on every start. The bind mount makes that a change to the file on the
+    # host, which the next converge undoes, so the two keep flipping the mode
+    # back and forth.
+    # - idempotence
+    - side_effect
+    - verify
+    - cleanup
+    - destroy
+verifier:
+  name: ansible

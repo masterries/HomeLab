@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: 2023 - 2025 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2023 MASH project contributors
+# SPDX-FileCopyrightText: 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: (Deprecation) Catch and report renamed settings
+  ansible.builtin.fail:
+    msg: >-
+      Your configuration contains a variable, which now has a different name.
+      Please change your configuration to rename the variable (`{{ item.old }}` -> `{{ item.new }}`).
+  when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+  with_items:
+    - { "old": "etherpad_user_uid", "new": "etherpad_uid" }
+    - { "old": "etherpad_user_gid", "new": "etherpad_gid" }
+    - { "old": "etherpad_container_image_name_prefix", "new": "etherpad_container_image_registry_prefix" }
+    - { "old": "etherpad_container_src_path", "new": "etherpad_container_image_self_build_src_files_path" }
+    - { "old": "etherpad_database_engine", "new": "etherpad_database_type" }
+    - { "old": "etherpad_database_hostname", "new": "etherpad_database_postgres_hostname" }
+    - { "old": "etherpad_database_port", "new": "etherpad_database_postgres_port" }
+    - { "old": "etherpad_database_username", "new": "etherpad_database_postgres_username" }
+    - { "old": "etherpad_database_password", "new": "etherpad_database_postgres_password" }
+    - { "old": "etherpad_container_process_command", "new": "etherpad_process_extra_arguments_auto" }
+    - { "old": "etherpad_title", "new": "etherpad_configuration_title" }
+    - { "old": "etherpad_abiword", "new": "<removed> (Abiword support was removed in Etherpad v3)" }
+    - { "old": "etherpad_configuration_abiword", "new": "<removed> (Abiword support was removed in Etherpad v3)" }
+    - { "old": "etherpad_soffice", "new": "etherpad_configuration_soffice" }
+    - { "old": "etherpad_default_pad_text", "new": "etherpad_configuration_defaultpadtext" }
+    - { "old": "etherpad_http_header_content_permission_policy", "new": "etherpad_http_header_permissions_policy" }
+    - { "old": "etherpad_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+
+- name: Fail if required Etherpad settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`).
+  when: "lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - etherpad_uid
+    - etherpad_gid
+    - etherpad_hostname
+    - etherpad_path_prefix
+    - etherpad_container_network
+
+- name: Fail if the Etherpad users variables are not lists
+  ansible.builtin.fail:
+    msg: >-
+      `etherpad_users`, `etherpad_users_auto` and `etherpad_users_custom` must all be lists of dictionaries.
+  when: >-
+    (etherpad_users_auto is not iterable or etherpad_users_auto is string or etherpad_users_auto is mapping) or
+    (etherpad_users_custom is not iterable or etherpad_users_custom is string or etherpad_users_custom is mapping) or
+    (etherpad_users is not iterable or etherpad_users is string or etherpad_users is mapping)
+
+- name: Fail if any Etherpad user entry is invalid
+  vars:
+    etherpad_users_valid: >-
+      {{ etherpad_users | select('mapping')
+      | selectattr('username', 'defined') | selectattr('username', 'string')
+      | selectattr('initial_password', 'defined') | selectattr('initial_password', 'string')
+      | rejectattr('username', 'match', '^\s*$') | rejectattr('initial_password', 'match', '^\s*$') | list }}
+    etherpad_users_invalid: "{{ etherpad_users | difference(etherpad_users_valid) | list }}"
+  when: etherpad_users_invalid | length > 0
+  ansible.builtin.fail:
+    msg: >-
+      Every entry in `etherpad_users` must be a dictionary with non-empty string `username` and `initial_password`.
+      Invalid entry: {{ (etherpad_users_invalid | first | to_json) if (etherpad_users_invalid | first) is not mapping else ((etherpad_users_invalid | first | combine({'initial_password': '<redacted>'})) | to_json) }}
+
+- name: Fail if the Etherpad admin user has neither a password nor a hash
+  ansible.builtin.fail:
+    msg: >-
+      You need to define `etherpad_admin_password` or `etherpad_admin_hash` when `etherpad_admin_username` is set.
+  when: >-
+    etherpad_admin_username | string | length > 0 and
+    etherpad_admin_password | string | length == 0 and
+    lookup('vars', 'etherpad_admin_hash', default='') | string | length == 0
+
+- name: Fail if Etherpad logging level is invalid
+  ansible.builtin.fail:
+    msg: >-
+      etherpad_configuration_loglevel must be 'DEBUG', 'INFO', 'WARN', or 'ERROR'
+  when: "etherpad_configuration_loglevel not in ['DEBUG', 'INFO', 'WARN', 'ERROR']"
+
+- name: Fail if Etherpad IP logging mode is invalid
+  ansible.builtin.fail:
+    msg: >-
+      etherpad_configuration_iplogging must be 'anonymous', 'truncated', or 'full'
+  when: "etherpad_configuration_iplogging not in ['anonymous', 'truncated', 'full']"
+
+- name: Fail if Etherpad updates tier is invalid
+  ansible.builtin.fail:
+    msg: >-
+      etherpad_configuration_updates_tier must be 'off', 'notify', 'manual', 'auto', or 'autonomous'.
+      Note that `off` must be quoted ('off'), because unquoted `off` means `false` in YAML.
+  when: "etherpad_configuration_updates_tier not in ['off', 'notify', 'manual', 'auto', 'autonomous']"
+
+- name: Run if Etherpad + MySQL integration is enabled
+  when: etherpad_database_type == 'mysql'
+  block:
+    - name: Fail if required Etherpad + MySQL integration settings not defined
+      ansible.builtin.fail:
+        msg: >-
+          You need to define a required configuration setting (`{{ item }}`) when `etherpad_database_type` is `mysql`
+      when: "lookup('vars', item, default='') | string | length == 0"
+      with_items:
+        - etherpad_database_mysql_password
+
+    - name: Fail if MySQL socket host path for Etherpad is missing when Unix socket is enabled
+      ansible.builtin.fail:
+        msg: >-
+          You need to define `etherpad_database_mysql_socket_path_host` when `etherpad_database_type` is `mysql`
+          and `etherpad_database_mysql_socket_enabled` is `true`.
+      when: >-
+        etherpad_database_mysql_socket_enabled and
+        etherpad_database_mysql_socket_path_host | string | length == 0
+
+    - name: Fail if MySQL hostname for Etherpad is missing when Unix socket is disabled
+      ansible.builtin.fail:
+        msg: >-
+          You need to define `etherpad_database_mysql_hostname` when `etherpad_database_type` is `mysql`
+          and `etherpad_database_mysql_socket_enabled` is `false`.
+      when: >-
+        not etherpad_database_mysql_socket_enabled and
+        etherpad_database_mysql_hostname | string | length == 0
+
+- name: Fail if required Etherpad + Postgres integration settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`) when `etherpad_database_type` is `postgres`
+  when: "etherpad_database_type == 'postgres' and lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - etherpad_database_postgres_hostname
+    - etherpad_database_postgres_password
+
+- name: Fail if required Etherpad + Redis integration settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`) when `etherpad_database_type` is `redis`
+  when: "etherpad_database_type == 'redis' and lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - etherpad_redis_hostname
+
+- name: Run if Traefik is enabled
+  when: etherpad_container_labels_traefik_enabled | bool
+  block:
+    - name: Fail if Traefik settings required for Etherpad are not defined
+      ansible.builtin.fail:
+        msg: >-
+          You need to define a required configuration setting (`{{ item }}`).
+      when: "lookup('vars', item, default='') | string | length == 0"
+      with_items:
+        - etherpad_container_labels_traefik_hostname
+        - etherpad_container_labels_traefik_path_prefix
+
+    # We ensure it doesn't end with a slash, because we handle both (slash and no-slash).
+    # Knowing that `etherpad_container_labels_traefik_path_prefix` does not end with a slash
+    # ensures we know how to set these routes up without having to do "does it end with a slash" checks elsewhere.
+    - name: Fail if etherpad_container_labels_traefik_path_prefix ends with a slash
+      ansible.builtin.fail:
+        msg: >-
+          etherpad_container_labels_traefik_path_prefix (`{{ etherpad_container_labels_traefik_path_prefix }}`) must either be `/` or not end with a slash (e.g. `/etherpad`).
+      when: "etherpad_container_labels_traefik_path_prefix != '/' and etherpad_container_labels_traefik_path_prefix[-1] == '/'"
+
+- name: Run if Traefik is enabled for Prometheus endpoint
+  when: etherpad_container_labels_traefik_metrics_enabled | bool
+  block:
+    - name: Fail if Traefik settings required for Etherpad metrics endpoint are not defined
+      ansible.builtin.fail:
+        msg: >-
+          You need to define a required configuration setting (`{{ item.name }}`) for enabling the Prometheus endpoint.
+      when: "item.when | bool and lookup('vars', item.name, default='') | string | length == 0"
+      with_items:
+        - { "name": "etherpad_container_labels_traefik_metrics_hostname", when: true }
+        - { "name": "etherpad_container_labels_traefik_metrics_path_prefix", when: true }
+        - { "name": "etherpad_container_labels_traefik_metrics_middleware_basic_auth_users", when: "{{ etherpad_container_labels_traefik_metrics_middleware_basic_auth_enabled }}" }
+
+    # We ensure it doesn't end with a slash, because we handle both (slash and no-slash).
+    # Knowing that `etherpad_container_labels_traefik_metrics_path_prefix` does not end with a slash
+    # ensures we know how to set these routes up without having to do "does it end with a slash" checks elsewhere.
+    - name: Fail if etherpad_container_labels_traefik_metrics_path_prefix ends with a slash
+      ansible.builtin.fail:
+        msg: >-
+          etherpad_container_labels_traefik_metrics_path_prefix (`{{ etherpad_container_labels_traefik_metrics_path_prefix }}`) must either be `/` or not end with a slash (e.g. `/metrics`).
+      when: "etherpad_container_labels_traefik_metrics_path_prefix != '/' and etherpad_container_labels_traefik_metrics_path_prefix[-1] == '/'"

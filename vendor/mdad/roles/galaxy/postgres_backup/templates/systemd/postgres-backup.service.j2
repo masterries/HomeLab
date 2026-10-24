@@ -1,0 +1,54 @@
+{#
+SPDX-FileCopyrightText: 2022-2024 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+[Unit]
+Description=postgres-backup-local ({{ postgres_backup_identifier }})
+{% for service in postgres_backup_systemd_required_services_list %}
+Requires={{ service }}
+After={{ service }}
+{% endfor %}
+{% for service in postgres_backup_systemd_wanted_services_list %}
+Wants={{ service }}
+{% endfor %}
+DefaultDependencies=no
+
+[Service]
+Type=simple
+Environment="HOME={{ devture_systemd_docker_base_systemd_unit_home_path }}"
+ExecStartPre={{ devture_systemd_docker_base_host_command_sh }} -c '{{ postgres_backup_container_cleanup_command | trim | replace("\n", " ") }}'
+
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} create \
+      --rm \
+      --name={{ postgres_backup_identifier }} \
+      --log-driver=none \
+      --user={{ postgres_backup_uid }}:{{ postgres_backup_gid }} \
+      --cap-drop=ALL \
+      --read-only \
+      --network={{ postgres_backup_container_network }} \
+      --env-file={{ postgres_backup_config_path }}/env \
+      --mount type=bind,src={{ postgres_backup_data_path }},dst=/backups \
+      {% for arg in postgres_backup_container_extra_arguments %}
+      {{ arg }} \
+      {% endfor %}
+      {{ postgres_backup_container_image_to_use }} \
+      {% for arg in postgres_backup_process_extra_arguments %}
+      {{ arg }} \
+      {% endfor %}
+
+{% for network in postgres_backup_container_additional_networks %}
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} network connect {{ network }} {{ postgres_backup_identifier }}
+{% endfor %}
+
+ExecStart={{ devture_systemd_docker_base_host_command_docker }} start --attach {{ postgres_backup_identifier }}
+
+ExecStop=-{{ devture_systemd_docker_base_host_command_docker }} stop -t {{ devture_systemd_docker_base_container_stop_grace_time_seconds }} {{ postgres_backup_identifier }}
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} rm {{ postgres_backup_identifier }} 2>/dev/null || true'
+Restart=always
+RestartSec=30
+SyslogIdentifier={{ postgres_backup_identifier }}
+
+[Install]
+WantedBy=multi-user.target

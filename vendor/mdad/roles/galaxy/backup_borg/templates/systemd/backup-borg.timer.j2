@@ -1,0 +1,16 @@
+{#
+SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+[Unit]
+Description=BorgBackup timer
+
+[Timer]
+Unit={{ backup_borg_identifier }}.service
+OnCalendar={{ backup_borg_schedule }}
+RandomizedDelaySec={{ backup_borg_schedule_randomized_delay_sec }}
+
+[Install]
+WantedBy=timers.target

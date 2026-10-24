@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2023 - 2025 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 spatterlight
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure Grafana paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ grafana_uid }}"
+    group: "{{ grafana_gid }}"
+  with_items:
+    - "{{ grafana_base_path }}"
+    - "{{ grafana_config_path }}"
+    - "{{ grafana_config_path }}/provisioning"
+    - "{{ grafana_config_path }}/provisioning/datasources"
+    - "{{ grafana_config_path }}/provisioning/dashboards"
+    - "{{ grafana_config_path }}/provisioning/alerting"
+    - "{{ grafana_config_path }}/provisioning/plugins"
+    - "{{ grafana_config_path }}/dashboards"
+    - "{{ grafana_data_path }}"
+
+- name: Ensure Grafana support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item.src }}"
+    dest: "{{ item.dst }}"
+    mode: "0440"
+    owner: "{{ grafana_uid }}"
+    group: "{{ grafana_gid }}"
+  with_items:
+    - src: grafana.ini.j2
+      dst: "{{ grafana_config_path }}/grafana.ini"
+    - src: provisioning/datasources.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/datasources/default.yaml"
+    - src: provisioning/dashboards.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/dashboards/default.yaml"
+    - src: provisioning/alerts.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/alerting/alerts.yaml"
+    - src: provisioning/contact_points.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/alerting/contact_points.yaml"
+    - src: provisioning/mute_timings.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/alerting/mute_timings.yaml"
+    - src: provisioning/notification_policies.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/alerting/notification_policies.yaml"
+    - src: provisioning/notification_template_groups.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/alerting/notification_template_groups.yaml"
+    - src: provisioning/plugins.yaml.j2
+      dst: "{{ grafana_config_path }}/provisioning/plugins/default.yaml"
+    - src: labels.j2
+      dst: "{{ grafana_base_path }}/labels"
+    - src: env.j2
+      dst: "{{ grafana_base_path }}/env"
+  register: grafana_support_files_result
+
+- name: Ensure Grafana dashboard(s) downloaded
+  ansible.builtin.get_url:
+    url: "{{ item }}"
+    dest: "{{ grafana_config_path }}/dashboards/"
+    force: true
+    mode: "0440"
+    owner: "{{ grafana_uid }}"
+    group: "{{ grafana_gid }}"
+  with_items: "{{ grafana_dashboard_download_urls }}"
+  register: result
+  retries: "{{ devture_playbook_help_geturl_retries_count }}"
+  delay: "{{ devture_playbook_help_geturl_retries_delay }}"
+  until: result is not failed
+
+- name: Ensure Grafana dashboard templates installed
+  ansible.builtin.template:
+    src: "{{ item.path }}"
+    dest: "{{ grafana_config_path }}/provisioning/dashboards/{{ item.name }}"
+    mode: "0440"
+    owner: "{{ grafana_uid }}"
+    group: "{{ grafana_gid }}"
+  with_items: "{{ grafana_provisioning_dashboard_template_files }}"
+  register: grafana_dashboard_tempate_files_result
+
+- name: Ensure Grafana alerting templates installed
+  ansible.builtin.template:
+    src: "{{ item.path }}"
+    dest: "{{ grafana_config_path }}/provisioning/alerting/{{ item.name }}"
+    mode: "0440"
+    owner: "{{ grafana_uid }}"
+    group: "{{ grafana_gid }}"
+  with_items: "{{ grafana_provisioning_alerting_template_files }}"
+  register: grafana_provisioning_alerting_tempate_files_result
+
+- name: Ensure Grafana container image is pulled via community.docker.docker_image_pull
+  when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+  community.docker.docker_image_pull:
+    name: "{{ grafana_container_image }}"
+    pull: always
+  register: grafana_container_image_pull_result_ansible_module
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: grafana_container_image_pull_result_ansible_module is not failed
+
+- name: Ensure Grafana container image is pulled via ansible.builtin.command
+  when: devture_systemd_docker_base_container_image_pull_method == 'command'
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ grafana_container_image }}"
+  register: grafana_container_image_pull_result_command
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: grafana_container_image_pull_result_command is not failed
+  changed_when: "'Downloaded newer image' in grafana_container_image_pull_result_command.stdout"
+
+- name: Run if 'host' network is not specified to be used
+  when: grafana_container_network != 'host'
+  block:
+    - name: Ensure Grafana container network is created via community.docker.docker_network
+      when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+      community.docker.docker_network:
+        enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+        name: "{{ grafana_container_network }}"
+        driver: bridge
+        driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+      register: gradana_network_creation_result
+
+    - name: Ensure Grafana container network is created via ansible.builtin.command
+      when: devture_systemd_docker_base_container_network_creation_method == 'command'
+      ansible.builtin.command:
+        cmd: >-
+          {{ devture_systemd_docker_base_host_command_docker }} network create
+          {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+          {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+          {{ grafana_container_network }}
+      register: gradana_network_creation_result
+      changed_when: gradana_network_creation_result.rc == 0
+      failed_when: gradana_network_creation_result.rc != 0 and 'already exists' not in gradana_network_creation_result.stderr
+
+- name: Ensure Grafana systemd service is present
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/grafana.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ grafana_identifier }}.service"
+    mode: "0644"
+  register: grafana_systemd_service_result
+
+- name: Determine whether Grafana needs a restart
+  ansible.builtin.set_fact:
+    grafana_restart_necessary: >-
+      {{
+        grafana_support_files_result.changed | default(false)
+        or grafana_dashboard_tempate_files_result.changed | default(false)
+        or grafana_provisioning_alerting_tempate_files_result.changed | default(false)
+        or grafana_systemd_service_result.changed | default(false)
+        or grafana_container_image_pull_result_ansible_module.changed | default(false)
+        or grafana_container_image_pull_result_command.changed | default(false)
+      }}

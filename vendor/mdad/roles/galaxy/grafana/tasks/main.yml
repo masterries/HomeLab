@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Perform Grafana installation tasks
+  when: grafana_enabled | bool
+  tags:
+    - setup-all
+    - setup-grafana
+    - install-all
+    - install-grafana
+  block:
+    - name: Validate Grafana configuration
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/validate_config.yml"
+    - name: Install Grafana
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/install.yml"
+
+- name: Perform Grafana uninstallation tasks
+  when: not grafana_enabled | bool
+  tags:
+    - setup-all
+    - setup-grafana
+  block:
+    - name: Uninstall Grafana
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/uninstall.yml"

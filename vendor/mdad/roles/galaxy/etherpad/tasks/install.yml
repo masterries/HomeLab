@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2023, 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025, 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure Etherpad paths exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "0770"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+  when: item.when | bool
+  with_items:
+    - path: "{{ etherpad_base_path }}"
+      owner: "{{ etherpad_uid }}"
+      group: "{{ etherpad_gid }}"
+      when: true
+    - path: "{{ etherpad_config_path }}"
+      owner: "{{ etherpad_uid }}"
+      group: "{{ etherpad_gid }}"
+      when: true
+    - path: "{{ etherpad_data_path }}"
+      owner: "{{ etherpad_uid }}"
+      group: "{{ etherpad_gid }}"
+      when: true
+    - path: "{{ etherpad_plugins_path }}"
+      owner: "{{ etherpad_uid }}"
+      group: "{{ etherpad_gid }}"
+      when: true
+    - path: "{{ etherpad_var_path }}"
+      owner: "{{ etherpad_uid }}"
+      group: "{{ etherpad_gid }}"
+      when: true
+    - path: "{{ etherpad_container_image_self_build_src_files_path }}"
+      owner: root
+      group: root
+      when: "{{ etherpad_container_image_self_build }}"
+
+# Without this file, Etherpad (v3+) tries to migrate plugins from node_modules on startup,
+# by shelling out to `pnpm ls`. That fails under the custom user this role runs the container with
+# (pnpm attempts to write to a read-only database in the application directory), taking
+# the whole server down with it. When the file exists, the migration is skipped entirely.
+#
+# Etherpad maintains this file by itself (recording plugins installed at runtime),
+# so an existing file is intentionally left untouched (`force: false`).
+- name: Ensure Etherpad installed plugins manifest exists
+  ansible.builtin.copy:
+    content: '{"plugins": []}'
+    dest: "{{ etherpad_var_path }}/installed_plugins.json"
+    mode: "0660"
+    owner: "{{ etherpad_uid }}"
+    group: "{{ etherpad_gid }}"
+    force: false
+
+- name: Ensure Etherpad support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ etherpad_base_path }}/{{ item }}"
+    mode: "0640"
+    owner: "{{ etherpad_uid }}"
+    group: "{{ etherpad_gid }}"
+  with_items:
+    - env
+    - labels
+  register: etherpad_support_files_result
+
+- name: Ensure Etherpad configuration file installed
+  ansible.builtin.copy:
+    content: "{{ etherpad_configuration | to_nice_json }}"
+    dest: "{{ etherpad_config_path }}/settings.json"
+    mode: "0640"
+    owner: "{{ etherpad_uid }}"
+    group: "{{ etherpad_gid }}"
+  register: etherpad_config_file_result
+
+- name: Run if self-building of Etherpad container image is not enabled
+  when: "not etherpad_container_image_self_build | bool"
+  block:
+    - name: Ensure Etherpad container image is pulled via community.docker.docker_image_pull
+      when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+      community.docker.docker_image_pull:
+        name: "{{ etherpad_container_image }}"
+        pull: always
+      register: etherpad_container_image_pull_result_ansible_module
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: etherpad_container_image_pull_result_ansible_module is not failed
+
+    - name: Ensure Etherpad container image is pulled via ansible.builtin.command
+      when: devture_systemd_docker_base_container_image_pull_method == 'command'
+      ansible.builtin.command:
+        cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ etherpad_container_image }}"
+      register: etherpad_container_image_pull_result_command
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: etherpad_container_image_pull_result_command is not failed
+      changed_when: "'Downloaded newer image' in etherpad_container_image_pull_result_command.stdout"
+
+- name: Run if self-building of Etherpad container image is enabled
+  when: etherpad_container_image_self_build | bool
+  block:
+    - name: Ensure Etherpad repository is present on self-build
+      ansible.builtin.git:
+        repo: "{{ etherpad_container_image_self_build_repo }}"
+        version: "{{ etherpad_container_image_self_build_repo_version }}"
+        dest: "{{ etherpad_container_image_self_build_src_files_path }}"
+        force: "yes"
+      register: etherpad_git_pull_results
+
+    - name: Ensure Etherpad container image is built
+      community.docker.docker_image_build:
+        name: "{{ etherpad_container_image_self_build_name }}"
+        dockerfile: Dockerfile
+        path: "{{ etherpad_container_image_self_build_src_files_path }}"
+        pull: true
+        rebuild: "{{ 'always' if etherpad_git_pull_results.changed | bool else 'never' }}"
+        args:
+          ETHERPAD_PLUGINS: "{{ etherpad_plugins | join(' ') }}"
+      register: etherpad_container_image_build_result
+
+- name: Ensure Etherpad container network is created via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ etherpad_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+  register: etherpad_network_creation_result
+
+- name: Ensure Etherpad container network is created via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+      {{ etherpad_container_network }}
+  register: etherpad_network_creation_result
+  changed_when: etherpad_network_creation_result.rc == 0
+  failed_when: etherpad_network_creation_result.rc != 0 and 'already exists' not in etherpad_network_creation_result.stderr
+
+- name: Ensure Etherpad systemd service is present
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/etherpad.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ etherpad_identifier }}.service"
+    mode: "0644"
+  register: etherpad_systemd_service_result
+
+- name: Determine whether Etherpad needs a restart
+  ansible.builtin.set_fact:
+    etherpad_restart_necessary: >-
+      {{
+        etherpad_support_files_result.changed | default(false)
+        or etherpad_config_file_result.changed | default(false)
+        or etherpad_systemd_service_result.changed | default(false)
+        or etherpad_container_image_pull_result_ansible_module.changed | default(false)
+        or etherpad_container_image_pull_result_command.changed | default(false)
+        or etherpad_container_image_build_result.changed | default(false)
+      }}

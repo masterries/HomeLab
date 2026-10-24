@@ -1,0 +1,16 @@
+{#
+SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+{#
+  The JVB container intentionally carries no Traefik labels.
+
+  Its only HTTP endpoint used to be the Colibri WebSocket (tcp/9090), which upstream removed in
+  stable-11146 (https://github.com/jitsi/docker-jitsi-meet/pull/2285). Clients now use SCTP data
+  channels, so the JVB no longer needs to be reachable over HTTP at all - only its RTP/UDP port.
+#}
+{% for arg in jitsi_jvb_container_labels_additional_labels %}
+{{ arg }}
+{% endfor %}

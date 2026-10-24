@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure jitsi-jicofo paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0777"
+    owner: "{{ jitsi_uid }}"
+    group: "{{ jitsi_gid }}"
+  with_items:
+    - "{{ jitsi_jicofo_base_path }}"
+    - "{{ jitsi_jicofo_config_path }}"
+
+- name: Ensure jitsi-jicofo environment variables file installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/jicofo/env.j2"
+    dest: "{{ jitsi_jicofo_base_path }}/env"
+    mode: "0640"
+    owner: "{{ jitsi_uid }}"
+    group: "{{ jitsi_gid }}"
+  when: jitsi_enabled | bool
+  register: jitsi_jicofo_support_files_result
+
+- name: Ensure jitsi-jicofo configuration files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/jicofo/{{ item }}.j2"
+    dest: "{{ jitsi_jicofo_config_path }}/{{ item }}"
+    mode: "0644"
+    owner: "{{ jitsi_uid }}"
+    group: "{{ jitsi_gid }}"
+  with_items:
+    - sip-communicator.properties
+    - logging.properties
+  register: jitsi_jicofo_config_files_result
+
+- name: Ensure jitsi-jicofo Docker container image is pulled via community.docker.docker_image_pull
+  when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+  community.docker.docker_image_pull:
+    name: "{{ jitsi_jicofo_container_image }}"
+    pull: always
+  register: jitsi_jicofo_container_image_pull_result_ansible_module
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: jitsi_jicofo_container_image_pull_result_ansible_module is not failed
+
+- name: Ensure jitsi-jicofo Docker container image is pulled via ansible.builtin.command
+  when: devture_systemd_docker_base_container_image_pull_method == 'command'
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ jitsi_jicofo_container_image }}"
+  register: jitsi_jicofo_container_image_pull_result_command
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: jitsi_jicofo_container_image_pull_result_command is not failed
+  changed_when: "'Downloaded newer image' in jitsi_jicofo_container_image_pull_result_command.stdout"
+
+- name: Ensure jitsi-jicofo systemd service is present
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/jicofo/systemd/jicofo.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ jitsi_identifier }}-jicofo.service"
+    mode: "0644"
+  register: jitsi_jicofo_systemd_service_result
+
+- name: Determine whether jitsi-jicofo needs a restart
+  ansible.builtin.set_fact:
+    jitsi_jicofo_restart_necessary: >-
+      {{
+        jitsi_jicofo_support_files_result.changed | default(false)
+        or jitsi_jicofo_config_files_result.changed | default(false)
+        or jitsi_jicofo_systemd_service_result.changed | default(false)
+        or jitsi_jicofo_container_image_pull_result_ansible_module.changed | default(false)
+        or jitsi_jicofo_container_image_pull_result_command.changed | default(false)
+      }}

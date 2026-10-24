@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Perform BorgBackup installation tasks
+  when: backup_borg_enabled | bool
+  tags:
+    - setup-all
+    - setup-backup-borg
+    - install-all
+    - install-backup-borg
+  block:
+    - name: Validate BorgBackup configuration
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/validate_config.yml"
+    - name: Install BorgBackup
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/install.yml"
+
+- name: Perform BorgBackup uninstallation tasks
+  when: not backup_borg_enabled | bool
+  tags:
+    - setup-all
+    - setup-backup-borg
+  block:
+    - name: Uninstall BorgBackup
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/uninstall.yml"

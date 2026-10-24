@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: 2022 - 2025 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Run if postgres_backup_postgres_data_path is specified to autodetect the Postgres version
+  when: postgres_backup_postgres_data_path != ''
+  block:
+    - name: Detect Postgres version from provided data path
+      ansible.builtin.include_role:
+        name: "{{ postgres_backup_postgres_role_include_name }}"
+        tasks_from: detect_existing_postgres_version
+
+    # If we have found an existing version (installed from before), we use its corresponding Docker image.
+    # If not, we let `postgres_backup_container_image_to_use` remain default (using the latest Postgres version).
+    - name: Use detected Postgres version, if detected
+      ansible.builtin.set_fact:
+        postgres_backup_container_image_to_use: "{{ postgres_backup_detected_version_corresponding_docker_image }}"
+      when: postgres_backup_detected_version_corresponding_docker_image | default('') != ''
+
+- name: Ensure postgres-backup-local paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+    owner: "{{ postgres_backup_uid }}"
+    group: "{{ postgres_backup_gid }}"
+  with_items:
+    - "{{ postgres_backup_base_path }}"
+    - "{{ postgres_backup_config_path }}"
+    - "{{ postgres_backup_data_path }}"
+
+- name: Ensure postgres-backup-local support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ postgres_backup_config_path }}/{{ item }}"
+    mode: "0640"
+    owner: "{{ postgres_backup_uid }}"
+    group: "{{ postgres_backup_gid }}"
+  with_items:
+    - env
+  register: postgres_backup_support_files_result
+
+- name: Ensure postgres-backup-local container image is pulled via community.docker.docker_image_pull
+  when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+  community.docker.docker_image_pull:
+    name: "{{ postgres_backup_container_image_to_use }}"
+    pull: always
+  register: postgres_backup_container_image_pull_result_ansible_module
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: postgres_backup_container_image_pull_result_ansible_module is not failed
+
+- name: Ensure postgres-backup-local container image is pulled via ansible.builtin.command
+  when: devture_systemd_docker_base_container_image_pull_method == 'command'
+  ansible.builtin.command:
+    cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ postgres_backup_container_image_to_use }}"
+  register: postgres_backup_container_image_pull_result_command
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: postgres_backup_container_image_pull_result_command is not failed
+  changed_when: "'Downloaded newer image' in postgres_backup_container_image_pull_result_command.stdout"
+
+- name: Ensure postgres-backup-local container network is created via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ postgres_backup_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+  register: postgres_backup_network_creation_result
+
+- name: Ensure postgres-backup-local container network is created via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+      {{ postgres_backup_container_network }}
+  register: postgres_backup_network_creation_result
+  changed_when: postgres_backup_network_creation_result.rc == 0
+  failed_when: postgres_backup_network_creation_result.rc != 0 and 'already exists' not in postgres_backup_network_creation_result.stderr
+
+- name: Ensure postgres-backup-local systemd service is present
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/postgres-backup.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ postgres_backup_identifier }}.service"
+    mode: "0644"
+  register: postgres_backup_systemd_service_result
+
+- name: Determine whether postgres-backup-local needs a restart
+  ansible.builtin.set_fact:
+    postgres_backup_restart_necessary: >-
+      {{
+        postgres_backup_support_files_result.changed | default(false)
+        or postgres_backup_systemd_service_result.changed | default(false)
+        or postgres_backup_container_image_pull_result_ansible_module.changed | default(false)
+        or postgres_backup_container_image_pull_result_command.changed | default(false)
+      }}

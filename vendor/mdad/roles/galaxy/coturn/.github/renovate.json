@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>mother-of-all-self-hosting/renovate-config#v1.1.0",
+    "github>mother-of-all-self-hosting/renovate-config//patch-automerge#v1.1.0"
+  ],
+  "packageRules": [
+    {
+      "description": "coturn/coturn publishes every release as a bare `4.17.2` next to a pile of variants (`4.17.2-r0`, `4.17.2-alpine`, `4.17.2-alpine3.24`, `4.17.2-r0-alpine-s390x`) and floating `4`/`4.17` tags. `coturn_version` has to stay a bare three-part version, because `coturn_container_image_tag` appends `-alpine` to it and `4.17.2-alpine-alpine` is not an image. Pinning the versioning to exactly that shape rules the variants out structurally instead of relying on which of them a looser scheme happens to consider unstable, and naming major/minor/patch keeps the update type that drives patch automerging unambiguous.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["coturn/coturn"],
+      "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$"
+    }
+  ]
+}

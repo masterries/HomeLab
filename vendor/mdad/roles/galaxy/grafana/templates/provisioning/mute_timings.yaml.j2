@@ -1,0 +1,11 @@
+{#
+SPDX-FileCopyrightText: 2025 spatterlight
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+apiVersion: 1
+
+muteTimes: {{ grafana_provisioning_mute_timings_muteTimes | to_json }}
+
+deleteMuteTimes: {{ grafana_provisioning_mute_timings_deleteMuteTimes | to_json }}

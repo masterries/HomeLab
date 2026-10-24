@@ -1,0 +1,200 @@
+---
+- name: Fail if util called incorrectly (missing postgres_db_migration_request)
+  ansible.builtin.fail:
+    msg: "The `postgres_db_migration_request` variable needs to be provided to this util."
+  when: "postgres_db_migration_request is not defined"
+
+- name: Fail if util called incorrectly (invalid postgres_db_migration_request)
+  ansible.builtin.fail:
+    msg: "The `postgres_db_migration_request` variable needs to contain `{{ item }}`."
+  with_items:
+    - src
+    - dst
+    - caller
+    - engine_variable_name
+    - systemd_services_to_stop
+  when: "item not in postgres_db_migration_request"
+
+- name: Check if the provided source database file exists
+  ansible.builtin.stat:
+    path: "{{ postgres_db_migration_request.src }}"
+  register: postgres_db_migration_request_src_stat_result
+
+- name: Fail if provided source database file doesn't exist
+  ansible.builtin.fail:
+    msg: "File cannot be found on the server at {{ postgres_db_migration_request.src }}"
+  when: "not postgres_db_migration_request_src_stat_result.stat.exists"
+
+- when: "postgres_pgloader_container_image_self_build | bool"
+  block:
+    - name: Ensure pgloader repository is present on self-build
+      ansible.builtin.git:
+        repo: "{{ postgres_pgloader_container_image_self_build_repo }}"
+        dest: "{{ postgres_pgloader_container_image_self_build_src_path }}"
+        version: "{{ postgres_pgloader_container_image_self_build_repo_branch }}"
+        force: "yes"
+      become: true
+      become_user: "{{ postgres_uid }}"
+      register: postgres_pgloader_git_pull_results
+
+    # If `stable` is used, we hit an error when processing /opt/src/pgloader/build/quicklisp/dists/quicklisp/software/uax-15-20201220-git/data/CompositionExclusions.txt:
+    # > the octet sequence #(194) cannot be decoded
+    #
+    # The issue is described here and is not getting fixed for months: https://github.com/dimitri/pgloader/pull/1179
+    #
+    # Although we're not using the dimitri/pgloader image, the one we're using suffers from the same problem.
+    - name: Switch pgloader base image from Debian stable (likely 10.x/Buster) to Bullseye
+      ansible.builtin.lineinfile:
+        path: "{{ postgres_pgloader_container_image_self_build_src_path }}/Dockerfile"
+        regexp: "{{ item.match }}"
+        line: "{{ item.replace }}"
+      with_items:
+        - match: "^FROM debian:stable-slim as builder$"
+          replace: "FROM debian:bullseye-slim as builder"
+        - match: "^FROM debian:stable-slim$"
+          replace: "FROM debian:bullseye-slim"
+
+    - name: Ensure pgloader container image is built
+      community.docker.docker_image_build:
+        name: "{{ postgres_pgloader_container_image }}"
+        dockerfile: Dockerfile
+        path: "{{ postgres_pgloader_container_image_self_build_src_path }}"
+        pull: true
+        rebuild: "{{ 'always' if postgres_pgloader_git_pull_results.changed | bool else 'never' }}"
+
+- name: Ensure pgloader container image is pulled
+  community.docker.docker_image_pull:
+    name: "{{ postgres_pgloader_container_image }}"
+    pull: always
+  when: "not postgres_pgloader_container_image_self_build"
+
+# Defaults
+
+# No waiting is needed with the readiness check (see `postgres_managed_databases_postgres_start_wait_timeout_seconds`).
+- name: Set postgres_start_wait_time, if not provided
+  ansible.builtin.set_fact:
+    postgres_start_wait_time: "{{ 0 if postgres_systemd_readiness_check_enabled | bool else 15 }}"
+  when: "postgres_start_wait_time | default('') == ''"
+
+# Actual import work
+
+# Postgres is most likely started already
+- name: Ensure Postgres service is started
+  ansible.builtin.service:
+    name: "{{ postgres_identifier }}"
+    state: started
+    daemon_reload: true
+  register: postgres_ensure_started_result
+
+- name: Wait a bit, so that Postgres can start
+  ansible.builtin.wait_for:
+    timeout: "{{ postgres_start_wait_time }}"
+  delegate_to: 127.0.0.1
+  become: false
+  when: "postgres_ensure_started_result.changed | bool and (postgres_start_wait_time | int) > 0"
+
+# We only stop services here, leaving it to the caller to start them later.
+#
+# We can't start them, because they probably need to be reconfigured too (changing the configuration from using SQLite to Postgres, etc.),
+# before starting.
+#
+# Since the caller will be starting them, it might make sense to leave stopping to it as well.
+# However, we don't do it, because it's simpler having it here, and it also gets to happen only if we'll be doing an import.
+# If we bailed out (somewhere above), nothing would have gotten stopped. It's nice to leave this running in such cases.
+- name: Ensure systemd services blocking the database import are stopped
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: stopped
+  failed_when: false
+  with_items: "{{ postgres_db_migration_request.systemd_services_to_stop }}"
+
+# The destination connection string contains a password. We pass it to pgloader via an environment file
+# (referenced by the pgloader command via an environment variable), instead of passing it on the
+# command line, where it would leak into the process list and into Ansible's error output if the
+# import fails. We use a uniquely-named temporary file (not a fixed path), so that concurrent
+# invocations against the same Postgres instance do not overwrite one another's connection string.
+- name: Create a temporary file for holding the pgloader connection string
+  ansible.builtin.tempfile:
+    state: file
+    path: "{{ postgres_base_path }}"
+    prefix: .env-postgres-pgloader
+  register: postgres_migrate_db_to_postgres_env_file
+
+- name: Perform pgloader import
+  block:
+    - name: Populate the pgloader environment file
+      ansible.builtin.copy:
+        content: "POSTGRES_DB_CONNECTION_STRING={{ postgres_db_migration_request.dst }}"
+        dest: "{{ postgres_migrate_db_to_postgres_env_file.path }}"
+        mode: '0600'
+      no_log: true
+
+    - name: Import {{ postgres_db_migration_request.engine_old }} database from {{ postgres_db_migration_request.src }} into Postgres # noqa name[template]
+      ansible.builtin.command:
+        cmd: >-
+          {{ devture_systemd_docker_base_host_command_docker }} run
+          --rm
+          --user={{ postgres_container_uid }}:{{ postgres_container_gid }}
+          --cap-drop=ALL
+          --env-file={{ postgres_migrate_db_to_postgres_env_file.path }}
+          --network={{ postgres_container_network }}
+          --mount type=bind,src={{ postgres_db_migration_request.src }},dst=/in.db,ro
+          --entrypoint={{ postgres_container_shell_path }}
+          {{ postgres_pgloader_container_image }}
+          -c
+          'pgloader {{ postgres_db_migration_request.pgloader_options | default([]) | join(' ') }} /in.db "$POSTGRES_DB_CONNECTION_STRING"'
+      register: postgres_migrate_db_to_postgres_import_result
+      changed_when: postgres_migrate_db_to_postgres_import_result.rc == 0
+  always:
+    - name: Remove the temporary pgloader environment file
+      ansible.builtin.file:
+        path: "{{ postgres_migrate_db_to_postgres_env_file.path }}"
+        state: absent
+
+- when: "postgres_db_migration_request.additional_psql_statements_list | default([]) | length > 0"
+  block:
+    - ansible.builtin.include_role:
+        name: "{{ ansible_role_name }}"
+        tasks_from: detect_existing_postgres_version
+
+    - when: postgres_detected_existing | bool
+      ansible.builtin.set_fact:
+        postgres_container_image_to_use: "{{ postgres_detected_version_corresponding_container_image }}"
+
+    - name: Execute additional Postgres SQL migration statements
+      ansible.builtin.command:
+        cmd: >-
+          {{ devture_systemd_docker_base_host_command_docker }} run
+          --rm
+          --user={{ postgres_container_uid }}:{{ postgres_container_gid }}
+          --cap-drop=ALL
+          --env-file={{ postgres_base_path }}/env-postgres-psql
+          --network={{ postgres_container_network }}
+          {{ postgres_container_image_to_use }}
+          psql --host={{ postgres_identifier }} --dbname={{ postgres_db_migration_request.additional_psql_statements_db_name }} --command='{{ item }}'
+      with_items: "{{ postgres_db_migration_request.additional_psql_statements_list }}"
+      register: postgres_migrate_db_to_postgres_additional_queries_result
+      changed_when: postgres_migrate_db_to_postgres_additional_queries_result.rc == 0
+
+- name: Archive {{ postgres_db_migration_request.engine_old }} database ({{ postgres_db_migration_request.src }} -> {{ postgres_db_migration_request.src }}.backup) # noqa name[template]
+  ansible.builtin.command:
+    cmd: "mv {{ postgres_db_migration_request.src }} {{ postgres_db_migration_request.src }}.backup"
+  register: postgres_migrate_db_to_postgres_move_result
+  changed_when: postgres_migrate_db_to_postgres_move_result.rc == 0
+
+- name: Inject result
+  ansible.builtin.set_fact:
+    devture_playbook_runtime_messages_list: |
+      {{
+        devture_playbook_runtime_messages_list | default([])
+        +
+        [
+          "NOTE: Your " + postgres_db_migration_request.engine_old + " database file has been imported into Postgres. The original database file has been moved from `" + postgres_db_migration_request.src + "` to `" + postgres_db_migration_request.src + ".backup`. When you've confirmed that the import went well and everything works, you should be able to safely delete this file."
+        ]
+      }}
+
+- name: Ensure Postgres is stopped (if it previously was)
+  when: "postgres_ensure_started_result.changed | bool"
+  ansible.builtin.service:
+    name: "{{ postgres_identifier }}"
+    state: stopped

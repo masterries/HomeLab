@@ -1,0 +1,97 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+
+# location
+one_file_system: {{ backup_borg_location_one_file_system | to_json }}
+source_directories: {{ backup_borg_location_source_directories|to_json }}
+repositories:
+  {% for repo in backup_borg_location_repositories %}
+  - path: {{ repo }}
+  {% endfor %}
+exclude_patterns: {{ backup_borg_location_exclude_patterns|to_json }}
+# compatibility with borgmatic < 1.9.0 to avoid db backups location shifts
+user_runtime_directory: /root/.borgmatic
+{% if backup_borg_location_remote_path|length > 0 %}
+remote_path: {{ backup_borg_location_remote_path|to_json }}
+{% endif %}
+
+# storage
+compression: {{ backup_borg_storage_compression|to_json }}
+ssh_command: {{ backup_borg_storage_ssh_command|to_json }}
+archive_name_format: {{ backup_borg_storage_archive_name_format|to_json }}
+encryption_passphrase: {{ backup_borg_storage_encryption_passphrase|to_json }}
+unknown_unencrypted_repo_access_is_ok: {{ backup_borg_unknown_unencrypted_repo_access_is_ok|to_json }}
+
+# retention
+keep_hourly: {{ backup_borg_retention_keep_hourly|to_json }}
+keep_daily: {{ backup_borg_retention_keep_daily|to_json }}
+keep_weekly: {{ backup_borg_retention_keep_weekly|to_json }}
+keep_monthly: {{ backup_borg_retention_keep_monthly|to_json }}
+keep_yearly: {{ backup_borg_retention_keep_yearly|to_json }}
+
+# consistency
+checks:
+  - name: repository
+  - name: archives
+
+# hooks
+{% if backup_borg_postgresql_enabled and backup_borg_postgresql_databases|length > 0 %}
+postgresql_databases:
+{% for database in backup_borg_postgresql_databases %}
+- name: {{ database|to_json }}
+  hostname: {{ backup_borg_postgresql_databases_hostname|to_json }}
+  username: {{ backup_borg_postgresql_databases_username|to_json }}
+  password: {{ backup_borg_postgresql_databases_password|to_json }}
+  port: {{ backup_borg_postgresql_databases_port | int | to_json }}
+{% endfor %}
+{% endif %}
+
+{% if backup_borg_mariadb_enabled and backup_borg_mariadb_databases|length > 0 %}
+mariadb_databases:
+{% for database in backup_borg_mariadb_databases %}
+- name: {{ database|to_json }}
+  hostname: {{ backup_borg_mariadb_databases_hostname|to_json }}
+  username: {{ backup_borg_mariadb_databases_username|to_json }}
+  password: {{ backup_borg_mariadb_databases_password|to_json }}
+  port: {{ backup_borg_mariadb_databases_port | int | to_json }}
+{% endfor %}
+{% endif %}
+
+{% if backup_borg_mongodb_enabled and backup_borg_mongodb_databases|length > 0 %}
+mongodb_databases:
+{% for database in backup_borg_mongodb_databases %}
+- name: {{ database|to_json }}
+  hostname: {{ backup_borg_mongodb_databases_hostname|to_json }}
+  username: {{ backup_borg_mongodb_databases_username|to_json }}
+  password: {{ backup_borg_mongodb_databases_password|to_json }}
+  port: {{ backup_borg_mongodb_databases_port | int | to_json }}
+{% endfor %}
+{% endif %}
+
+{% if backup_borg_mysql_enabled and backup_borg_mysql_databases|length > 0 %}
+mysql_databases:
+{% for database in backup_borg_mysql_databases %}
+- name: {{ database|to_json }}
+  hostname: {{ backup_borg_mysql_databases_hostname|to_json }}
+  username: {{ backup_borg_mysql_databases_username|to_json }}
+  password: {{ backup_borg_mysql_databases_password|to_json }}
+  port: {{ backup_borg_mysql_databases_port | int | to_json }}
+{% endfor %}
+{% endif %}
+
+{% if backup_borg_healthchecks_ping_url|length > 0 %}
+healthchecks:
+  ping_url: {{ backup_borg_healthchecks_ping_url|to_json }}
+  states: {{ backup_borg_healthchecks_states|to_json }}
+{% endif %}
+
+{% if backup_borg_ntfy_topic | length > 0 %}
+ntfy:
+  topic: {{ backup_borg_ntfy_topic | to_json }}
+  server: {{ backup_borg_ntfy_server | to_json }}
+{% if backup_borg_ntfy_access_username != '' %}
+  username: {{ backup_borg_ntfy_access_username | to_json }}
+  password: {{ backup_borg_ntfy_access_password | to_json }}
+{% elif backup_borg_ntfy_access_token != '' %}
+  access_token: {{ backup_borg_ntfy_access_token | to_json }}
+{% endif %}
+{% endif %}

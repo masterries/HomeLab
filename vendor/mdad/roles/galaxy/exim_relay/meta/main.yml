@@ -1,0 +1,21 @@
+galaxy_info:
+  author: Slavi Pantaleev
+  company: Devture Ltd
+  role_name: exim_relay
+  namespace: mash
+  description: exim-relay SMTP server
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Ubuntu
+      versions:
+        - all
+    - name: ArchLinux
+      versions:
+        - all
+    - name: EL
+      versions:
+        - all
+  license: AGPL-3.0-or-later
+  min_ansible_version: '2.1'

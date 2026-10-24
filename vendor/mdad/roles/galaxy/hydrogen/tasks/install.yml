@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2022 MDAD project contributors
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2022 Nikita Chernyi
+# SPDX-FileCopyrightText: 2022 Sebastian Gumprich
+# SPDX-FileCopyrightText: 2022-2025 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2024 David Mehren
+# SPDX-FileCopyrightText: 2025, 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure Hydrogen paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ hydrogen_uid }}"
+    group: "{{ hydrogen_gid }}"
+  with_items:
+    - "{{ hydrogen_base_path }}"
+    - "{{ hydrogen_config_path }}"
+
+- name: Ensure Hydrogen support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ hydrogen_base_path }}/{{ item }}"
+    mode: "0640"
+    owner: "{{ hydrogen_uid }}"
+    group: "{{ hydrogen_gid }}"
+  with_items:
+    - env
+    - labels
+  register: hydrogen_support_files_result
+
+- name: Ensure Hydrogen nginx.conf installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ hydrogen_config_path }}/{{ item }}"
+    mode: "0640"
+    owner: "{{ hydrogen_uid }}"
+    group: "{{ hydrogen_gid }}"
+  with_items:
+    - nginx.conf
+  register: hydrogen_nginx_config_file_result
+
+- name: Ensure Hydrogen configuration installed
+  ansible.builtin.copy:
+    content: "{{ hydrogen_configuration | to_nice_json }}"
+    dest: "{{ hydrogen_config_path }}/config.json"
+    mode: "0640"
+    owner: "{{ hydrogen_uid }}"
+    group: "{{ hydrogen_gid }}"
+  register: hydrogen_config_file_result
+
+- name: Run if self-building of Hydrogen container image is not enabled
+  when: "not hydrogen_container_image_self_build | bool"
+  block:
+    - name: Ensure Hydrogen container image is pulled via community.docker.docker_image_pull
+      when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+      community.docker.docker_image_pull:
+        name: "{{ hydrogen_container_image }}"
+        pull: always
+      register: hydrogen_container_image_pull_result_ansible_module
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: hydrogen_container_image_pull_result_ansible_module is not failed
+
+    - name: Ensure Hydrogen container image is pulled via ansible.builtin.command
+      when: devture_systemd_docker_base_container_image_pull_method == 'command'
+      ansible.builtin.command:
+        cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ hydrogen_container_image }}"
+      register: hydrogen_container_image_pull_result_command
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: hydrogen_container_image_pull_result_command is not failed
+      changed_when: "'Downloaded newer image' in hydrogen_container_image_pull_result_command.stdout"
+
+- name: Run if self-building of Hydrogen container image is enabled
+  when: "hydrogen_container_image_self_build | bool"
+  block:
+    - name: Ensure Hydrogen repository is present on self-build
+      ansible.builtin.git:
+        repo: "{{ hydrogen_container_image_self_build_repo }}"
+        version: "{{ hydrogen_container_image_self_build_repo_version }}"
+        dest: "{{ hydrogen_container_image_self_build_src_files_path }}"
+        force: "yes"
+      register: hydrogen_git_pull_results
+
+    - name: Ensure Hydrogen container image is built
+      community.docker.docker_image_build:
+        name: "{{ hydrogen_container_image_self_build_name }}"
+        dockerfile: Dockerfile
+        path: "{{ hydrogen_container_image_self_build_src_files_path }}"
+        pull: true
+        rebuild: "{{ 'always' if hydrogen_git_pull_results.changed | bool else 'never' }}"
+      register: hydrogen_container_image_build_result
+
+- name: Ensure Hydrogen container network is created via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ hydrogen_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+  register: hydrogen_network_creation_result
+
+- name: Ensure Hydrogen container network is created via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+      {{ hydrogen_container_network }}
+  register: hydrogen_network_creation_result
+  changed_when: hydrogen_network_creation_result.rc == 0
+  failed_when: hydrogen_network_creation_result.rc != 0 and 'already exists' not in hydrogen_network_creation_result.stderr
+
+- name: Ensure Hydrogen systemd service is present
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/hydrogen.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ hydrogen_identifier }}.service"
+    mode: "0644"
+  register: hydrogen_systemd_service_result
+
+- name: Determine whether Hydrogen needs a restart
+  ansible.builtin.set_fact:
+    hydrogen_restart_necessary: >-
+      {{
+        hydrogen_support_files_result.changed | default(false)
+        or hydrogen_nginx_config_file_result.changed | default(false)
+        or hydrogen_config_file_result.changed | default(false)
+        or hydrogen_systemd_service_result.changed | default(false)
+        or hydrogen_container_image_pull_result_ansible_module.changed | default(false)
+        or hydrogen_container_image_pull_result_command.changed | default(false)
+        or hydrogen_container_image_build_result.changed | default(false)
+      }}

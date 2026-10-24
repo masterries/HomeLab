@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: 2023 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 MASH project contributors
+# SPDX-FileCopyrightText: 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+base_url: {{ ntfy_base_url }}
+behind_proxy: true
+
+upstream-base-url: {{ ntfy_upstream_base_url }}
+
+{% if ntfy_cache_file_enabled %}
+cache_file: /data/cache.db
+{% endif %}
+
+listen-http: :8080
+
+# Rate Limits
+global-topic-limit: {{ ntfy_global_topic_limit | to_json }}
+visitor-subscription-limit: {{ ntfy_visitor_subscription_limit | to_json }}
+
+visitor-request-limit-burst: {{ ntfy_visitor_request_limit_burst | to_json }}
+visitor-request-limit-replenish: {{ ntfy_visitor_request_limit_replenish | to_json }}
+
+web-root: {{ ntfy_web_root | to_json }}
+
+{% if ntfy_attachment_enabled %}
+attachment-cache-dir: /cache/attachments
+attachment-total-size-limit: {{ ntfy_attachment_total_size_limit | to_json }}
+attachment-file-size-limit: {{ ntfy_attachment_file_size_limit | to_json }}
+attachment-expiry-duration: {{ ntfy_attachment_expiry_duration | to_json }}
+
+# Rate limits
+visitor-attachment-total-size-limit: {{ ntfy_visitor_attachment_total_size_limit | to_json }}
+visitor-attachment-daily-bandwidth-limit: {{ ntfy_visitor_attachment_daily_bandwidth_limit | to_json }}
+{% endif %}
+
+{% if ntfy_auth_enabled | bool %}
+auth-file: /data/auth.db
+auth-default-access: {{ ntfy_auth_default_access | to_json }}
+{% if ntfy_auth_users | length > 0 %}
+auth-users:
+{% for user in ntfy_auth_users %}
+  - {{ (user.username ~ ':' ~ user.password_hash ~ ':' ~ (user.role | default('user'))) | to_json }}
+{% endfor %}
+{% endif %}
+{% if ntfy_auth_access | length > 0 %}
+auth-access:
+{% for entry in ntfy_auth_access %}
+  - {{ (entry.username ~ ':' ~ entry.topic_pattern ~ ':' ~ entry.access) | to_json }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+enable-login: {{ ntfy_enable_login | bool | to_json }}
+enable-signup: {{ ntfy_enable_signup | bool | to_json }}
+enable-reservations: {{ ntfy_enable_reservations | bool | to_json }}
+
+{% if ntfy_smtp_sender_enabled %}
+smtp-sender-addr: "{{ ntfy_smtp_sender_addr_host }}:{{ ntfy_smtp_sender_addr_port }}"
+smtp-sender-user: "{{ ntfy_smtp_sender_username }}"
+smtp-sender-pass: "{{ ntfy_smtp_sender_password }}"
+smtp-sender-from: "{{ ntfy_smtp_sender_from }}"
+
+# Rate limits
+visitor-email-limit-burst: {{ ntfy_visitor_email_limit_burst | to_json }}
+visitor-email-limit-replenish: {{ ntfy_visitor_email_limit_replenish | to_json }}
+{% endif %}
+
+{% if ntfy_metrics_listen_http_port | string | length > 0 %}
+metrics-listen-http: "{{ ntfy_metrics_listen_http_host }}:{{ ntfy_metrics_listen_http_port }}"
+{% elif ntfy_metrics_default_enabled %}
+enable-metrics: true
+{% endif %}

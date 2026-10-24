@@ -1,0 +1,375 @@
+# SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2023, 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2023-2025 Nikita Chernyi
+# SPDX-FileCopyrightText: 2025 moanos <julian-samuel@gebuehr.net>
+# SPDX-FileCopyrightText: 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+# Project source code URL: https://github.com/etkecc/borgmatic
+
+backup_borg_enabled: true
+
+backup_borg_identifier: 'backup-borg'
+backup_borg_base_path: "/{{ backup_borg_identifier }}"
+backup_borg_bin_path: "{{ backup_borg_base_path }}/bin"
+backup_borg_config_path: "{{ backup_borg_base_path }}/config"
+backup_borg_restore_path: "{{ backup_borg_base_path }}/restored"
+
+# Use the published Borg/borgmatic image pair with the detected Postgres
+# major. Without a detected Postgres major, use the image's moving latest
+# tag. Also see the `backup_borg_postgresql_version_detection_*` variables.
+backup_borg_version: "{{ (backup_borg_postgres_version ~ '-' ~ backup_borg_borg_version ~ '-' ~ backup_borg_borgmatic_version) if backup_borg_postgres_version else 'latest' }}"
+backup_borg_alpine_version: edge
+
+# Renovate follows published Postgres-prefixed GHCR tags for this pair.
+# CI checks the tags for all supported Postgres versions before merge.
+# renovate: datasource=docker depName=ghcr.io/etkecc/borgmatic versioning=loose
+backup_borg_image_version: 1.4.5-2.1.10
+backup_borg_borg_version: "{{ backup_borg_image_version.split('-')[0] }}"
+backup_borg_borgmatic_version: "{{ backup_borg_image_version.split('-')[1] }}"
+
+backup_borg_postgres_version: ""
+
+backup_borg_uid: ""
+backup_borg_gid: ""
+
+backup_borg_container_image: "{{ backup_borg_container_image_registry_prefix }}etkecc/borgmatic:{{ backup_borg_version }}"
+backup_borg_container_image_registry_prefix: "{{ 'localhost/' if backup_borg_container_image_self_build else backup_borg_container_image_registry_prefix_upstream }}"
+backup_borg_container_image_registry_prefix_upstream: "{{ backup_borg_container_image_registry_prefix_upstream_default }}"
+backup_borg_container_image_registry_prefix_upstream_default: "ghcr.io/"
+
+backup_borg_container_image_self_build: false
+backup_borg_container_image_self_build_repo: "https://github.com/etkecc/borgmatic"
+backup_borg_container_image_self_build_repo_version: main
+backup_borg_container_image_self_build_src_files_path: "{{ backup_borg_base_path }}/docker-src"
+
+# The base container network. It will be auto-created by this role if it doesn't exist already.
+backup_borg_container_network: "{{ backup_borg_identifier }}"
+
+# Control if the container network is deleted on uninstalling.
+backup_borg_container_network_deletion_enabled: true
+
+# Specify the size of the container's tmpfs volumes
+backup_borg_container_tmpfs_tmp_size: 4096m
+backup_borg_container_tmpfs_root_size: "{{ backup_borg_container_tmpfs_tmp_size }}"
+
+# A list of extra arguments to pass to the container (`docker create` command)
+backup_borg_container_extra_arguments: "{{ backup_borg_container_extra_arguments_auto + backup_borg_container_extra_arguments_custom }}"
+backup_borg_container_extra_arguments_auto: []
+backup_borg_container_extra_arguments_custom: []
+
+# A list of extra arguments to pass to the process inside the container
+# Example: ['--SOME_ARGUMENT']
+backup_borg_process_extra_arguments: "{{ backup_borg_process_extra_arguments_auto + backup_borg_process_extra_arguments_custom }}"
+backup_borg_process_extra_arguments_auto:
+  - "sh -c 'borgmatic rcreate --encryption {{ backup_borg_encryption }}'"
+backup_borg_process_extra_arguments_custom: []
+
+# List of systemd services that the BorgBackup systemd service depends on
+backup_borg_systemd_required_services_list: "{{ backup_borg_systemd_required_services_list_default + backup_borg_systemd_required_services_list_auto + backup_borg_systemd_required_services_list_custom }}"
+backup_borg_systemd_required_services_list_default: "{{ [devture_systemd_docker_base_docker_service_name] if devture_systemd_docker_base_docker_service_name else [] }}"
+backup_borg_systemd_required_services_list_auto: []
+backup_borg_systemd_required_services_list_custom: []
+
+# List of systemd services that the BorgBackup systemd service wants
+backup_borg_systemd_wanted_services_list: "{{ backup_borg_systemd_wanted_services_list_default + backup_borg_systemd_wanted_services_list_auto + backup_borg_systemd_wanted_services_list_custom }}"
+backup_borg_systemd_wanted_services_list_default: []
+backup_borg_systemd_wanted_services_list_auto: []
+backup_borg_systemd_wanted_services_list_custom: []
+
+# Controls how long to wait for the container to stop gracefully before killing it.
+backup_borg_container_stop_grace_time_seconds: "{{ devture_systemd_docker_base_container_stop_grace_time_seconds }}"
+
+# Controls how long the pre-start cleanup should wait for stale container-name release
+# before failing startup explicitly.
+backup_borg_container_cleanup_timeout_seconds: "{{ devture_systemd_docker_base_container_cleanup_timeout_seconds }}"
+
+# Controls the delay between pre-start cleanup retries.
+backup_borg_container_cleanup_retry_delay_seconds: "{{ devture_systemd_docker_base_container_cleanup_retry_delay_seconds }}"
+
+# Controls how long each individual `docker` call in the pre-start cleanup loop may run
+# before being killed. These calls are bookkeeping (stop/remove/inspect a container, ping
+# the daemon) and are expected to be fast regardless of how large or slow the backup itself
+# is, so bounding them - unlike the backup run - does not risk cutting off a legitimate
+# backup. Without this, a wedged Docker daemon call can hang the cleanup step forever,
+# which then blocks every future scheduled backup, since nothing else would ever unstick it.
+backup_borg_container_cleanup_docker_call_timeout_seconds: 15
+
+# Shell command used in the systemd pre-start phase to deterministically remove a stale
+# container and wait until Docker releases its name.
+backup_borg_container_cleanup_command: |
+  i=0;
+  while [ "$i" -lt {{ backup_borg_container_cleanup_timeout_seconds }} ]; do
+  timeout {{ backup_borg_container_cleanup_docker_call_timeout_seconds }} {{ devture_systemd_docker_base_host_command_docker }} stop -t {{ backup_borg_container_stop_grace_time_seconds }} {{ backup_borg_identifier }} >/dev/null 2>&1 || true;
+  timeout {{ backup_borg_container_cleanup_docker_call_timeout_seconds }} {{ devture_systemd_docker_base_host_command_docker }} rm -f {{ backup_borg_identifier }} >/dev/null 2>&1 || true;
+  if timeout {{ backup_borg_container_cleanup_docker_call_timeout_seconds }} {{ devture_systemd_docker_base_host_command_docker }} container inspect {{ backup_borg_identifier }} >/dev/null 2>&1; then
+  i=$((i + 1));
+  sleep {{ backup_borg_container_cleanup_retry_delay_seconds }};
+  continue;
+  fi;
+  if timeout {{ backup_borg_container_cleanup_docker_call_timeout_seconds }} {{ devture_systemd_docker_base_host_command_docker }} info >/dev/null 2>&1; then
+  exit 0;
+  fi;
+  echo "Failed to query Docker daemon while cleaning up {{ backup_borg_identifier }}" >&2;
+  exit 1;
+  done;
+  echo "Failed to remove stale container {{ backup_borg_identifier }} after {{ backup_borg_container_cleanup_timeout_seconds }} attempts" >&2;
+  exit 1
+
+backup_borg_username: 'backup-borg'
+
+# Specify systemd calendar configuration for the backup job
+# Note that the actual job may run with a delay (see `backup_borg_schedule_randomized_delay_sec`)
+backup_borg_schedule: "*-*-* 04:00:00"
+
+# Specify the delay with which the systemd timer may run in relation to the `backup_borg_schedule` schedule
+backup_borg_schedule_randomized_delay_sec: 2h
+
+# Specify directories should be added to backup
+backup_borg_location_source_directories: "{{ backup_borg_location_source_directories_auto + backup_borg_location_source_directories_custom }}"
+backup_borg_location_source_directories_auto: [] # _auto can be used to be automatically populated by playbooks
+backup_borg_location_source_directories_custom: [] # _custom can be used to specify additional directories
+
+# Specify target repositories
+backup_borg_location_repositories: []
+
+# Specify excluded paths
+backup_borg_location_exclude_patterns: "{{ backup_borg_location_exclude_patterns_auto + backup_borg_location_exclude_patterns_custom }}"
+backup_borg_location_exclude_patterns_auto: [] # _auto can be used to be automatically populated by playbooks
+backup_borg_location_exclude_patterns_custom: [] # _custom can be used to specify additional exclude patterns
+
+backup_borg_location_one_file_system: true
+
+backup_borg_location_remote_path: ""
+
+# Specify compression algorithm
+backup_borg_storage_compression: lz4
+
+# Specify BorgBackup SSH command to run with SSH key
+backup_borg_storage_ssh_command: ssh -o "StrictHostKeyChecking accept-new" -i /etc/borgmatic.d/sshkey
+
+# Specify archive name format
+backup_borg_storage_archive_name_format: backup-borg-{now:%Y-%m-%d-%H%M%S}
+
+# Specify repository passphrase
+backup_borg_storage_encryption_passphrase: ""
+
+# Control if unencrypted repoitory access is allowed
+backup_borg_unknown_unencrypted_repo_access_is_ok: "{{ backup_borg_encryption == 'none' }}"
+
+# Specify retention configuration
+backup_borg_retention_keep_hourly: 0
+backup_borg_retention_keep_daily: 7
+backup_borg_retention_keep_weekly: 4
+backup_borg_retention_keep_monthly: 12
+backup_borg_retention_keep_yearly: 2
+
+# Specify BorgBackup encryption mode
+# Only "repokey-*" and "none" are supported
+backup_borg_encryption: repokey-blake2
+
+# Specify private SSH key used to connect to the BorgBackup repo
+backup_borg_ssh_key_private: ""
+
+backup_borg_supported_postgres_versions: ['12', '13', '14', '15', '16', '17', '18']
+
+########################################################################
+#                                                                      #
+# Postgres database backup                                             #
+#                                                                      #
+########################################################################
+
+backup_borg_postgresql_enabled: true
+
+# backup_borg_databases contains a list of database names to back up
+# DO NOT set this variable directly, instead use `backup_borg_postgresql_databases_auto or backup_borg_postgresql_databases_custom`
+backup_borg_postgresql_databases: "{{ backup_borg_postgresql_databases_auto + backup_borg_postgresql_databases_custom }}"
+
+# Used by playbooks to automatically set the databases to back up
+# E.g. the mash-playbook automatically sets up postgres databases for services that need them.
+backup_borg_postgresql_databases_auto: []
+
+# Specify the databases to back up
+backup_borg_postgresql_databases_custom: []
+
+backup_borg_postgresql_databases_hostname: ""
+backup_borg_postgresql_databases_username: "{{ backup_borg_identifier }}"
+backup_borg_postgresql_databases_password: ""
+backup_borg_postgresql_databases_port: 5432
+
+backup_borg_postgresql_version_detection_enabled: "{{ backup_borg_postgresql_version_detection_postgres_role_name != '' }}"
+
+# Specify the role name, leading to the com.devture.ansible.role.postgres.
+# This role is invoked to determine the Postgres version, unless you have set `backup_borg_version` manually.
+backup_borg_postgresql_version_detection_postgres_role_name: ""
+
+########################################################################
+#                                                                      #
+# /Postgres database backup                                            #
+#                                                                      #
+########################################################################
+
+########################################################################
+#                                                                      #
+# MariaDB database backup                                              #
+#                                                                      #
+########################################################################
+
+backup_borg_mariadb_enabled: true
+
+# backup_borg_databases contains a list of database names to back up
+# DO NOT set this variable directly, instead use `backup_borg_mariadb_databases_auto or backup_borg_mariadb_databases_custom`
+backup_borg_mariadb_databases: "{{ backup_borg_mariadb_databases_auto + backup_borg_mariadb_databases_custom }}"
+
+# Used by playbooks to automatically set the databases to back up
+backup_borg_mariadb_databases_auto: []
+
+# Specify the databases to back up
+backup_borg_mariadb_databases_custom: []
+
+backup_borg_mariadb_databases_hostname: ""
+backup_borg_mariadb_databases_username: "{{ backup_borg_identifier }}"
+backup_borg_mariadb_databases_password: ""
+backup_borg_mariadb_databases_port: 3306
+
+########################################################################
+#                                                                      #
+# /MariaDB database backup                                             #
+#                                                                      #
+########################################################################
+
+########################################################################
+#                                                                      #
+# MongoDB database backup                                              #
+#                                                                      #
+########################################################################
+
+backup_borg_mongodb_enabled: true
+
+# backup_borg_databases contains a list of database names to back up
+# DO NOT set this variable directly, instead use `backup_borg_mongodb_databases_auto or backup_borg_mongodb_databases_custom`
+backup_borg_mongodb_databases: "{{ backup_borg_mongodb_databases_auto + backup_borg_mongodb_databases_custom }}"
+
+# Used by playbooks to automatically set the databases to back up
+backup_borg_mongodb_databases_auto: []
+
+# Specify the databases to back up
+backup_borg_mongodb_databases_custom: []
+
+backup_borg_mongodb_databases_hostname: ""
+backup_borg_mongodb_databases_username: "{{ backup_borg_identifier }}"
+backup_borg_mongodb_databases_password: ""
+backup_borg_mongodb_databases_port: 27017
+
+########################################################################
+#                                                                      #
+# /MongoDB database backup                                             #
+#                                                                      #
+########################################################################
+
+########################################################################
+#                                                                      #
+# MySQL database backup                                                #
+#                                                                      #
+########################################################################
+
+backup_borg_mysql_enabled: true
+
+# backup_borg_databases contains a list of database names to back up
+# DO NOT set this variable directly, instead use `backup_borg_mysql_databases_auto or backup_borg_mysql_databases_custom`
+backup_borg_mysql_databases: "{{ backup_borg_mysql_databases_auto + backup_borg_mysql_databases_custom }}"
+
+# Used by playbooks to automatically set the databases to back up
+backup_borg_mysql_databases_auto: []
+
+# Specify the databases to back up
+backup_borg_mysql_databases_custom: []
+
+backup_borg_mysql_databases_hostname: ""
+backup_borg_mysql_databases_username: "{{ backup_borg_identifier }}"
+backup_borg_mysql_databases_password: ""
+backup_borg_mysql_databases_port: 3306
+
+########################################################################
+#                                                                      #
+# /MySQL database backup                                               #
+#                                                                      #
+########################################################################
+
+########################################################################
+#                                                                      #
+# healthchecks                                                         #
+#                                                                      #
+########################################################################
+
+# Setting a Healthchecks ping URL will make borgmatic ping your Healthchecks project when a backup begins, ends, or errors
+# See: https://torsion.org/borgmatic/reference/configuration/monitoring/healthchecks/
+backup_borg_healthchecks_ping_url: ""
+
+# Specify possible states to ping
+backup_borg_healthchecks_states:
+  - start
+  - finish
+  - fail
+
+########################################################################
+#                                                                      #
+# /healthchecks                                                        #
+#                                                                      #
+########################################################################
+
+########################################################################
+#                                                                      #
+# ntfy                                                                 #
+#                                                                      #
+########################################################################
+
+# Setting ntfy's topic and the address of your self-hosted ntfy instance will have borgmatic send push notifications when a backup task fails
+# See: https://torsion.org/borgmatic/reference/configuration/monitoring/ntfy/
+backup_borg_ntfy_topic: ""
+backup_borg_ntfy_server: ""
+
+backup_borg_ntfy_access_username: ""
+backup_borg_ntfy_access_password: ""
+
+backup_borg_ntfy_access_token: ""
+
+########################################################################
+#                                                                      #
+# /ntfy                                                                #
+#                                                                      #
+########################################################################
+
+# Default borgmatic configuration template which covers the generic use case.
+# You can customize it by controlling the various variables inside it.
+#
+# For a more advanced customization, you can extend the default (see `backup_borg_configuration_extension_yaml`)
+# or completely replace this variable with your own template.
+backup_borg_configuration_yaml: "{{ lookup('template', 'templates/config.yaml.j2') }}"
+
+backup_borg_configuration_extension_yaml: |
+  # Your custom YAML configuration for borgmatic goes here.
+  # This configuration extends the default starting configuration (`borg_configuration_yaml`).
+  #
+  # You can override individual variables from the default configuration, or introduce new ones.
+  #
+  # If you need something more special, you can take full control by
+  # completely redefining `backup_borg_configuration_yaml`.
+
+backup_borg_configuration_extension: "{{ backup_borg_configuration_extension_yaml | from_yaml if backup_borg_configuration_extension_yaml | from_yaml is mapping else {} }}"
+
+# Holds the final borgmatic configuration (a combination of the default and its extension).
+# You most likely don't need to touch this variable. Instead, see `backup_borg_configuration_yaml`.
+backup_borg_configuration: "{{ backup_borg_configuration_yaml | from_yaml | combine(backup_borg_configuration_extension, recursive=True) }}"
+
+# backup_borg_restart_necessary controls whether the BorgBackup systemd
+# service will be restarted (when true) or merely started (when false) by the
+# systemd service manager role (when conditional restart is enabled).
+#
+# This value is automatically computed during installation based on whether
+# any configuration files, the systemd service file, or the container image changed.
+# The default of `false` means "no restart needed" — appropriate when the role's
+# installation tasks haven't run (e.g., due to --tags skipping them).
+backup_borg_restart_necessary: false

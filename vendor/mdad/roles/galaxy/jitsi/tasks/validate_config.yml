@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: (Deprecation) Catch and report renamed settings
+  ansible.builtin.fail:
+    msg: >-
+      Your configuration contains a variable, which now has a different name.
+      Please change your configuration to rename the variable (`{{ item.old }}` -> `{{ item.new }}`).
+  when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+  with_items:
+    - { "old": "jitsi_web_config_constraints_enabled", "new": "<Now unnecessary. Constraints are always applied automatically>" }
+    - { "old": "jitsi_web_config_constraints_video_aspectRatio", "new": "<Not applicable anymore>" }
+    - { "old": "jitsi_web_config_constraints_video_height_ideal", "new": "jitsi_web_config_resolution_height_ideal_and_max" }
+    - { "old": "jitsi_web_config_constraints_video_height_max", "new": "jitsi_web_config_resolution_height_ideal_and_max" }
+    - { "old": "jitsi_web_config_constraints_video_height_min", "new": "jitsi_web_config_resolution_height_min" }
+    - "old": "jitsi_web_config_disableAudioLevels"
+      "new": "<Can be set by using jitsi_web_custom_config_extension. Example in docs/configuring-playbook-jitsi.md>"
+    - "old": "jitsi_web_config_enableLayerSuspension"
+      "new": "<Can be set by using jitsi_web_custom_config_extension. Example in docs/configuring-playbook-jitsi.md>"
+    - "old": "jitsi_web_config_channelLastN"
+      "new": "<Can be set by using jitsi_web_custom_config_extension. Example in docs/configuring-playbook-jitsi.md>"
+    - { "old": "jitsi_web_config_testing_p2pTestMode", "new": "<Can be set by using jitsi_web_custom_config_extension>" }
+    - { "old": "jitsi_web_config_start_with_audio_muted", "new": "<Superseded by jitsi_web_config_start_audio_muted_after_nth_participant>" }
+    - { "old": "jitsi_web_config_start_with_video_muted", "new": "<Superseded by jitsi_web_config_start_video_muted_after_nth_participant>" }
+    - { "old": "jitsi_web_http_header_content_permission_policy", "new": "jitsi_web_http_header_permissions_policy" }
+    - { "old": "jitsi_web_interface_config_show_watermark_for_guests", "new": "<Not applicable anymore>" }
+    - { "old": "jitsi_web_interface_config_invitation_powered_by", "new": "<Not applicable anymore>" }
+    - { "old": "jitsi_web_interface_config_lang_detection", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_show_jitsi_watermark", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_jitsi_watermark_link", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_show_brand_watermark", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_brand_watermark_link", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_generate_room_names_on_welcome_page", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_display_welcome_page_content", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_app_name", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_native_app_name", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_provider_name", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_show_powered_by", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_disable_transcription_subtitles", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_interface_config_show_deep_linking_image", "new": "<Deprecated, use jitsi_web_custom_interface_config_extension instead" }
+    - { "old": "jitsi_web_environment_variables_extension", "new": "jitsi_web_environment_variables_additional_variables" }
+    - { "old": "jitsi_jvb_environment_variables_extension", "new": "jitsi_jvb_environment_variables_additional_variables" }
+    - { "old": "jitsi_web_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+    - { "old": "jitsi_prosody_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+    - { "old": "jitsi_jicofo_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+    - { "old": "jitsi_jvb_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+    - "old": "jitsi_jvb_server_id"
+      "new": "<removed> (upstream removed Colibri WebSocket support in stable-11146; clients use SCTP data channels now)"
+    - "old": "jitsi_jvb_container_colibri_ws_host_bind_port"
+      "new": "<removed> (upstream removed Colibri WebSocket support in stable-11146; clients use SCTP data channels now)"
+    - "old": "jitsi_jvb_container_labels_traefik_enabled"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_docker_network"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_hostname"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_path_prefix"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_rule"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_priority"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_entrypoints"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_tls"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_tls_certResolver"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_additional_request_headers_custom"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_container_labels_traefik_additional_response_headers_custom"
+      "new": "<removed> (the JVB no longer serves HTTP, so it needs no reverse-proxy routing)"
+    - "old": "jitsi_jvb_rtp_tcp_port"
+      "new": "<removed> (the JVB TCP harvester is long gone from the upstream images; only the RTP/UDP port is used)"
+    - "old": "jitsi_jvb_container_rtp_tcp_host_bind_port"
+      "new": "<removed> (the JVB TCP harvester is long gone from the upstream images; only the RTP/UDP port is used)"
+    - "old": "jitsi_web_framing_enabled"
+      "new": >-
+        jitsi_web_http_header_content_security_policy_frame_ancestors_enabled (with the opposite meaning:
+        `jitsi_web_framing_enabled: true` corresponds to `jitsi_web_http_header_content_security_policy_frame_ancestors_enabled: false`)
+    - { "old": "jitsi_web_framing_ancestors", "new": "jitsi_web_http_header_content_security_policy_frame_ancestors" }
+    - { "old": "jitsi_web_framing_ancestors_default", "new": "jitsi_web_http_header_content_security_policy_frame_ancestors_default" }
+    - { "old": "jitsi_web_framing_ancestors_auto", "new": "jitsi_web_http_header_content_security_policy_frame_ancestors_auto" }
+    - { "old": "jitsi_web_framing_ancestors_custom", "new": "jitsi_web_http_header_content_security_policy_frame_ancestors_custom" }
+
+- name: Fail if required Jitsi settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`).
+  when: "lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - jitsi_identifier
+    - jitsi_uid
+    - jitsi_gid
+    - jitsi_hostname
+    - jitsi_path_prefix
+    - jitsi_container_network
+
+    - jitsi_architecture
+
+    - jitsi_jibri_xmpp_password
+    - jitsi_jicofo_auth_password
+    - jitsi_jvb_auth_password
+
+- name: Fail if custom frame ancestors are defined, but the frame-ancestors directive is disabled
+  ansible.builtin.fail:
+    msg: >-
+      You have defined custom origins allowed to embed Jitsi Web in an iframe (`jitsi_web_http_header_content_security_policy_frame_ancestors_custom`),
+      but they have no effect, because `jitsi_web_http_header_content_security_policy_frame_ancestors_enabled` is false (embedding is allowed from anywhere).
+      To restrict embedding to these origins, set `jitsi_web_http_header_content_security_policy_frame_ancestors_enabled` to true.
+      To allow embedding from anywhere, remove `jitsi_web_http_header_content_security_policy_frame_ancestors_custom`.
+  when:
+    - not jitsi_web_http_header_content_security_policy_frame_ancestors_enabled | bool
+    - jitsi_web_http_header_content_security_policy_frame_ancestors_custom | length > 0
+
+- name: Fail if on an unsupported architecture
+  ansible.builtin.fail:
+    msg: "Jitsi only supports the amd64 and arm64 architectures right now. See https://github.com/jitsi/docker-jitsi-meet/issues/1069 and https://github.com/jitsi/docker-jitsi-meet/issues/1214"
+  when: jitsi_enabled | bool and jitsi_architecture not in ['amd64', 'arm64']
+
+- name: Fail if authentication is enabled, but not properly configured.
+  ansible.builtin.fail:
+    msg: >-
+      You have enabled authentication, but the configured auth type is missing required configuration.
+
+      Auth type 'internal':
+      At least one Jitsi user needs to be defined in `jitsi_prosody_auth_internal_accounts` when using internal authentication.
+      If you're setting up Jitsi for the first time, you may have missed a step.
+      Refer to our setup instructions (docs/configuring-playbook-jitsi.md).
+
+      Auth type 'matrix':
+      If you want to enable matrix_user_verification in jitsi,
+      please provide an auth token for Matrix User Verification Service (UVS) using `jitsi_prosody_auth_matrix_uvs_auth_token`.
+      If the user-verfication-service is also managed by this playbook the token is derived from `matrix_homeserver_generic_secret_key` in the group vars.
+  when:
+    - jitsi_enable_auth | bool
+    - ((jitsi_auth_type == 'internal' and jitsi_prosody_auth_internal_accounts|length == 0)
+      or (jitsi_auth_type == 'matrix' and jitsi_prosody_auth_matrix_uvs_auth_token|length == 0))

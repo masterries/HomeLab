@@ -1,0 +1,53 @@
+{#
+SPDX-FileCopyrightText: 2023 - 2025 Slavi Pantaleev
+SPDX-FileCopyrightText: 2024 Dark Decoy
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+[server]
+root_url = "https://{{ grafana_hostname }}{{ grafana_path_prefix }}"
+
+[security]
+# default admin user, created on startup
+admin_user = "{{ grafana_default_admin_user }}"
+
+# default admin password, can be changed before first start of grafana, or in profile settings
+admin_password = """{{ grafana_default_admin_password }}"""
+
+# specify content_security_policy to add the Content-Security-Policy header to your requests
+content_security_policy = "{{ grafana_content_security_policy }}"
+
+# specify content security policy template to customized template
+{% if grafana_content_security_policy_customized %}
+content_security_policy_template = """{{ grafana_content_security_policy_template }}"""
+{% endif %}
+
+allow_embedding = {{ grafana_allow_embedding }}
+
+[auth.anonymous]
+# enable anonymous access
+enabled = {{ grafana_anonymous_access | to_json }}
+
+# specify organization name that should be used for unauthenticated users
+org_name = "{{ grafana_anonymous_access_org_name }}"
+
+[dashboards]
+default_home_dashboard_path = {{ grafana_default_home_dashboard_path }}
+
+{% if grafana_feature_toggles_enable %}
+[feature_toggles]
+enable = true
+{% endif %}
+
+{% if grafana_mailer_enabled %}
+[smtp]
+enabled = {{ grafana_mailer_enabled }}
+host = {{ grafana_config_smtp_host }}:{{ grafana_config_smtp_port }}
+user = {{ grafana_config_smtp_user }}
+password = """{{ grafana_config_smtp_password }}"""
+from_address = {{ grafana_config_smtp_from_address }}
+{% endif %}
+
+[metrics]
+enabled = {{ grafana_metrics_enabled | to_json }}

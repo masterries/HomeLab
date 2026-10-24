@@ -1,0 +1,92 @@
+{#
+SPDX-FileCopyrightText: 2022 - 2025 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+[Unit]
+Description=Postgres server ({{ postgres_identifier }})
+{% for service in postgres_systemd_required_services_list %}
+Requires={{ service }}
+After={{ service }}
+{% endfor %}
+DefaultDependencies=no
+
+[Service]
+Type=simple
+Environment="HOME={{ devture_systemd_docker_base_systemd_unit_home_path }}"
+ExecStartPre={{ devture_systemd_docker_base_host_command_sh }} -c '{{ postgres_container_cleanup_command | trim | replace("\n", " ") }}'
+
+# We need /dev/shm to be larger than the default to allow VACUUM to work.
+# See:
+# - https://github.com/spantaleev/matrix-docker-ansible-deploy/issues/1362
+# - https://github.com/spantaleev/matrix-docker-ansible-deploy/issues/1268
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} create \
+      --rm \
+      --name {{ postgres_identifier }} \
+      --log-driver=none \
+      --user={{ postgres_container_uid }}:{{ postgres_container_gid }} \
+      {% if postgres_container_cap_drop_all_enabled %}
+      --cap-drop=ALL \
+      {% endif %}
+      {% if postgres_container_read_only_enabled %}
+      --read-only \
+      {% endif %}
+      --shm-size={{ postgres_container_shm_size }} \
+      --network={{ postgres_container_network }} \
+      {% if postgres_container_postgres_bind_port %}
+      -p {{ postgres_container_postgres_bind_port }}:5432 \
+      {% endif %}
+      --env-file={{ postgres_base_path }}/env-postgres-server \
+      --mount type=bind,src={{ postgres_data_path }},dst={{ postgres_data_in_container_path }} \
+      {% if postgres_container_unix_socket_enabled %}
+      --mount type=bind,src={{ postgres_run_path }},dst={{ postgres_run_path_in_container }} \
+      {% endif %}
+      {% if postgres_container_mount_etc_passwd_enabled %}
+      --mount type=bind,src=/etc/passwd,dst=/etc/passwd,ro \
+      {% endif %}
+      --tmpfs=/tmp:rw,noexec,nosuid,size={{ postgres_container_tmpfs_tmp_size }} \
+      {% if not postgres_container_unix_socket_enabled %}
+      --tmpfs={{ postgres_run_path_in_container }}:rw,noexec,nosuid,size={{ postgres_container_tmpfs_run_size }} \
+      {% endif %}
+      {% for arg in postgres_container_extra_arguments %}
+      {{ arg }} \
+      {% endfor %}
+      {{ postgres_container_image_to_use }} \
+      postgres {{ postgres_process_extra_arguments | join(' ') }}
+
+{% for network in postgres_container_additional_networks %}
+ExecStartPre={{ devture_systemd_docker_base_host_command_docker }} network connect {{ network }} {{ postgres_identifier }}
+{% endfor %}
+
+ExecStart={{ devture_systemd_docker_base_host_command_docker }} start --attach {{ postgres_identifier }}
+
+{% if postgres_systemd_readiness_check_enabled %}
+# Only count the service as started once Postgres accepts connections. Otherwise, services ordered
+# after this one (`After=`) get started while Postgres is still initializing, and those that set up
+# their database only once at startup end up running against an empty one.
+#
+# Why TCP and not the Unix socket: when the data directory is empty, the image's entrypoint first
+# initializes it through a temporary server, which does listen on the Unix socket but runs with
+# `listen_addresses=''`. That server is then shut down and replaced by the real one. A check over the
+# socket would already succeed against the temporary server; one over TCP only succeeds once the
+# real server is up.
+#
+# `pg_isready` does not authenticate, so no credentials are needed. `-U` is passed anyway, because
+# without it `pg_isready` gives up when the container's user has no `/etc/passwd` entry.
+#
+# The `-` prefix makes a timeout non-fatal: the service then counts as started, as it did before this
+# check existed. A setup where Postgres does not listen on TCP is thus delayed, but not broken.
+ExecStartPost=-{{ devture_systemd_docker_base_host_command_sh }} -c 'timeout {{ postgres_systemd_readiness_check_timeout_seconds }} {{ devture_systemd_docker_base_host_command_sh }} -c "until {{ devture_systemd_docker_base_host_command_docker }} exec {{ postgres_identifier }} pg_isready --quiet --host=127.0.0.1 --port=5432 --username={{ postgres_connection_username }}; do sleep 1; done"'
+TimeoutStartSec={{ postgres_systemd_readiness_check_timeout_seconds | int + 120 }}
+{% endif %}
+
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} stop -t {{ postgres_container_stop_grace_time_seconds }} {{ postgres_identifier }} 2>/dev/null || true'
+ExecStop=-{{ devture_systemd_docker_base_host_command_sh }} -c '{{ devture_systemd_docker_base_host_command_docker }} rm {{ postgres_identifier }} 2>/dev/null || true'
+
+Restart=always
+RestartSec=30
+SyslogIdentifier={{ postgres_identifier }}
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+{#
+The shebang must be the very first line of the rendered script. A Jinja comment
+renders to an empty line, so keeping the copyright header above it would leave
+this 0750 file starting with a blank line, which the kernel rejects with ENOEXEC
+when the script is executed directly (systemd, Ansible, cron). Interactive
+shells hide the problem by falling back to /bin/sh.
+
+SPDX-FileCopyrightText: 2023 Nikita Chernyi
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+{{ devture_systemd_docker_base_host_command_docker }} run --rm --name {{ backup_borg_identifier }} \
+    --log-driver=none \
+    --cap-drop=ALL \
+    --cap-add=CAP_DAC_OVERRIDE \
+    --read-only \
+    --network={{ backup_borg_container_network }} \
+    --mount type=bind,src={{ backup_borg_config_path }}/passwd,dst=/etc/passwd,ro \
+    --mount type=bind,src={{ backup_borg_config_path }},dst=/etc/borgmatic.d,ro \
+    --mount type=bind,src={{ backup_borg_restore_path }},dst=/restore \
+    {% for source in backup_borg_location_source_directories %}
+    --mount type=bind,src={{ source }},dst={{ source }},ro \
+    {% endfor %}
+    --tmpfs=/root:rw,noexec,nosuid,size={{ backup_borg_container_tmpfs_root_size }} \
+    --tmpfs=/tmp:rw,noexec,nosuid,size={{ backup_borg_container_tmpfs_tmp_size }} \
+    {% for arg in backup_borg_container_extra_arguments %}
+    {{ arg }} \
+    {% endfor %}
+    {{ backup_borg_container_image }} \
+    borgmatic "$@"

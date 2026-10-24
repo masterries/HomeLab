@@ -1,0 +1,14 @@
+{#
+SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+SPDX-FileCopyrightText: 2025 spatterlight
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+
+apiVersion: 1
+
+prune: {{ grafana_provisioning_datasources_prune | to_json }}
+
+datasources: {{ grafana_provisioning_datasources_datasources | to_json }}
+
+deleteDatasources: {{ grafana_provisioning_datasources_deleteDatasources | to_json }}

@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+# Generates a `###`-separated list of `docker network inspect ...` commands, based on the network list in `ntfy_visitor_request_limit_exempt_hosts_container_networks`.
+#
+# Example:
+# $(/usr/bin/env docker network inspect first-network -f "{{ (index .IPAM.Config 0).Subnet }}")###$(/usr/bin/env docker network inspect second-network -f "{{ (index .IPAM.Config 0).Subnet }}")
+ntfy_visitor_request_limit_exempt_hosts_container_networks_inspect_commands_string: |-
+  {% for network in ntfy_visitor_request_limit_exempt_hosts_container_networks %}$({{ devture_systemd_docker_base_host_command_docker }} network inspect {{ network }} -f "{% raw %}{{ (index .IPAM.Config 0).Subnet }}{% endraw %}"){% if not loop.last %}###{% endif %}{% endfor -%}
+
+# Converts the `###`-separated list of `docker network inspect ...` commands into a regular list
+# Example:
+# [
+#   '$(/usr/bin/env docker network inspect first-network -f "{{ (index .IPAM.Config 0).Subnet }}")',
+#   '$(/usr/bin/env docker network inspect second-network -f "{{ (index .IPAM.Config 0).Subnet }}")',
+# ]
+ntfy_visitor_request_limit_exempt_hosts_container_networks_inspect_commands_list: "{{ ntfy_visitor_request_limit_exempt_hosts_container_networks_inspect_commands_string | split('###') }}"
+
+# Tells whether the `/metrics` endpoint is served at all.
+# ntfy serves it either on the regular HTTP port (`ntfy_metrics_default_enabled`)
+# or on a dedicated port (`ntfy_metrics_listen_http_port`).
+ntfy_metrics_enabled: "{{ ntfy_metrics_default_enabled or ntfy_metrics_listen_http_port | string | length > 0 }}"
+
+# The container port that the `/metrics` endpoint is served on.
+# When a dedicated metrics port is configured, ntfy serves the endpoint only there
+# and the regular HTTP port does not serve `/metrics` anymore.
+ntfy_metrics_container_port: "{{ ntfy_metrics_listen_http_port if ntfy_metrics_listen_http_port | string | length > 0 else ntfy_container_http_port }}"

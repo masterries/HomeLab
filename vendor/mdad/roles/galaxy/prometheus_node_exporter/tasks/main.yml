@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2023 Nikita Chernyi
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Perform Prometheus node exporter installation tasks
+  when: prometheus_node_exporter_enabled | bool
+  tags:
+    - setup-all
+    - setup-prometheus-node-exporter
+    - install-all
+    - install-prometheus-node-exporter
+  block:
+    - name: Validate Prometheus node exporter configuration
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/validate_config.yml"
+    - name: Install Prometheus node exporter
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/install.yml"
+
+- name: Perform Prometheus node exporter uninstallation tasks
+  when: not prometheus_node_exporter_enabled | bool
+  tags:
+    - setup-all
+    - setup-prometheus-node-exporter
+  block:
+    - name: Uninstall Prometheus node exporter
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/uninstall.yml"

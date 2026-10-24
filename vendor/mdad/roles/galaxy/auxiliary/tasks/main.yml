@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure aux files and directories configured
+  tags:
+    - setup-all
+    - setup-aux
+    - install-all
+    - install-aux
+  block:
+    - name: Run setup task
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/setup.yml"

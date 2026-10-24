@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 MASH project contributors
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Perform ntfy installation tasks
+  when: ntfy_enabled | bool
+  tags:
+    - setup-all
+    - setup-ntfy
+    - install-all
+    - install-ntfy
+  block:
+    - name: Validate ntfy configuration
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/validate_config.yml"
+    - name: Install ntfy
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/install.yml"
+
+- name: Perform ntfy uninstallation tasks
+  when: not ntfy_enabled | bool
+  tags:
+    - setup-all
+    - setup-ntfy
+  block:
+    - name: Uninstall ntfy
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/uninstall.yml"
+
+- name: Perform ntfy self-check tasks
+  when: ntfy_enabled | bool
+  tags:
+    - molecule-notest
+    - self-check
+  block:
+    - name: Run self-check for ntfy
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/self_check.yml"

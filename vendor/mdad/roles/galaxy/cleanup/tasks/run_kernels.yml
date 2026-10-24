@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2022 etke.cc
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+---
+# Debian only
+
+- name: Ensure old kernels are purged
+  ansible.builtin.command:
+    argv:
+      - "{{ system_cleanup_kernels_script }}"
+      - "-n"
+      - "-k"
+      - "{{ system_cleanup_kernels_keep }}"
+      - "-y"
+      - "-o"
+      - "Dpkg::Options::=--force-confdef"
+      - "-o"
+      - "Dpkg::Options::=--force-confnew"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  changed_when: false
+  ignore_errors: true

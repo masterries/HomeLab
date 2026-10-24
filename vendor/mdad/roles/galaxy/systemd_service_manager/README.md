@@ -1,0 +1,66 @@
+# systemd service manager Ansible role
+
+This is an [Ansible](https://www.ansible.com/) role which manages systemd services.
+
+
+## Features
+
+- **starting** (restarting) services, in order, according to their `priority`. Services can all be stopped cleanly and then started anew, restarted one-by-one, or started in priority batches without blocking (see `devture_systemd_service_manager_service_restart_mode`)
+
+- making services **auto-start** (see `devture_systemd_service_manager_services_autostart_enabled`)
+
+- **verifying** services managed to start (see `devture_systemd_service_manager_up_verification_enabled`)
+
+- **stopping** services, in order, according to their `priority`
+
+- starting/stopping all defined services, or a group of services (`--tags=restart-group`, `--tags=stop-group`)
+
+- restarting services by cleanly stopping them and restarting them, one by one, or by priority batches
+
+
+## Usage
+
+Example playbook:
+
+```yaml
+- hosts: servers
+  roles:
+    - when: devture_systemd_service_manager_enabled | bool
+      role: galaxy/com.devture.ansible.role.systemd_service_manager
+```
+
+Example playbook configuration (`group_vars/servers` or other):
+
+```yaml
+# See `devture_systemd_service_manager_services_list_auto` and `devture_systemd_service_manager_services_list_additional`
+devture_systemd_service_manager_services_list_auto: |
+  {{
+    ([{'name': 'some-service.service', 'priority': 1000}])
+    +
+    ([{'name': 'another-service.service', 'priority': 1500}])
+  }}
+```
+
+Example playbook invocations tags (e.g. `ansible-playbook -i inventory/hosts setup.yml --tags=XXXXX`):
+
+- `restart`, `restart-all`, `start-all` - restarts all services and potentially makes them auto-start (depending on `devture_systemd_service_manager_services_autostart_enabled`)
+
+- `restart-group`, `start-group` - restarts services belonging to the specified group (e.g. `--extra-vars="group=core"`)
+
+- `stop`, `stop-all` - stops all services
+
+- `stop-group` - stops services belonging to the specified group (e.g. `--extra-vars="group=core"`)
+
+Restart mode options for `devture_systemd_service_manager_service_restart_mode`:
+
+- `all-at-once` (default) - issues a single `systemctl restart` (or `start`) command with all service names, letting systemd handle the entire transaction. See `defaults/main.yml` for detailed technical rationale
+- `clean-stop-start` - stops all services in reverse priority order, then starts them in priority order
+- `one-by-one` - restarts each service in priority order
+- `priority-batched` - starts/restarts services in priority batches and queues them without blocking inside each batch
+
+All-at-once retry controls:
+
+- `devture_systemd_service_manager_all_at_once_retries` (default: `1`) - passed directly to task `retries` for each single all-at-once `systemctl restart ...` or `systemctl start ...` command; must be an integer `>= 1` (numeric strings accepted)
+- `devture_systemd_service_manager_all_at_once_retry_delay_seconds` (default: `10`) - delay between attempts; must be a non-negative integer (numeric strings accepted)
+
+For a detailed comparison of these modes with real-world downtime benchmarks, see [Restart Mode Comparison](docs/restart-mode-comparison.md).

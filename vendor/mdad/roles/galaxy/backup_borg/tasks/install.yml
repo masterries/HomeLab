@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2023 - 2024 Nikita Chernyi
+# SPDX-FileCopyrightText: 2024 Gergely Horváth
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Run if Postgres database backup and Postgres version detection are enabled
+  when: backup_borg_postgresql_enabled | bool and backup_borg_postgresql_version_detection_enabled | bool and backup_borg_postgres_version == ''
+  block:
+    - name: Fail with postgres_enabled is undefined
+      ansible.builtin.fail:
+        msg: >-
+          You have not set `backup_borg_postgres_version`, which means we'll attempt to auto-detect it.
+          Auto-detection expects that you're running the `postgres role`.
+          You either need to run Postgres via that role, or you need to set `backup_borg_postgres_version` manually.
+      when: postgres_enabled is not defined
+
+    - name: Fail with postgres_enabled not enabled
+      ansible.builtin.fail:
+        msg: >-
+          You are not running a built-in Postgres server (`postgres_enabled: false`), so auto-detecting its version and setting `backup_borg_postgres_version` automatically based on that cannot happen.
+          Consider setting `backup_borg_postgres_version` to your Postgres version manually.
+      when: not postgres_enabled
+
+    - name: Detect Postgres version
+      ansible.builtin.include_role:
+        name: "{{ backup_borg_postgresql_version_detection_postgres_role_name }}"
+        tasks_from: detect_existing_postgres_version
+
+    - name: Output detected Postgres version
+      ansible.builtin.debug:
+        msg: "Detected Postgres version: {{ postgres_detected_version_string }}"
+
+    - name: Fail if detected Postgres version is unsupported
+      ansible.builtin.fail:
+        msg: "You cannot use BorgBackup with Postgres v{{ postgres_detected_version_string }}. If you are using an old Postgres version, consider upgrading - link to docs for upgrading Postgres: docs/maintenance-postgres.md#upgrading-postgresql HOWEVER, if you are using a new Postgres version, there is a high chance that the version is not supported by BorgBackup yet (supported versions: {{ backup_borg_supported_postgres_versions }}). You can't do anything with that, details: https://github.com/etkecc/borgmatic/pull/1"
+      when: "postgres_detected_version_string not in backup_borg_supported_postgres_versions"
+
+    - name: Set the correct BorgBackup version to use
+      ansible.builtin.set_fact:
+        backup_borg_postgres_version: "{{ postgres_detected_version_string }}"
+
+- name: Ensure BorgBackup docker data paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ backup_borg_uid }}"
+    group: "{{ backup_borg_gid }}"
+  with_items:
+    - "{{ backup_borg_bin_path }}"
+    - "{{ backup_borg_config_path }}"
+    - "{{ backup_borg_restore_path }}"
+
+- name: Ensure BorgBackup build paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  with_items:
+    - "{{ backup_borg_container_image_self_build_src_files_path }}"
+
+- name: Ensure borgmatic configuration file installed
+  ansible.builtin.copy:
+    content: "{{ backup_borg_configuration | to_nice_yaml(indent=2, width=999999) }}"
+    dest: "{{ backup_borg_config_path }}/config.yaml"
+    mode: "0640"
+    owner: "{{ backup_borg_uid }}"
+    group: "{{ backup_borg_gid }}"
+  register: backup_borg_borgmatic_config_file_result
+
+- name: Ensure borgmatic script is created
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/bin/borgmatic.j2"
+    dest: "{{ backup_borg_bin_path }}/borgmatic"
+    mode: "0750"
+    owner: "{{ backup_borg_uid }}"
+    group: "{{ backup_borg_gid }}"
+  register: backup_borg_borgmatic_script_result
+
+- name: Ensure BorgBackup passwd is created
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/passwd.j2"
+    dest: "{{ backup_borg_config_path }}/passwd"
+    mode: "0640"
+    owner: "{{ backup_borg_uid }}"
+    group: "{{ backup_borg_gid }}"
+  register: backup_borg_passwd_result
+
+- name: Ensure BorgBackup SSH key is created
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/sshkey.j2"
+    dest: "{{ backup_borg_config_path }}/sshkey"
+    mode: "0600"
+    owner: "{{ backup_borg_uid }}"
+    group: "{{ backup_borg_gid }}"
+  register: backup_borg_sshkey_result
+
+- name: Run if self-building of BorgBackup container image is not enabled
+  when: "not backup_borg_container_image_self_build | bool"
+  block:
+    - name: Ensure BorgBackup container image is pulled via community.docker.docker_image_pull
+      when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+      community.docker.docker_image_pull:
+        name: "{{ backup_borg_container_image }}"
+        pull: always
+      register: backup_borg_container_image_pull_result_ansible_module
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: backup_borg_container_image_pull_result_ansible_module is not failed
+
+    - name: Ensure BorgBackup container image is pulled via ansible.builtin.command
+      when: devture_systemd_docker_base_container_image_pull_method == 'command'
+      ansible.builtin.command:
+        cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ backup_borg_container_image }}"
+      register: backup_borg_container_image_pull_result_command
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: backup_borg_container_image_pull_result_command is not failed
+      changed_when: "'Downloaded newer image' in backup_borg_container_image_pull_result_command.stdout"
+
+- name: Run if self-building of BorgBackup container image is enabled
+  when: "backup_borg_container_image_self_build | bool"
+  block:
+    - name: Ensure BorgBackup repository is present on self-build
+      ansible.builtin.git:
+        repo: "{{ backup_borg_container_image_self_build_repo }}"
+        version: "{{ backup_borg_container_image_self_build_repo_version }}"
+        dest: "{{ backup_borg_container_image_self_build_src_files_path }}"
+        force: "yes"
+      register: backup_borg_git_pull_results
+
+    - name: Ensure BorgBackup container image is built
+      community.docker.docker_image_build:
+        name: "{{ backup_borg_container_image }}"
+        dockerfile: Dockerfile
+        path: "{{ backup_borg_container_image_self_build_src_files_path }}"
+        pull: true
+        args:
+          POSTGRES_VERSION: "{{ backup_borg_postgres_version }}"
+          BORG_VERSION: "{{ backup_borg_borg_version }}"
+          BORGMATIC_VERSION: "{{ backup_borg_borgmatic_version }}"
+          ALPINE_VERSION: "{{ backup_borg_alpine_version }}"
+        rebuild: "{{ 'always' if backup_borg_git_pull_results.changed | bool else 'never' }}"
+      register: backup_borg_container_image_build_result
+
+- name: Ensure BorgBackup container network is created via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ backup_borg_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+  register: backup_borg_network_creation_result
+
+- name: Ensure BorgBackup container network is created via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+      {{ backup_borg_container_network }}
+  register: backup_borg_network_creation_result
+  changed_when: backup_borg_network_creation_result.rc == 0
+  failed_when: backup_borg_network_creation_result.rc != 0 and 'already exists' not in backup_borg_network_creation_result.stderr
+
+- name: Ensure BorgBackup systemd service and timer are installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/backup-borg.{{ item }}.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ backup_borg_identifier }}.{{ item }}"
+    mode: "0644"
+  with_items:
+    - service
+    - timer
+  register: backup_borg_systemd_services_result
+
+- name: Determine whether BorgBackup needs a restart
+  ansible.builtin.set_fact:
+    backup_borg_restart_necessary: >-
+      {{
+        backup_borg_borgmatic_config_file_result.changed | default(false)
+        or backup_borg_borgmatic_script_result.changed | default(false)
+        or backup_borg_passwd_result.changed | default(false)
+        or backup_borg_sshkey_result.changed | default(false)
+        or backup_borg_systemd_services_result.changed | default(false)
+        or backup_borg_container_image_pull_result_ansible_module.changed | default(false)
+        or backup_borg_container_image_pull_result_command.changed | default(false)
+        or backup_borg_container_image_build_result.changed | default(false)
+      }}

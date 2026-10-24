@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2022 MDAD project contributors
+# SPDX-FileCopyrightText: 2023 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2024 wjbeckett
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: (Deprecation) Catch and report renamed settings
+  ansible.builtin.fail:
+    msg: >-
+      Your configuration contains a variable, which now has a different name.
+      Please change your configuration to rename the variable (`{{ item.old }}` -> `{{ item.new }}`).
+  when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+  with_items:
+    - { "old": "livekit_server_container_repo", "new": "livekit_server_container_image_self_build_repo" }
+    - { "old": "livekit_server_container_repo_version", "new": "livekit_server_container_image_self_build_repo_version" }
+    - { "old": "livekit_server_container_src_files_path", "new": "livekit_server_container_image_self_build_src_files_path" }
+    - { "old": "livekit_server_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+
+- name: Fail if required LiveKit Server settings are not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item.name }}`).
+  when: "item.when | bool and lookup('vars', item.name, default='') | string | length == 0"
+  with_items:
+    - { "name": "livekit_server_identifier", when: true }
+    - { "name": "livekit_server_uid", when: true }
+    - { "name": "livekit_server_gid", when: true }
+    - { "name": "livekit_server_hostname", when: true }
+    - { "name": "livekit_server_container_network", when: true }
+    - { "name": "livekit_server_config_turn_domain", when: "{{ livekit_server_config_turn_enabled | bool }}" }
+    - { "name": "livekit_server_config_turn_cert_file", when: "{{ livekit_server_config_turn_enabled | bool and not (livekit_server_config_turn_external_tls | bool) }}" }
+    - { "name": "livekit_server_config_turn_key_file", when: "{{ livekit_server_config_turn_enabled | bool and not (livekit_server_config_turn_external_tls | bool) }}" }
+    - { "name": "livekit_server_container_labels_turn_traefik_entrypoints", when: "{{ livekit_server_container_labels_turn_traefik_enabled | bool }}" }
+
+- name: Fail if LiveKit Server port range configuration is invalid
+  ansible.builtin.fail:
+    msg: >-
+      You need to either define both port range settings (livekit_server_config_rtc_port_range_start and livekit_server_config_rtc_port_range_end)
+      or define a single UDP port (livekit_server_config_rtc_udp_port).
+  when: >
+    (livekit_server_config_rtc_port_range_start | default('', true) | string | length > 0 and livekit_server_config_rtc_port_range_end | default('', true) | string | length == 0) or
+    (livekit_server_config_rtc_port_range_start | default('', true) | string | length == 0 and livekit_server_config_rtc_port_range_end | default('', true) | string | length > 0) or
+    (livekit_server_config_rtc_port_range_start | default('', true) | string | length == 0 and livekit_server_config_rtc_port_range_end | default('', true) | string | length == 0 and livekit_server_config_rtc_udp_port | default('', true) | string | length == 0)
+
+- name: Fail if both a LiveKit Server port range and a UDP port are defined
+  ansible.builtin.fail:
+    msg: >-
+      You have defined both a port range (livekit_server_config_rtc_port_range_start and livekit_server_config_rtc_port_range_end)
+      and a multiplexed UDP port (livekit_server_config_rtc_udp_port, which defaults to 7882).
+      Only one of the two can be in effect, so the role requires you to pick one explicitly.
+      When defining a port range, unset the UDP port (livekit_server_config_rtc_udp_port: '').
+  when: >
+    livekit_server_config_rtc_port_range_start | default('', true) | string | length > 0 and
+    livekit_server_config_rtc_port_range_end | default('', true) | string | length > 0 and
+    livekit_server_config_rtc_udp_port | default('', true) | string | length > 0
+
+- name: Fail if LiveKit Server UDP port is invalid
+  ansible.builtin.fail:
+    msg: >-
+      livekit_server_config_rtc_udp_port must be a single port (example: 7882) or a `start-end` port pool (example: '7882-7892').
+  when: >
+    livekit_server_config_rtc_udp_port | default('', true) | string | length > 0 and
+    not (livekit_server_config_rtc_udp_port | string is match('^[0-9]+(-[0-9]+)?$'))
+
+- name: Fail if LiveKit Server UDP port pool is reversed
+  ansible.builtin.fail:
+    msg: >-
+      The end port of the livekit_server_config_rtc_udp_port pool must be greater than its start port.
+  when: >
+    '-' in (livekit_server_config_rtc_udp_port | default('', true) | string) and
+    (livekit_server_config_rtc_udp_port | string | split('-') | first | int) >= (livekit_server_config_rtc_udp_port | string | split('-') | last | int)
+
+- name: Fail if LiveKit TURN relay range configuration is invalid
+  ansible.builtin.fail:
+    msg: >-
+      You need to define both TURN relay range settings (livekit_server_config_turn_relay_range_start and livekit_server_config_turn_relay_range_end).
+  when: >
+    (livekit_server_config_turn_relay_range_start | string | length > 0 and livekit_server_config_turn_relay_range_end | string | length == 0) or
+    (livekit_server_config_turn_relay_range_start | string | length == 0 and livekit_server_config_turn_relay_range_end | string | length > 0) or
+    (livekit_server_config_turn_relay_range_start | string | length == 0 and livekit_server_config_turn_relay_range_end | string | length == 0)
+
+- name: Fail if LiveKit TURN relay range is reversed
+  ansible.builtin.fail:
+    msg: >-
+      livekit_server_config_turn_relay_range_start must be less than or equal to livekit_server_config_turn_relay_range_end.
+  when: >
+    livekit_server_config_turn_relay_range_start | string | length > 0 and
+    livekit_server_config_turn_relay_range_end | string | length > 0 and
+    (livekit_server_config_turn_relay_range_start | int) > (livekit_server_config_turn_relay_range_end | int)
+
+- name: Fail if LiveKit TURN credential TTL is not positive
+  ansible.builtin.fail:
+    msg: >-
+      livekit_server_config_turn_ttl_seconds must be a positive value when TURN is enabled.
+      Since LiveKit v1.13.1, backwards compatibility for TURN authentication without a TTL has been removed,
+      so a value of 0 (or less) produces credentials that expire immediately and renders TURN unusable.
+  when: >
+    livekit_server_config_turn_enabled | bool and
+    (livekit_server_config_turn_ttl_seconds | int) <= 0
+
+- name: Fail if LiveKit Server logging level is invalid
+  ansible.builtin.fail:
+    msg: >-
+      livekit_server_config_logging_level must be 'debug', 'info', 'warn', or 'error'
+  when: "livekit_server_config_logging_level not in ['debug', 'info', 'warn', 'error']"

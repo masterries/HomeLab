@@ -1,0 +1,183 @@
+{#
+SPDX-FileCopyrightText: 2023-2024 Slavi Pantaleev
+SPDX-FileCopyrightText: 2024 Nikita Chernyi
+SPDX-FileCopyrightText: 2025 Suguru Hirahara
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+#}
+{#
+  See https://github.com/ether/etherpad-lite/blob/develop/settings.json.template
+  for details about how these settings work.
+#}
+{
+  "title": {{ etherpad_configuration_title|to_json }},
+  "favicon": "favicon.ico",
+  "skinName": "colibris",
+  "skinVariants": "super-light-toolbar super-light-editor light-background",
+  "ip": "::",
+  "port": {{ etherpad_container_http_port|to_json }},
+  "showSettingsInAdminPage": true,
+{% if etherpad_database_type == 'couchdb' %}
+  "dbType": "couch",
+  "dbSettings": {
+    "host":     {{ etherpad_database_couchdb_hostname | to_json }},
+    "port":     {{ etherpad_database_couchdb_port | to_json }},
+    "user":     {{ etherpad_database_couchdb_username | to_json }},
+    "password": {{ etherpad_database_couchdb_password | to_json }},
+    "database": {{ etherpad_database_name | to_json }}
+  },
+{% endif %}
+{% if etherpad_database_type == 'mysql' %}
+  "dbType": "mysql",
+  "dbSettings": {
+{% if etherpad_database_mysql_socket_enabled %}
+    "socketPath": {{ etherpad_configuration_dbsettings_socketpath_mysql | to_json }},
+{% else%}
+    "host":       {{ etherpad_database_mysql_hostname | to_json }},
+    "port":       {{ etherpad_database_mysql_port | to_json }},
+{% endif %}
+    "user":       {{ etherpad_database_mysql_username | to_json }},
+    "password":   {{ etherpad_database_mysql_password | to_json }},
+    "database":   {{ etherpad_database_name | to_json }}
+  },
+{% endif %}
+{% if etherpad_database_type == 'postgres' %}
+  "dbType": "postgres",
+  "dbSettings": {
+    "host":     {{ etherpad_database_postgres_hostname|to_json }},
+    "port":     {{ etherpad_database_postgres_port|to_json }},
+    "user":     {{ etherpad_database_postgres_username|to_json }},
+    "password": {{ etherpad_database_postgres_password|to_json }},
+    "database": {{ etherpad_database_name|to_json }}
+  },
+{% endif %}
+{% if etherpad_database_type == 'redis' %}
+  "dbType": "redis",
+  "dbSettings": {
+    "host":     {{ etherpad_redis_hostname | to_json }},
+    "port":     {{ etherpad_redis_port | to_json }},
+{% if etherpad_redis_username %}
+    "user":     {{ etherpad_redis_username | to_json }},
+{% endif %}
+{% if etherpad_redis_password %}
+    "password": {{ etherpad_redis_password | to_json }},
+{% endif %}
+    "database": {{ etherpad_redis_database | to_json }}
+  },
+{% endif %}
+{% if etherpad_database_type == 'sqlite' %}
+  "dbType": "sqlite",
+  "dbSettings": {
+    "filename": {{ etherpad_database_sqlite_path | to_json }}
+  },
+{% endif %}
+{% if etherpad_database_type == 'memory' %}
+  "dbType": "memory",
+{% endif %}
+  "defaultPadText" : {{ etherpad_configuration_defaultpadtext|to_json }},
+  "suppressErrorsInPadText": false,
+  "requireSession": false,
+  "editOnly": false,
+  "minify": {{ etherpad_configuration_minify | to_json }},
+  "maxAge": 21600,
+  "soffice": {{ etherpad_configuration_soffice|to_json }},
+  "allowUnknownFileEnds": true,
+  "requireAuthentication": false,
+  "requireAuthorization": false,
+  "trustProxy": true,
+  "cookie": {
+    "sameSite": "Lax",
+    "keyRotationInterval": 86400000,
+    "sessionLifetime": 86400000
+  },
+  "ipLogging": {{ etherpad_configuration_iplogging | to_json }},
+  "automaticReconnectionTimeout": 0,
+  "scrollWhenFocusLineIsOutOfViewport": {
+    "percentage": {
+      "editionAboveViewport": 0,
+      "editionBelowViewport": 0
+    },
+    "duration": 0,
+    "scrollWhenCaretIsInTheLastLineOfViewport": false,
+    "percentageToScrollWhenUserPressesArrowUp": 0
+  },
+  "socketIo": {
+    "maxHttpBufferSize": 10000
+  },
+  "loadTest": false,
+  "dumpOnUncleanExit": false,
+  "indentationOnNewLine": false,
+  "importExportRateLimiting": {
+    "windowMs": 90000,
+    "max": 10
+  },
+  "importMaxFileSize": 52428800,
+  "commitRateLimiting": {
+    "duration": 1,
+    "points": 10
+  },
+  "exposeVersion": false,
+  "padOptions": {
+    "noColors": false,
+    "showControls": true,
+    "showChat": false,
+    "showLineNumbers": true,
+    "useMonospaceFont": false,
+    "userName": null,
+    "userColor": null,
+    "rtl": false,
+    "alwaysShowChat": false,
+    "chatAndUsers": false,
+    "lang": "en-gb"
+  },
+{% set ns = namespace(users={}) %}
+{% for user in etherpad_users %}
+{% set ns.users = ns.users | combine({user.username: {'password': user.initial_password, 'is_admin': user.initial_type | default('') == 'admin'}}) %}
+{% endfor %}
+{# The legacy admin variables are merged last, so they win over an entry with the same username. #}
+{% if etherpad_admin_username != "" %}
+{% if etherpad_admin_password != "" %}
+{% set ns.users = ns.users | combine({etherpad_admin_username: {'password': etherpad_admin_password, 'is_admin': true}}) %}
+{% else %}
+{% set ns.users = ns.users | combine({etherpad_admin_username: {'hash': etherpad_admin_hash, 'is_admin': true}}) %}
+{% endif %}
+{% endif %}
+{% if ns.users | length > 0 %}
+  "users": {{ ns.users | to_json }},
+{% endif %}
+  "padShortcutEnabled" : {
+    "altF9": true,
+    "altC": true,
+    "cmdShift2": true,
+    "delete": true,
+    "return": true,
+    "esc": true,
+    "cmdS": true,
+    "tab": true,
+    "cmdZ": true,
+    "cmdY": true,
+    "cmdI": true,
+    "cmdB": true,
+    "cmdU": true,
+    "cmd5": true,
+    "cmdShiftL": true,
+    "cmdShiftN": true,
+    "cmdShift1": true,
+    "cmdShiftC": true,
+    "cmdH": true,
+    "ctrlHome": true,
+    "pageUp": true,
+    "pageDown": true
+  },
+  "socketTransportProtocols" : ["websocket", "polling"],
+  "updates": {
+    "tier": {{ etherpad_configuration_updates_tier | to_json }}
+  },
+  "privacy": {
+    "updateCheck": {{ etherpad_configuration_privacy_updatecheck | to_json }},
+    "pluginCatalog": {{ etherpad_configuration_privacy_plugincatalog | to_json }}
+  },
+  "loglevel": {{ etherpad_configuration_loglevel | to_json }},
+  "customLocaleStrings": {},
+  "enableAdminUITests": false
+}

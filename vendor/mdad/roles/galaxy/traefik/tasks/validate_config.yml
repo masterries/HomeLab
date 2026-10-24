@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: (Deprecation) Catch and report renamed settings
+  ansible.builtin.fail:
+    msg: >-
+      Your configuration contains a variable, which now has a different name.
+      Please change your configuration to rename the variable (`{{ item.old }}` -> `{{ item.new }}`).
+  when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+  with_items:
+    - { "old": "traefik_ssl_email_address", "new": "traefik_config_certificatesResolvers_acme_email" }
+    - { "old": "traefik_config_letsencrypt_resolver_caServer", "new": "traefik_config_certificatesResolvers_acme_caServer" }
+    - { "old": "traefik_config_letsencrypt_use_staging", "new": "traefik_config_certificatesResolvers_acme_use_staging" }
+    - { "old": "traefik_config_letsencrypt_httpChallenge_entrypoint", "new": "traefik_config_certificatesResolvers_acme_httpChallenge_entrypoint" }
+    - { "old": "traefik_config_certificatesResolvers_acme_dnsChallenge_delayBeforeCheck", "new": "traefik_config_certificatesResolvers_acme_dnsChallenge_propagation_delayBeforeChecks" }
+    - { "old": "traefik_environment_variables_additional_variables", "new": "traefik_environment_variables" }
+    - { "old": "traefik_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+
+- name: Fail if required Traefik settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`).
+  when: "lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - traefik_uid
+    - traefik_gid
+    - traefik_entrypoint_primary
+
+- name: Fail if required Traefik ACME HTTP challenge settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`) when enabling ACME SSL certificate resolvers with the HTTP challenge.
+  when: "traefik_config_certificatesResolvers_acme_enabled | bool and traefik_config_certificatesResolvers_acme_httpChallenge_enabled | bool and lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - traefik_config_certificatesResolvers_acme_httpChallenge_entrypoint
+
+- name: Fail if required Traefik ACME DNS challenge settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`) when enabling ACME SSL certificate resolvers with the DNS challenge.
+  when: "traefik_config_certificatesResolvers_acme_enabled | bool and traefik_config_certificatesResolvers_acme_dnsChallenge_enabled | bool and lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - traefik_config_certificatesResolvers_acme_dnsChallenge_provider
+
+- name: Fail if Traefik docker endpoint syntax invalid
+  ansible.builtin.fail:
+    msg: >-
+      traefik_config_providers_docker_endpoint must look like `unix:///var/run/docker.sock` or `tcp://host:2345`
+  when: "not (traefik_config_providers_docker_endpoint.startswith('unix://') or traefik_config_providers_docker_endpoint.startswith('tcp://'))"
+
+- name: Fail if required Traefik Dashboard settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`) for enabling the Traefik Dashboard.
+  when: "traefik_dashboard_enabled | bool and lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - traefik_dashboard_hostname
+    - traefik_dashboard_entrypoints
+
+- name: Fail if required Traefik Dashboard HTTP Basic authentication settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      For Traefik Dashboard HTTP Basic authentication, define either
+      `traefik_dashboard_basicauth_htpasswd` or both
+      `traefik_dashboard_basicauth_user` and `traefik_dashboard_basicauth_password`.
+  when: >-
+    traefik_dashboard_basicauth_enabled | bool
+    and traefik_dashboard_basicauth_htpasswd | string | length == 0
+    and (
+      traefik_dashboard_basicauth_user | string | length == 0
+      or traefik_dashboard_basicauth_password | string | length == 0
+    )

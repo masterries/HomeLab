@@ -1,0 +1,236 @@
+---
+# The `upgrade-postgres` tag is meant to be run on its own.
+#
+# When combined with `setup-all`/`setup-postgres`/`install-all`/`install-postgres` (or with the
+# implicit `all` tag — i.e., no `--tags` at all), the install pass runs first and pins
+# `postgres_container_image_to_use` to the *currently-installed* major version (so the playbook
+# does not auto-upgrade unintentionally). The upgrade pass then re-runs install with that same
+# pinned image, so the dump is restored into the same version you started on — a silent no-op
+# upgrade that round-trips your data through pg_dumpall for no reason.
+- name: Fail if upgrade-postgres is combined with setup/install tags
+  ansible.builtin.fail:
+    msg: |-
+      Refusing to upgrade Postgres while another tag from
+      `all`, `setup-all`, `setup-postgres`, `install-all`, `install-postgres`
+      is also active.
+
+      Combining these tags is unsafe: the install pass pins Postgres to the
+      *currently-installed* major version, and the upgrade pass then re-runs
+      install with that same pinned image. The dump would be restored into
+      the same version you started on — a silent no-op upgrade.
+
+      Re-run with the upgrade tag alone, e.g.:
+          ansible-playbook ... --tags=upgrade-postgres
+
+      See your playbook's Postgres maintenance documentation for details.
+  when: >-
+    ansible_run_tags | intersect([
+      'all',
+      'setup-all', 'setup-postgres',
+      'install-all', 'install-postgres',
+    ]) | length > 0
+
+- name: Set default postgres_dump_dir, if not provided
+  ansible.builtin.set_fact:
+    postgres_dump_dir: "/tmp"
+  when: "postgres_dump_dir | default('') == ''"
+
+- name: Set postgres_dump_name, if not provided
+  ansible.builtin.set_fact:
+    postgres_dump_name: "{{ postgres_identifier }}-dump.sql.zst"
+  when: "postgres_dump_name | default('') == ''"
+
+- name: Set postgres_auto_upgrade_backup_data_path, if not provided
+  ansible.builtin.set_fact:
+    postgres_auto_upgrade_backup_data_path: "{{ postgres_data_path }}-auto-upgrade-backup"
+  when: "postgres_auto_upgrade_backup_data_path | default('') == ''"
+
+# No waiting is needed with the readiness check (see `postgres_managed_databases_postgres_start_wait_timeout_seconds`).
+- name: Set postgres_start_wait_time, if not provided
+  ansible.builtin.set_fact:
+    postgres_start_wait_time: "{{ 0 if postgres_systemd_readiness_check_enabled | bool else 15 }}"
+  when: "postgres_start_wait_time | default('') == ''"
+
+- name: Set postgres_force_upgrade, if not provided
+  ansible.builtin.set_fact:
+    postgres_force_upgrade: false
+  when: "postgres_force_upgrade | default('') == ''"
+
+- name: Check Postgres auto-upgrade backup data directory
+  ansible.builtin.stat:
+    path: "{{ postgres_auto_upgrade_backup_data_path }}"
+  register: result_auto_upgrade_path
+
+- name: Abort, if existing Postgres auto-upgrade data path detected
+  ansible.builtin.fail:
+    msg: |-
+      Detected that a left-over {{ postgres_auto_upgrade_backup_data_path }} exists.
+      You should rename it to {{ postgres_data_path }} if the previous upgrade went wrong, or delete it if it went well.
+  when: "result_auto_upgrade_path.stat.exists"
+
+- name: Detect existing Postgres version
+  ansible.builtin.import_tasks: tasks/detect_existing_postgres_version.yml
+
+- name: Abort, if no existing Postgres version detected
+  ansible.builtin.fail:
+    msg: "Could not find existing Postgres installation"
+  when: "not postgres_detected_existing | bool"
+
+- name: Abort, if already at latest Postgres version
+  ansible.builtin.fail:
+    msg: "You are already running the latest Postgres version supported ({{ postgres_container_image_latest }}). You can force an 'upgrade' anyway by passing `-e postgres_force_upgrade=true` to the playbook."
+  when: "postgres_detected_version_number == postgres_eligible_version_max and not postgres_force_upgrade"
+
+- ansible.builtin.debug:
+    msg: "Upgrading the Postgres database from version {{ postgres_detected_version_number }} to the maximum eligible version ({{ postgres_eligible_version_max }})"
+
+- name: Ensure services are stopped
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: stopped
+    daemon_reload: true
+  with_items: "{{ postgres_systemd_services_to_stop_for_maintenance_list }}"
+
+- name: Ensure Postgres service is started
+  ansible.builtin.service:
+    name: "{{ postgres_identifier }}"
+    state: started
+    daemon_reload: true
+  register: postgres_ensure_started_result
+
+- name: Wait a bit, so that Postgres can start
+  when: "postgres_ensure_started_result.changed | bool and (postgres_start_wait_time | int) > 0"
+  ansible.builtin.wait_for:
+    timeout: "{{ postgres_start_wait_time }}"
+  delegate_to: 127.0.0.1
+  become: false
+
+# We dump all databases, roles, etc.
+#
+# Because we'll be importing into a new container which initializes the default
+# role (`postgres_connection_username`) and database (`postgres_db_name`) by itself on startup,
+# we need to remove these from the dump, or we'll get errors saying these already exist.
+- name: Perform Postgres database dump
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} run --rm --name {{ postgres_identifier }}-dump
+      --log-driver=none
+      --user={{ postgres_container_uid }}:{{ postgres_container_gid }}
+      --network={{ postgres_container_network }}
+      --env-file={{ postgres_base_path }}/env-postgres-psql
+      --entrypoint={{ postgres_container_shell_path }}
+      --mount type=bind,src={{ postgres_dump_dir }},dst=/out
+      {{ postgres_detected_version_corresponding_container_image }}
+      -c "pg_dumpall -h {{ postgres_identifier }}
+      {{ '| gzip -c ' if postgres_dump_name.endswith('.gz') else '' }}
+      {{ '| zstd --stdout ' if postgres_dump_name.endswith('.zst') else '' }}
+      > /out/{{ postgres_dump_name }}"
+  register: postgres_upgrade_postgres_dump_command_result
+  changed_when: postgres_upgrade_postgres_dump_command_result.rc == 0
+  tags:
+    - skip_ansible_lint
+
+- name: Ensure Postgres is stopped
+  ansible.builtin.service:
+    name: "{{ postgres_identifier }}"
+    state: stopped
+
+- name: Rename existing Postgres data directory
+  ansible.builtin.command:
+    cmd: "mv {{ postgres_data_path }} {{ postgres_auto_upgrade_backup_data_path }}"
+  register: postgres_upgrade_postgres_move_command_result
+  changed_when: postgres_upgrade_postgres_move_command_result.rc == 0
+
+- ansible.builtin.debug:
+    msg: "NOTE: Your Postgres data directory has been moved from `{{ postgres_data_path }}` to `{{ postgres_auto_upgrade_backup_data_path }}`. In the event of failure, you can stop services, move it back and run the playbook with --tags=setup-postgres to restore operation on the old Postgres version ({{ postgres_detected_version_number }})."
+
+- name: Install Postgres
+  ansible.builtin.import_tasks: tasks/install.yml
+
+- name: Ensure Postgres autoruns and is restarted
+  ansible.builtin.service:
+    name: "{{ postgres_identifier }}"
+    enabled: true
+    state: restarted
+    daemon_reload: true
+
+- name: Wait a bit, so that Postgres can start
+  when: "(postgres_start_wait_time | int) > 0"
+  ansible.builtin.wait_for:
+    timeout: "{{ postgres_start_wait_time }}"
+  delegate_to: 127.0.0.1
+  become: false
+
+# Starting the database container had automatically created the default
+# role (`postgres_connection_username`) and database (`postgres_db_name`).
+# The dump most likely contains those same entries and would try to re-create them, leading to errors.
+# We need to skip over those lines.
+- name: Generate Postgres database import command
+  ansible.builtin.set_fact:
+    postgres_import_command: >-
+      {{ devture_systemd_docker_base_host_command_docker }} run --rm --name {{ postgres_identifier }}-import
+      --log-driver=none
+      --user={{ postgres_container_uid }}:{{ postgres_container_gid }}
+      --cap-drop=ALL
+      --network={{ postgres_container_network }}
+      --env-file={{ postgres_base_path }}/env-postgres-psql
+      --entrypoint={{ postgres_container_shell_path }}
+      --mount type=bind,src={{ postgres_dump_dir }},dst=/in,ro
+      {{ postgres_container_image_latest }}
+      -c "cat /in/{{ postgres_dump_name }} |
+      {{ 'gunzip |' if postgres_dump_name.endswith('.gz') else '' }}
+      {{ 'unzstd |' if postgres_dump_name.endswith('.zst') else '' }}
+      {% if postgres_import_roles_to_ignore | length > 0 %}
+      grep -vE '{{ postgres_import_roles_ignore_regex }}' |
+      {% endif %}
+      {% if postgres_import_databases_to_ignore | length > 0 %}
+      grep -vE '{{ postgres_import_databases_ignore_regex }}' |
+      {% endif %}
+      {% if postgres_import_schemas_to_ignore | length > 0 %}
+      grep -vE '{{ postgres_import_schemas_ignore_regex }}' |
+      {% endif %}
+      psql -v ON_ERROR_STOP=1 -h {{ postgres_identifier }}"
+  tags:
+    - skip_ansible_lint
+
+# This is a hack.
+# See: https://ansibledaily.com/print-to-standard-output-without-escaping/
+#
+# We want to run `debug: msg=".."`, but that dumps it as JSON and escapes double quotes within it,
+# which ruins the command (`postgres_import_command`)
+- name: Note about Postgres importing
+  ansible.builtin.set_fact:
+    dummy: true
+  with_items:
+    - >-
+      Importing Postgres database using the following command: `{{ postgres_import_command }}`.
+      If this crashes, you can stop Postgres (`systemctl stop {{ postgres_identifier }}`),
+      delete the new database data (`rm -rf {{ postgres_data_path }}`)
+      and restore the automatically-made backup (`mv {{ postgres_auto_upgrade_backup_data_path }} {{ postgres_data_path }}`).
+
+- name: Perform Postgres database import
+  ansible.builtin.command:
+    cmd: "{{ postgres_import_command }}"
+  register: postgres_upgrade_postgres_import_command_result
+  changed_when: postgres_upgrade_postgres_import_command_result.rc == 0
+
+- name: Delete Postgres database dump file
+  ansible.builtin.file:
+    path: "{{ postgres_dump_dir }}/{{ postgres_dump_name }}"
+    state: absent
+
+- name: Ensure Postgres is stopped (if it previously was)
+  when: "postgres_ensure_started_result.changed | bool"
+  ansible.builtin.service:
+    name: "{{ postgres_identifier }}"
+    state: stopped
+
+- name: Ensure services are started
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    daemon_reload: true
+  with_items: "{{ postgres_systemd_services_to_stop_for_maintenance_list }}"
+
+- ansible.builtin.debug:
+    msg: "NOTE: Your old Postgres data directory is preserved at `{{ postgres_auto_upgrade_backup_data_path }}`. You might want to get rid of it once you've confirmed that all is well."

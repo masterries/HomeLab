@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2024, 2025 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025, 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Ensure Valkey paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ valkey_uid }}"
+    group: "{{ valkey_gid }}"
+  with_items:
+    - "{{ valkey_base_path }}"
+    - "{{ valkey_config_path }}"
+    - "{{ valkey_data_path }}"
+    - "{{ valkey_run_path }}"
+
+- name: Ensure VM Overcommit Memory is set to 1
+  ansible.posix.sysctl:
+    name: vm.overcommit_memory
+    value: "1"
+    state: present
+    reload: true
+  become: true
+  when: valkey_vm_overcommit_memory_enabled
+
+- name: Ensure Valkey support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ valkey_base_path }}/{{ item }}"
+    mode: "0640"
+    owner: "{{ valkey_uid }}"
+    group: "{{ valkey_gid }}"
+  with_items:
+    - env
+  register: valkey_support_files_result
+
+- name: Ensure Valkey configuration file installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ valkey_config_path }}/{{ item }}"
+    mode: "0640"
+    owner: "{{ valkey_uid }}"
+    group: "{{ valkey_gid }}"
+  with_items:
+    - valkey.conf
+  register: valkey_config_file_result
+
+- name: Run if self-building of Valkey container image is not enabled
+  when: "not valkey_container_image_self_build | bool"
+  block:
+    - name: Ensure Valkey container image is pulled via community.docker.docker_image_pull
+      when: devture_systemd_docker_base_container_image_pull_method == 'ansible-module'
+      community.docker.docker_image_pull:
+        name: "{{ valkey_container_image }}"
+        pull: always
+      register: valkey_container_image_pull_result_ansible_module
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: valkey_container_image_pull_result_ansible_module is not failed
+
+    - name: Ensure Valkey container image is pulled via ansible.builtin.command
+      when: devture_systemd_docker_base_container_image_pull_method == 'command'
+      ansible.builtin.command:
+        cmd: "{{ devture_systemd_docker_base_host_command_docker }} pull {{ valkey_container_image }}"
+      register: valkey_container_image_pull_result_command
+      retries: "{{ devture_playbook_help_container_retries_count }}"
+      delay: "{{ devture_playbook_help_container_retries_delay }}"
+      until: valkey_container_image_pull_result_command is not failed
+      changed_when: "'Downloaded newer image' in valkey_container_image_pull_result_command.stdout"
+
+- name: Run if self-building of Valkey container image is enabled
+  when: valkey_container_image_self_build | bool
+  block:
+    - name: Ensure Valkey repository is present on self-build
+      ansible.builtin.git:
+        repo: "{{ valkey_container_image_self_build_repo }}"
+        version: "{{ valkey_container_image_self_build_repo_version }}"
+        dest: "{{ valkey_container_image_self_build_src_files_path }}"
+        force: "yes"
+      register: valkey_git_pull_results
+
+    - name: Ensure Valkey container image is built
+      community.docker.docker_image_build:
+        name: "{{ valkey_container_image_self_build_name }}"
+        dockerfile: Dockerfile
+        path: "{{ valkey_container_image_self_build_repo_dockerfile_dir }}"
+        pull: true
+        rebuild: "{{ 'always' if valkey_git_pull_results.changed | bool else 'never' }}"
+      register: valkey_container_image_build_result
+
+- name: Ensure Valkey container network is created via community.docker.docker_network
+  when: devture_systemd_docker_base_container_network_creation_method == 'ansible-module'
+  community.docker.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ valkey_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+  register: valkey_network_creation_result
+
+- name: Ensure Valkey container network is created via ansible.builtin.command
+  when: devture_systemd_docker_base_container_network_creation_method == 'command'
+  ansible.builtin.command:
+    cmd: >-
+      {{ devture_systemd_docker_base_host_command_docker }} network create
+      {% if devture_systemd_docker_base_ipv6_enabled %}--ipv6{% endif %}
+      {{ devture_systemd_docker_base_container_networks_driver_options_string }}
+      {{ valkey_container_network }}
+  register: valkey_network_creation_result
+  changed_when: valkey_network_creation_result.rc == 0
+  failed_when: valkey_network_creation_result.rc != 0 and 'already exists' not in valkey_network_creation_result.stderr
+
+- name: Ensure Valkey systemd service is present
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/valkey.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ valkey_identifier }}.service"
+    mode: "0644"
+  register: valkey_systemd_service_result
+
+- name: Determine whether Valkey needs a restart
+  ansible.builtin.set_fact:
+    valkey_restart_necessary: >-
+      {{
+        valkey_support_files_result.changed | default(false)
+        or valkey_config_file_result.changed | default(false)
+        or valkey_systemd_service_result.changed | default(false)
+        or valkey_container_image_pull_result_ansible_module.changed | default(false)
+        or valkey_container_image_pull_result_command.changed | default(false)
+        or valkey_container_image_build_result.changed | default(false)
+      }}

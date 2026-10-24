@@ -1,0 +1,695 @@
+# SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2023 MASH project contributors
+# SPDX-FileCopyrightText: 2023 Niels Bouma
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+# Project source code URL: https://github.com/traefik/traefik
+
+traefik_enabled: true
+
+traefik_identifier: traefik
+traefik_base_path: "/{{ traefik_identifier }}"
+traefik_config_dir_path: "{{ traefik_base_path }}/config"
+traefik_ssl_dir_path: "{{ traefik_base_path }}/ssl"
+traefik_plugins_dir_path: "{{ traefik_base_path }}/plugins-storage"
+
+# renovate: datasource=docker depName=library/traefik versioning=semver
+traefik_version: v3.7.16
+
+traefik_uid: ""
+traefik_gid: ""
+
+traefik_container_image: "{{ traefik_container_image_registry_prefix }}traefik:{{ traefik_container_image_tag }}"
+traefik_container_image_tag: "{{ traefik_version }}"
+traefik_container_image_registry_prefix: "{{ traefik_container_image_registry_prefix_upstream }}"
+traefik_container_image_registry_prefix_upstream: "{{ traefik_container_image_registry_prefix_upstream_default }}"
+traefik_container_image_registry_prefix_upstream_default: docker.io/
+
+# The base container network. It will be auto-created by this role if it doesn't exist already.
+traefik_container_network: traefik
+
+# Control if the container network is deleted on uninstalling.
+traefik_container_network_deletion_enabled: true
+
+# Specify how the container publishes its web port
+#
+# Takes an "<ip>:<port>" or "<port>" value (e.g. "127.0.0.1:80"), just a port number or an empty string to not expose.
+traefik_container_web_host_bind_port: "{{ traefik_config_entrypoint_web_port if traefik_config_entrypoint_web_enabled else '' }}"
+
+# Specify how the container publishes its TCP web-secure port
+#
+# Takes an "<ip>:<port>" or "<port>" value (e.g. "127.0.0.1:443"), just a port number or an empty string to not expose.
+traefik_container_web_secure_host_bind_port: "{{ traefik_config_entrypoint_web_secure_port if traefik_config_entrypoint_web_secure_enabled else '' }}"
+
+# Specify how the container publishes its UDP web-secure port
+#
+# Takes an "<ip>:<port>" or "<port>" value (e.g. "127.0.0.1:443"), just a port number or an empty string to not expose.
+traefik_container_web_secure_host_bind_port_udp: "{{ traefik_config_entrypoint_web_secure_http3_config_advertisedPort if traefik_config_entrypoint_web_secure_enabled and traefik_config_entrypoint_web_secure_http3_enabled else '' }}"
+
+# Specify how the container publishes its metrics port
+#
+# Takes an "<ip>:<port>" or "<port>" value (e.g. "127.0.0.1:8082"), just a port number or an empty string to not expose.
+traefik_container_metrics_host_bind_port: "{{ traefik_config_entrypoint_metrics_port if traefik_config_entrypoint_metrics_enabled else '' }}"
+
+# A list of additional container networks that the container would be connected to.
+# The role does not create these networks, so make sure they already exist.
+traefik_container_additional_networks: "{{ (traefik_container_additional_networks_auto + traefik_container_additional_networks_custom) | unique }}"
+traefik_container_additional_networks_auto: []
+traefik_container_additional_networks_custom: []
+
+# A list of DNS search domains for the container (Docker's `--dns-search`).
+#
+# The default (`['.']`) removes all search domains, so a hostname that Docker's
+# embedded DNS cannot resolve (e.g. a backend container that is currently down
+# or restarting) fails with NXDOMAIN right away.
+#
+# Without this, the container inherits the host's search domains, which is
+# dangerous for a reverse-proxy: a temporarily-missing backend container name
+# gets retried with the host's search domains appended and may resolve via
+# public DNS — potentially to the very host Traefik runs on, making Traefik
+# proxy requests to its own web entrypoint (a redirect loop) or to some other
+# unrelated server.
+#
+# Set to an empty list (`[]`) to restore the old behavior of inheriting the
+# host's search domains.
+traefik_container_dns_search_domains: ['.']
+
+# A list of additional "volumes" to mount in the container.
+# This list gets populated dynamically at runtime. You can provide a different default value,
+# if you wish to mount your own files into the container.
+# Contains definition objects like this: `{"type": "bind", "src": "/outside", "dst": "/inside", "options": "readonly"}.
+# See the `--mount` documentation for the `docker run` command.
+traefik_container_additional_volumes: "{{ traefik_container_additional_volumes_auto + traefik_container_additional_volumes_custom }}"
+traefik_container_additional_volumes_auto: []
+traefik_container_additional_volumes_custom: []
+
+# traefik_labels_additional_labels contains a multiline string with additional labels to add to the container label file.
+# See `../templates/labels.j2` for details.
+#
+# Example:
+# traefik_labels_additional_labels: |
+#   my.label=1
+#   another.label="here"
+traefik_labels_additional_labels: ""
+
+# A list of extra arguments to pass to the container (`docker create` command)
+traefik_container_extra_arguments: "{{ traefik_container_extra_arguments_auto + traefik_container_extra_arguments_custom }}"
+traefik_container_extra_arguments_auto: []
+traefik_container_extra_arguments_custom: []
+
+# A list of extra arguments to pass to the process inside the container
+# Example: ['--SOME_ARGUMENT']
+traefik_process_extra_arguments: "{{ traefik_process_extra_arguments_auto + traefik_process_extra_arguments_custom }}"
+traefik_process_extra_arguments_auto:
+  - --configFile=/config/traefik.yml
+traefik_process_extra_arguments_custom: []
+
+# List of systemd services that the Traefik systemd service depends on
+traefik_systemd_required_services_list: "{{ traefik_systemd_required_services_list_default + traefik_systemd_required_services_list_auto + traefik_systemd_required_services_list_custom }}"
+traefik_systemd_required_services_list_default: "{{ [devture_systemd_docker_base_docker_service_name] if devture_systemd_docker_base_docker_service_name else [] }}"
+traefik_systemd_required_services_list_auto: []
+traefik_systemd_required_services_list_custom: []
+
+# List of systemd services that the Traefik systemd service wants
+traefik_systemd_wanted_services_list: "{{ traefik_systemd_wanted_services_list_default + traefik_systemd_wanted_services_list_auto + traefik_systemd_wanted_services_list_custom }}"
+traefik_systemd_wanted_services_list_default: []
+traefik_systemd_wanted_services_list_auto: []
+traefik_systemd_wanted_services_list_custom: []
+
+# Controls the SyslogIdentifier value in the systemd service file.
+# Certain software (like CrowdSec) may expect a special value (e.g. `traefik`), so we allow overriding.
+traefik_systemd_syslog_identifier: "{{ traefik_identifier }}"
+
+# Controls how long to wait for the container to stop gracefully before killing it.
+traefik_container_stop_grace_time_seconds: "{{ devture_systemd_docker_base_container_stop_grace_time_seconds }}"
+
+# Controls how long the pre-start cleanup should wait for stale container-name release
+# before failing startup explicitly.
+traefik_container_cleanup_timeout_seconds: "{{ devture_systemd_docker_base_container_cleanup_timeout_seconds }}"
+
+# Controls the delay between pre-start cleanup retries.
+traefik_container_cleanup_retry_delay_seconds: "{{ devture_systemd_docker_base_container_cleanup_retry_delay_seconds }}"
+
+# Shell command used in the systemd pre-start phase to deterministically remove a stale
+# container and wait until Docker releases its name.
+traefik_container_cleanup_command: |
+  i=0;
+  while [ "$i" -lt {{ traefik_container_cleanup_timeout_seconds }} ]; do
+  {{ devture_systemd_docker_base_host_command_docker }} stop -t {{ traefik_container_stop_grace_time_seconds }} {{ traefik_identifier }} >/dev/null 2>&1 || true;
+  {{ devture_systemd_docker_base_host_command_docker }} rm -f {{ traefik_identifier }} >/dev/null 2>&1 || true;
+  if {{ devture_systemd_docker_base_host_command_docker }} container inspect {{ traefik_identifier }} >/dev/null 2>&1; then
+  i=$((i + 1));
+  sleep {{ traefik_container_cleanup_retry_delay_seconds }};
+  continue;
+  fi;
+  if {{ devture_systemd_docker_base_host_command_docker }} info >/dev/null 2>&1; then
+  exit 0;
+  fi;
+  echo "Failed to query Docker daemon while cleaning up {{ traefik_identifier }}" >&2;
+  exit 1;
+  done;
+  echo "Failed to remove stale container {{ traefik_identifier }} after {{ traefik_container_cleanup_timeout_seconds }} attempts" >&2;
+  exit 1
+
+traefik_ssl_dir_enabled: "{{ traefik_config_certificatesResolvers_acme_enabled }}"
+
+# Controls whether traefik_plugins_dir_path is created and mounted
+traefik_plugin_support_enabled: false
+
+# Specifies the primary entrypoint.
+# We default to the web-secure entrypoint if it's enabled.
+# When web-secure is enabled, the web (80) entrypoint redirects to web-secure (443)
+traefik_entrypoint_primary: "{{ traefik_config_entrypoint_web_secure_name if traefik_config_entrypoint_web_secure_enabled else (traefik_config_entrypoint_web_name if traefik_config_entrypoint_web_enabled else '') }}"
+
+# Specifies the primary certificate resolver.
+# If you're disabling ACME or using your own, you can specify it here manually.
+traefik_certResolver_primary: "{{ traefik_config_certificatesResolvers_acme_name if traefik_config_certificatesResolvers_acme_enabled else '' }}"
+
+traefik_config_log_level: INFO
+
+# Controls whether logs for incoming requests are collected
+traefik_config_accessLog_enabled: true
+
+# Controls the access log format (json or common)
+traefik_config_accessLog_format: "common"
+
+# Controls the access log file path
+traefik_config_accessLog_filePath: ""
+
+# Controls the access log buffering size
+traefik_config_accessLog_bufferingSize: 100
+
+# Controls whether Prometheus metrics will be exposed on a new metrics entrypoint.
+# See traefik_config_entrypoint_metrics_enabled
+traefik_config_metrics_prometheus_enabled: false
+traefik_config_metrics_prometheus_entrypoint: metrics
+
+# Controls whether the ACME (https://en.wikipedia.org/wiki/Automatic_Certificate_Management_Environment) certificate resolver is enabled.
+# By default, if the web-secure entrypoint is enabled, we enable Let's Encrypt.
+traefik_config_certificatesResolvers_acme_enabled: "{{ traefik_config_entrypoint_web_secure_enabled }}"
+traefik_config_certificatesResolvers_acme_name: default
+# Optional email address. Let's Encrypt doesn't need and use it anymore,
+# but other ACME providers may require it (see https://github.com/spantaleev/matrix-docker-ansible-deploy/issues/4014#issuecomment-2976933956).
+traefik_config_certificatesResolvers_acme_email: ""
+traefik_config_certificatesResolvers_acme_storage: /ssl/acme.json # in-container path
+# traefik_config_certificatesResolvers_acme_use_staging controls whether the Let's Encrypt staging environment is used or not.
+traefik_config_certificatesResolvers_acme_use_staging: false
+# traefik_config_certificatesResolvers_acme_caServer specifies the CA server endpoint to use.
+traefik_config_certificatesResolvers_acme_caServer: "{{ 'https://acme-staging-v02.api.letsencrypt.org/directory' if traefik_config_certificatesResolvers_acme_use_staging else 'https://acme-v02.api.letsencrypt.org/directory' }}"
+# traefik_config_certificatesResolvers_acme_httpChallenge_enabled controls whether the Let's Encrypt httpChallenge is used or not.
+traefik_config_certificatesResolvers_acme_httpChallenge_enabled: "{{ not traefik_config_certificatesResolvers_acme_dnsChallenge_enabled }}"
+# traefik_config_certificatesResolvers_acme_httpChallenge_entrypoint controls on which entrypoint the HTTP ACME challenge is enabled.
+traefik_config_certificatesResolvers_acme_httpChallenge_entrypoint: "{{ traefik_config_entrypoint_web_name if traefik_config_entrypoint_web_enabled else '' }}"
+
+# Controls whether the ACME DNS challenge is enabled.
+# For more information on supported providers, settings and environment variables, please refer to:
+# https://doc.traefik.io/traefik/https/acme/#providers
+# If enabled, Traefik will use DNS challenges to obtain Let's Encrypt certificates.
+traefik_config_certificatesResolvers_acme_dnsChallenge_enabled: false
+# Specify the DNS provider to handle DNS challenges.
+traefik_config_certificatesResolvers_acme_dnsChallenge_provider: ""
+# The delay in seconds before checking DNS propagation for the ACME DNS challenge.
+traefik_config_certificatesResolvers_acme_dnsChallenge_propagation_delayBeforeChecks: ""
+# The list of DNS resolvers to be used for the ACME DNS challenge.
+traefik_config_certificatesResolvers_acme_dnsChallenge_resolvers: []
+
+# Example for dnsChallenge and netcup DNS provider:
+#
+# traefik_config_certificatesResolvers_acme_dnsChallenge_enabled: true
+# traefik_config_certificatesResolvers_acme_dnsChallenge_provider: netcup
+# traefik_config_certificatesResolvers_acme_dnsChallenge_propagation_delayBeforeChecks: 900
+
+# traefik_config_certificatesResolvers_acme_dnsChallenge_resolvers:
+#  - "root-dns.netcup.net"
+#  - "second-dns.netcup.net"
+
+# Controls whether the web entrypoint is enabled
+traefik_config_entrypoint_web_enabled: true
+traefik_config_entrypoint_web_name: web
+traefik_config_entrypoint_web_port: 80
+traefik_config_entrypoint_web_port_in_container: 8080
+traefik_config_entrypoint_web_address: ":{{ traefik_config_entrypoint_web_port_in_container }}"
+# Controls `forwardedHeaders.trustedIPs`, specifying from which IPs to trust `X-Forwarded-*` headers.
+# By default, we expect that there's no other reverse-proxy in front of us, so we don't trust anything.
+# Also see: `traefik_config_entrypoint_web_forwardedHeaders_insecure`
+traefik_config_entrypoint_web_forwardedHeaders_trustedIPs: []
+# Controls `forwardedHeaders.insecure` for this entrypoint.
+# Also see: `traefik_config_entrypoint_web_forwardedHeaders_trustedIPs`
+traefik_config_entrypoint_web_forwardedHeaders_insecure: false
+# Controls `transport.respondingTimeouts.readTimeout` for the `web` entrypoint - timeouts for incoming requests to the Traefik instance.
+# Setting them has no effect for UDP entryPoints.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#respondingtimeouts
+traefik_config_entrypoint_web_transport_respondingTimeouts_readTimeout: 60s
+# Controls `transport.respondingTimeouts.writeTimeout` for the `web` entrypoint - the maximum duration before timing out writes of the response.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#respondingtimeouts
+traefik_config_entrypoint_web_transport_respondingTimeouts_writeTimeout: 0s
+# Controls `transport.respondingTimeouts.idleTimeout` for the `web` entrypoint - the maximum duration an idle (keep-alive) connection will remain idle before closing itself.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#respondingtimeouts
+traefik_config_entrypoint_web_transport_respondingTimeouts_idleTimeout: 180s
+
+# Controls whether encodedCharacters configuration is enabled for the `web` entrypoint.
+# This configures which encoded characters are allowed in request paths.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#encodedcharacters
+traefik_config_entrypoint_web_http_encodedCharacters_enabled: false
+# Controls `http.encodedCharacters.allowEncodedSlash` for the `web` entrypoint.
+traefik_config_entrypoint_web_http_encodedCharacters_allowEncodedSlash: true
+# Controls `http.encodedCharacters.allowEncodedHash` for the `web` entrypoint.
+traefik_config_entrypoint_web_http_encodedCharacters_allowEncodedHash: true
+# Controls `http.encodedCharacters.allowEncodedBackSlash` for the `web` entrypoint.
+traefik_config_entrypoint_web_http_encodedCharacters_allowEncodedBackSlash: true
+# Controls `http.encodedCharacters.allowEncodedNullCharacter` for the `web` entrypoint.
+traefik_config_entrypoint_web_http_encodedCharacters_allowEncodedNullCharacter: true
+# Controls `http.encodedCharacters.allowEncodedSemicolon` for the `web` entrypoint.
+traefik_config_entrypoint_web_http_encodedCharacters_allowEncodedSemicolon: true
+# Controls `http.encodedCharacters.allowEncodedPercent` for the `web` entrypoint.
+traefik_config_entrypoint_web_http_encodedCharacters_allowEncodedPercent: true
+# Controls `http.encodedCharacters.allowEncodedQuestionMark` for the `web` entrypoint.
+traefik_config_entrypoint_web_http_encodedCharacters_allowEncodedQuestionMark: true
+
+# Controls whether the web entrypoint should be redirected to web-secure
+# If web-secure is enabled, we enable this redirection by default.
+traefik_config_entrypoint_web_to_web_secure_redirection_enabled: "{{ traefik_config_entrypoint_web_secure_enabled }}"
+traefik_config_entrypoint_web_to_web_secure_redirection_to: ":{{ traefik_config_entrypoint_web_secure_port }}"
+traefik_config_entrypoint_web_to_web_secure_redirection_scheme: https
+
+# Controls the `allowACMEByPass` setting for the `web` entrypoint.
+# When enabled, user-defined routers can handle ACME TLS/HTTP challenges
+# instead of Traefik's built-in handler. Useful when services behind Traefik
+# need to resolve their own ACME certificates.
+traefik_config_entrypoint_web_allowACMEByPass: false  # noqa var-naming
+
+# Controls whether the web-secure entrypoint is enabled
+traefik_config_entrypoint_web_secure_enabled: true
+traefik_config_entrypoint_web_secure_name: web-secure
+traefik_config_entrypoint_web_secure_port: 443
+traefik_config_entrypoint_web_secure_port_in_container: 8443
+traefik_config_entrypoint_web_secure_address: ":{{ traefik_config_entrypoint_web_secure_port_in_container }}"
+traefik_config_entrypoint_web_secure_http_middlewares: "{{ traefik_config_entrypoint_web_secure_http_middlewares_default + traefik_config_entrypoint_web_secure_http_middlewares_auto + traefik_config_entrypoint_web_secure_http_middlewares_custom }}"
+traefik_config_entrypoint_web_secure_http_middlewares_default: []
+traefik_config_entrypoint_web_secure_http_middlewares_auto: []
+traefik_config_entrypoint_web_secure_http_middlewares_custom: []
+# Controls `forwardedHeaders.trustedIPs`, specifying from which IPs to trust `X-Forwarded-*` headers.
+# By default, we expect that there's no other reverse-proxy in front of us, so we don't trust anything.
+# Also see: `traefik_config_entrypoint_web_secure_forwardedHeaders_insecure`
+traefik_config_entrypoint_web_secure_forwardedHeaders_trustedIPs: []
+# Controls `forwardedHeaders.insecure` for this entrypoint.
+# Also see: `traefik_config_entrypoint_web_secure_forwardedHeaders_trustedIPs`
+traefik_config_entrypoint_web_secure_forwardedHeaders_insecure: false
+# Controls `transport.respondingTimeouts.readTimeout` for the `web-secure` entrypoint - timeouts for incoming requests to the Traefik instance.
+# Setting them has no effect for UDP entryPoints.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#respondingtimeouts
+traefik_config_entrypoint_web_secure_transport_respondingTimeouts_readTimeout: "{{ traefik_config_entrypoint_web_transport_respondingTimeouts_readTimeout }}"
+# Controls `transport.respondingTimeouts.writeTimeout` for the `web-secure` entrypoint - the maximum duration before timing out writes of the response.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#respondingtimeouts
+traefik_config_entrypoint_web_secure_transport_respondingTimeouts_writeTimeout: "{{ traefik_config_entrypoint_web_transport_respondingTimeouts_writeTimeout }}"
+# Controls `transport.respondingTimeouts.idleTimeout` for the `web-secure` entrypoint - the maximum duration an idle (keep-alive) connection will remain idle before closing itself.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#respondingtimeouts
+traefik_config_entrypoint_web_secure_transport_respondingTimeouts_idleTimeout: "{{ traefik_config_entrypoint_web_transport_respondingTimeouts_idleTimeout }}"
+
+# Controls whether encodedCharacters configuration is enabled for the `web-secure` entrypoint.
+# This configures which encoded characters are allowed in request paths.
+# See https://doc.traefik.io/traefik/routing/entrypoints/#encodedcharacters
+traefik_config_entrypoint_web_secure_http_encodedCharacters_enabled: false
+# Controls `http.encodedCharacters.allowEncodedSlash` for the `web-secure` entrypoint.
+traefik_config_entrypoint_web_secure_http_encodedCharacters_allowEncodedSlash: true
+# Controls `http.encodedCharacters.allowEncodedHash` for the `web-secure` entrypoint.
+traefik_config_entrypoint_web_secure_http_encodedCharacters_allowEncodedHash: true
+# Controls `http.encodedCharacters.allowEncodedBackSlash` for the `web-secure` entrypoint.
+traefik_config_entrypoint_web_secure_http_encodedCharacters_allowEncodedBackSlash: true
+# Controls `http.encodedCharacters.allowEncodedNullCharacter` for the `web-secure` entrypoint.
+traefik_config_entrypoint_web_secure_http_encodedCharacters_allowEncodedNullCharacter: true
+# Controls `http.encodedCharacters.allowEncodedSemicolon` for the `web-secure` entrypoint.
+traefik_config_entrypoint_web_secure_http_encodedCharacters_allowEncodedSemicolon: true
+# Controls `http.encodedCharacters.allowEncodedPercent` for the `web-secure` entrypoint.
+traefik_config_entrypoint_web_secure_http_encodedCharacters_allowEncodedPercent: true
+# Controls `http.encodedCharacters.allowEncodedQuestionMark` for the `web-secure` entrypoint.
+traefik_config_entrypoint_web_secure_http_encodedCharacters_allowEncodedQuestionMark: true
+
+# Controls the `allowACMEByPass` setting for the `web-secure` entrypoint.
+# When enabled, user-defined routers can handle ACME TLS/HTTP challenges
+# instead of Traefik's built-in handler. Useful when services behind Traefik
+# need to resolve their own ACME certificates.
+traefik_config_entrypoint_web_secure_allowACMEByPass: false  # noqa var-naming
+
+traefik_config_entrypoint_web_secure_http3_enabled: true
+traefik_config_entrypoint_web_secure_http3_config_advertisedPort: "{{ traefik_config_entrypoint_web_secure_port }}"
+traefik_config_entrypoint_web_secure_http3_config: "{{ traefik_config_entrypoint_web_secure_http3_config_yaml | from_yaml }}"
+traefik_config_entrypoint_web_secure_http3_config_yaml: |
+  advertisedPort: {{ traefik_config_entrypoint_web_secure_http3_config_advertisedPort | int | to_json }}
+
+# Controls whether the metrics entrypoint is enabled
+traefik_config_entrypoint_metrics_enabled: "{{ traefik_config_metrics_prometheus_enabled }}"
+traefik_config_entrypoint_metrics_name: "{{ traefik_config_metrics_prometheus_entrypoint }}"
+traefik_config_entrypoint_metrics_port: 8082
+traefik_config_entrypoint_metrics_port_in_container: 8082
+traefik_config_entrypoint_metrics_address: ":{{ traefik_config_entrypoint_metrics_port_in_container }}"
+# Controls `forwardedHeaders.trustedIPs`, specifying from which IPs to trust `X-Forwarded-*` headers.
+# By default, we expect that there's no other reverse-proxy in front of us, so we don't trust anything.
+# Also see: `traefik_config_entrypoint_metrics_forwardedHeaders_insecure`
+traefik_config_entrypoint_metrics_forwardedHeaders_trustedIPs: []
+# Controls `forwardedHeaders.insecure` for this entrypoint.
+# Also see: `traefik_config_entrypoint_metrics_forwardedHeaders_trustedIPs`
+traefik_config_entrypoint_metrics_forwardedHeaders_insecure: false
+
+# Controls whether the health entrypoint is enabled.
+# When enabled, Traefik's built-in `ping` feature (https://doc.traefik.io/traefik/reference/install-configuration/observability/healthcheck/)
+# is activated on a dedicated internal entrypoint (not exposed to the host).
+# Traefik will respond to /ping requests on this entrypoint with a 200 OK when it's ready.
+# This is used by the systemd ExecStartPost health check (see traefik_systemd_healthcheck_enabled)
+# to verify Traefik is ready before dependent services start.
+traefik_config_entrypoint_health_enabled: true
+traefik_config_entrypoint_health_name: health
+traefik_config_entrypoint_health_port_in_container: 7777
+traefik_config_entrypoint_health_address: ":{{ traefik_config_entrypoint_health_port_in_container }}"
+
+# Controls the post-start health check in the systemd service.
+# When enabled, ExecStartPost polls Traefik's /ping endpoint, keeping the service
+# in "activating (start-post)" state until Traefik is ready.
+# Services with After=traefik.service will properly wait.
+traefik_systemd_healthcheck_enabled: "{{ traefik_config_entrypoint_health_enabled }}"
+traefik_systemd_healthcheck_max_retries: 30
+traefik_systemd_healthcheck_interval_seconds: 1
+
+# The command used for the health check in ExecStartPost.
+# Uses `docker exec` + `wget` (available in Alpine-based Traefik images) to poll /ping.
+traefik_systemd_healthcheck_command: >-
+  {{ devture_systemd_docker_base_host_command_sh }} -c
+  'for i in $(seq 1 {{ traefik_systemd_healthcheck_max_retries }}); do
+  echo "[Attempt $i/{{ traefik_systemd_healthcheck_max_retries }}] Traefik systemd health check: checking readiness via /ping..";
+  {{ devture_systemd_docker_base_host_command_docker }} exec {{ traefik_identifier }}
+  wget -q --spider http://127.0.0.1:{{ traefik_config_entrypoint_health_port_in_container }}/ping && echo "[Attempt $i/{{ traefik_systemd_healthcheck_max_retries }}] Traefik systemd health check: passed" && exit 0;
+  echo "[Attempt $i/{{ traefik_systemd_healthcheck_max_retries }}] Traefik systemd health check: not ready yet, retrying in {{ traefik_systemd_healthcheck_interval_seconds }}s..";
+  sleep {{ traefik_systemd_healthcheck_interval_seconds }};
+  done; echo "[Attempt $i/{{ traefik_systemd_healthcheck_max_retries }}] Traefik systemd health check: failed after {{ traefik_systemd_healthcheck_max_retries }} attempts"; exit 1'
+
+# Controls the `providers.providersThrottleDuration` configuration option (in seconds).
+# This is the duration Traefik waits after a configuration change before applying it, to batch rapid changes.
+# See: https://doc.traefik.io/traefik/v3.3/providers/overview/#providersprovidersthrottleduration
+traefik_config_providers_providersThrottleDuration_seconds: 2
+
+# Controls the `providers.docker.network` configuration option.
+traefik_config_providers_docker_network: "{{ traefik_container_network }}"
+
+# Controls the `providers.docker.endpoint` configuration option.
+traefik_config_providers_docker_endpoint: unix:///var/run/docker.sock
+
+# traefik_config_api_dashboard controls the api.dashboard configuration setting,
+# which controls whether the dashboard is enabled.
+# See: traefik_dashboard_enabled
+traefik_config_api_dashboard: "{{ traefik_dashboard_enabled }}"
+
+# traefik_config_http_middlewares the http.middlewares configuration (see `templates/provider.yml.j2`)
+traefik_config_http_middlewares: "{{ traefik_config_http_middlewares_default | combine(traefik_config_http_middlewares_auto, recursive=True) | combine(traefik_config_http_middlewares_custom, recursive=True) }}"
+traefik_config_http_middlewares_default: |
+  {{
+    {}
+
+    | combine(
+      (
+        {
+          'traefik-dashboard-auth': {
+            'basicauth': {
+              'users': traefik_dashboard_basicauth_htpasswd,
+            }
+          }
+        } if traefik_dashboard_basicauth_enabled else {}
+      )
+    )
+
+    | combine(
+      (
+        {
+          traefik_config_http_middlewares_compression_middleware_name: {'compress': traefik_config_http_middlewares_compression_middleware_options}
+        } if traefik_config_http_middlewares_compression_enabled else {}
+      )
+    )
+  }}
+traefik_config_http_middlewares_auto: {}
+traefik_config_http_middlewares_custom: {}
+
+traefik_config_http_middlewares_compression_enabled: true
+traefik_config_http_middlewares_compression_middleware_name: compression
+
+# Specifies the minimum amount of bytes a response body must have to be compressed.
+# See https://doc.traefik.io/traefik/middlewares/http/compress/#minresponsebodybytes
+traefik_config_http_middlewares_compression_middleware_config_minResponseBodyBytes: 1024
+
+# Specifies the list of supported compression encodings.
+# The order of the list also sets the priority, the top entry has the highest priority.
+traefik_config_http_middlewares_compression_middleware_config_encodings: |-
+  {{
+    (
+      (['zstd'] if traefik_config_http_middlewares_compression_middleware_config_encodings_zstd_enabled else [])
+      +
+      (['br'] if traefik_config_http_middlewares_compression_middleware_config_encodings_br_enabled else [])
+      +
+      (['gzip'] if traefik_config_http_middlewares_compression_middleware_config_encodings_gzip_enabled else [])
+    )
+  }}
+traefik_config_http_middlewares_compression_middleware_config_encodings_zstd_enabled: true
+traefik_config_http_middlewares_compression_middleware_config_encodings_br_enabled: true
+traefik_config_http_middlewares_compression_middleware_config_encodings_gzip_enabled: true
+
+traefik_config_http_middlewares_compression_middleware_options: "{{ traefik_config_http_middlewares_compression_middleware_options_default | combine(traefik_config_http_middlewares_compression_middleware_options_auto, recursive=True) | combine(traefik_config_http_middlewares_compression_middleware_options_custom, recursive=True) }}"
+traefik_config_http_middlewares_compression_middleware_options_default: |-
+  {{
+    {
+      'minResponseBodyBytes': traefik_config_http_middlewares_compression_middleware_config_minResponseBodyBytes | int,
+      'encodings': traefik_config_http_middlewares_compression_middleware_config_encodings | join(','),
+    }
+  }}
+traefik_config_http_middlewares_compression_middleware_options_auto: {}
+traefik_config_http_middlewares_compression_middleware_options_custom: {}
+
+# traefik_dashboard_enabled controls whether the Dashboard is enabled.
+# See: https://doc.traefik.io/traefik/operations/dashboard/
+traefik_dashboard_enabled: false
+
+# The hostname where the Traefik Dashboard will be exposed on.
+# The Dashboard will be available at https://HOSTNAME/dashboard/ (note the trailing slash).
+traefik_dashboard_hostname: ""
+
+# traefik_dashboard_rule controls where the Traefik Dashboard will be exposed.
+# See: traefik_dashboard_enabled, traefik_dashboard_hostname
+traefik_dashboard_rule: "Host(`{{ traefik_dashboard_hostname }}`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))"
+
+# Specifies the entrypoints through which the Traefik Dashboard will be exposed.
+traefik_dashboard_entrypoints: "{{ traefik_entrypoint_primary }}"  # noqa var-naming
+
+traefik_dashboard_tls: "{{ traefik_dashboard_entrypoints != 'web' }}"
+traefik_dashboard_tls_certResolver: "{{ traefik_certResolver_primary }}"  # noqa var-naming
+
+# traefik_dashboard_basicauth_enabled controls if the dashboard is protected with HTTP Basic authentication.
+# When the Dashboard is enabled, HTTP Basic authentication is also automatically enabled.
+traefik_dashboard_basicauth_enabled: "{{ traefik_dashboard_enabled }}"
+
+# Pre-generated htpasswd content for Traefik Dashboard HTTP Basic authentication.
+# This is the preferred way to configure HTTP Basic authentication, because it
+# avoids the `passlib` dependency and keeps the resulting configuration stable
+# across playbook runs.
+#
+# Also see `traefik_dashboard_basicauth_user` and `traefik_dashboard_basicauth_password`
+# for a legacy convenience method. Ansible will convert those values and store
+# the resulting htpasswd entry in this variable at runtime.
+traefik_dashboard_basicauth_htpasswd: ""
+
+# This convenience method is discouraged. It requires the `passlib` Python
+# library on the Ansible controller, may be affected by passlib/bcrypt
+# compatibility issues (https://foss.heptapod.net/python-libs/passlib/-/issues/196),
+# and generates non-deterministic hashes which can lead to unnecessary changes.
+# Prefer defining `traefik_dashboard_basicauth_htpasswd` instead.
+traefik_dashboard_basicauth_user: ""
+traefik_dashboard_basicauth_password: ""
+# Temporary file name on the host that runs Ansible
+traefik_dashboard_basicauth_file_tmp: "/tmp/ansible-htpasswd-traefik"
+
+# traefik_config_tcp_servertransports controls the tcp.serversTransports configuration (see `templates/provider.yml.j2`)
+traefik_config_tcp_servertransports: "{{ traefik_config_tcp_servertransports_default | combine(traefik_config_tcp_servertransports_auto, recursive=True) | combine(traefik_config_tcp_servertransports_custom, recursive=True) }}"
+traefik_config_tcp_servertransports_default: |
+  {{
+    {}
+    | combine(
+      (
+        {
+          traefik_config_tcp_servertransports_default_proxyprotocol_name: {
+            'proxyProtocol': {
+              'version': traefik_config_tcp_servertransports_default_proxyprotocol_version,
+            }
+          }
+        } if traefik_config_tcp_servertransports_default_proxyprotocol_enabled else {}
+      )
+    )
+  }}
+traefik_config_tcp_servertransports_auto: {}
+traefik_config_tcp_servertransports_custom: {}
+
+# traefik_config_tls_options controls the tls.options configuration (see `templates/provider.yml.j2`)
+traefik_config_tls_options: "{{ traefik_config_tls_options_default | combine(traefik_config_tls_options_auto, recursive=True) | combine(traefik_config_tls_options_custom, recursive=True) }}"
+traefik_config_tls_options_default: {}
+traefik_config_tls_options_auto: {}
+traefik_config_tls_options_custom: {}
+
+# Specify the name of default serversTransports configuration
+traefik_config_tcp_servertransports_default_proxyprotocol_name: proxy
+
+# Control if PROXY Protocol is enabled
+# See: https://doc.traefik.io/traefik/reference/routing-configuration/tcp/serverstransport/#opt-serverstransport-proxyProtocol
+traefik_config_tcp_servertransports_default_proxyprotocol_enabled: true
+
+# Specify the PROXY Protocol version
+# See: https://doc.traefik.io/traefik/reference/routing-configuration/tcp/serverstransport/#opt-serverstransport-proxyProtocol-version
+traefik_config_tcp_servertransports_default_proxyprotocol_version: 1
+
+# A list of additional entrypoints.
+#
+# Playbooks are meant to inject their defaults into `traefik_additional_entrypoints_auto`.
+# To define your own custom entrypoints, use `traefik_additional_entrypoints_custom`.
+#
+# Each entrypoint must be defined with the following parameters:
+# - name: the name of the entrypoint
+# - port: the port number used for the entrypoint within the Traefik container
+# - host_bind_port: an optional port number (e.g. 1234) or interface + port (0.0.0.0:1234) where the container will publish the TCP port
+# - host_bind_port_udp: an optional port number (e.g. 1234) or interface + port (0.0.0.0:1234) where the container will publish the UDP port (useful if HTTP3 is enabled in the config)
+# - config: a mapping with additional configuration options for the entrypoint
+#
+# Example:
+# traefik_additional_entrypoints:
+#   - name: new-entrypoint
+#     port: 1234
+#     host_bind_port: 1234
+#     config: {}
+#   - name: another-entrypoint
+#     port: 4321
+#     host_bind_port: 127.0.0.1:4321
+#     config:
+#       http2:
+#         maxConcurrentStreams: 250
+#   - name: http3-enabled-entrypoint
+#     port: 4321
+#     host_bind_port: 127.0.0.1:4321
+#     host_bind_port_udp: 127.0.0.1:4321
+#     config:
+#       http3:
+#         advertisedPort: 4321
+traefik_additional_entrypoints: "{{ traefik_additional_entrypoints_auto + traefik_additional_entrypoints_custom }}"
+traefik_additional_entrypoints_auto: []
+traefik_additional_entrypoints_custom: []
+
+# A list of additional domains that this role should obtain certificates for.
+#
+# For each domain in the list, a dummy router like this would be added to the configuration:
+#  http:
+#    routers:
+#      example.com-dummy:
+#        rule: Host(`example.coma`)
+#        tls:
+#          certResolver: default
+#
+# This router does not forward traffic to any service.
+# The goal is to just obtain the certificate and allow it to be used for other purposes,
+# after extracting it out of Traefik via traefik-certs-dumper (https://github.com/ldez/traefik-certs-dumper).
+# For extracting certificates out using this tool, see this role: https://github.com/mother-of-all-self-hosting/ansible-role-traefik-certs-dumper
+#
+# Playbooks are meant to inject their defaults into `traefik_additional_domains_to_obtain_certificates_for_auto`.
+# To define your own custom domains, use `traefik_additional_domains_to_obtain_certificates_for_custom`.
+traefik_additional_domains_to_obtain_certificates_for: "{{ (traefik_additional_domains_to_obtain_certificates_for_default + traefik_additional_domains_to_obtain_certificates_for_auto + traefik_additional_domains_to_obtain_certificates_for_custom) | unique }}"
+traefik_additional_domains_to_obtain_certificates_for_default: []
+traefik_additional_domains_to_obtain_certificates_for_auto: []
+traefik_additional_domains_to_obtain_certificates_for_custom: []
+
+# Specifies the entrypoints through which the additional domains will be exposed.
+traefik_additional_domains_to_obtain_certificates_for_entryPoints: "{{ traefik_config_entrypoint_web_secure_name if traefik_config_entrypoint_web_secure_enabled else (traefik_config_entrypoint_web_name if traefik_config_entrypoint_web_enabled else '') }}"  # noqa var-naming
+
+# Specifies the certitficate resolver to use when obtaining additional certificates.
+# See: traefik_additional_domains_to_obtain_certificates_for
+traefik_additional_domains_to_obtain_certificates_for_certResolver: "{{ traefik_certResolver_primary }}"
+
+# Default Traefik configuration template which covers the generic use case.
+# You can customize it by controlling the various variables inside it.
+#
+# For a more advanced customization, you can extend the default (see `traefik_configuration_extension_yaml`)
+# or completely replace this variable with your own template.
+traefik_configuration_yaml: "{{ lookup('template', 'templates/traefik.yml.j2') }}"
+
+traefik_configuration_extension_yaml: |
+  # Your custom YAML configuration for Traefik goes here.
+  # This configuration extends the default starting configuration (`traefik_configuration_yaml`).
+  #
+  # You can override individual variables from the default configuration, or introduce new ones.
+  #
+  # If you need something more special, you can take full control by
+  # completely redefining `traefik_configuration_yaml`.
+  #
+  # Example configuration extension follows:
+  #
+  # api:
+  #   dashboard: true
+
+traefik_configuration_extension: "{{ traefik_configuration_extension_yaml | from_yaml if traefik_configuration_extension_yaml | from_yaml is mapping else {} }}"
+
+# Holds the final Traefik configuration (a combination of the default and its extension).
+# You most likely don't need to touch this variable. Instead, see `traefik_configuration_yaml`.
+traefik_configuration: "{{ traefik_configuration_yaml | from_yaml | combine(traefik_configuration_extension, recursive=True) }}"
+
+# Default Traefik provider configuration template which covers the generic use case.
+# You can customize it by controlling the various variables inside it.
+#
+# For a more advanced customization, you can extend the default (see `traefik_provider_configuration_yaml`)
+# or completely replace this variable with your own template.
+traefik_provider_configuration_yaml: "{{ lookup('template', 'templates/provider.yml.j2') }}"
+
+traefik_provider_configuration_extension_yaml: |
+  # Your custom YAML configuration for Traefik provider goes here.
+  # This configuration extends the default starting configuration (`traefik_provider_configuration_yaml`).
+  #
+  # You can override individual variables from the default configuration, or introduce new ones.
+  #
+  # If you need something more special, you can take full control by
+  # completely redefining `traefik_provider_configuration_yaml`.
+  #
+  # Example configuration extension follows:
+  #
+  # http:
+  #  routers:
+  #    traefik:
+  #      service: noop@internal
+  #      tls:
+  #        domains:
+  #          - main: "example.com"
+  #            sans:
+  #              - "*.example.com"
+  #        certresolver: default
+
+traefik_provider_configuration_extension: "{{ traefik_provider_configuration_extension_yaml | from_yaml if traefik_provider_configuration_extension_yaml | from_yaml is mapping else {} }}"
+
+# Holds the final Traefik provider configuration (a combination of the default and its extension).
+# You most likely don't need to touch this variable. Instead, see `traefik_provider_configuration_yaml`.
+traefik_provider_configuration: "{{ traefik_provider_configuration_yaml | from_yaml | combine(traefik_provider_configuration_extension, recursive=True) }}"
+
+# Specify the timezone
+traefik_environment_variables_tz: UTC
+
+# traefik_environment_variables contains a multiline string with environment variables to pass to Traefik.
+#
+# Example:
+# traefik_environment_variables: |
+#   TRAEFIK_ACCESSLOG=true
+#   TRAEFIK_API=true
+#   NETCUP_CUSTOMER_NUMBER=12345
+#   NETCUP_API_KEY=api_key
+#   NETCUP_API_PASSWORD=password
+traefik_environment_variables: ""
+
+# traefik_restart_necessary controls whether the Traefik systemd service
+# will be restarted (when true) or merely started (when false) by the
+# systemd service manager role (when conditional restart is enabled).
+#
+# This value is automatically computed during installation based on whether
+# any configuration files, the systemd service file, or the container image changed.
+# The default of `false` means "no restart needed" — appropriate when the role's
+# installation tasks haven't run (e.g., due to --tags skipping them).
+traefik_restart_necessary: false

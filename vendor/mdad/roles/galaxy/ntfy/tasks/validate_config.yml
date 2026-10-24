@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2023 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: (Deprecation) Catch and report renamed settings
+  ansible.builtin.fail:
+    msg: >-
+      Your configuration contains a variable, which now has a different name.
+      Please change your configuration to rename the variable (`{{ item.old }}` -> `{{ item.new }}`).
+  when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+  with_items:
+    - { "old": "ntfy_config_dir_path", "new": "ntfy_config_path" }
+    - { "old": "ntfy_attachment_cache_dir_path", "new": "ntfy_attachment_cache_path" }
+    - { "old": "ntfy_http_header_content_permission_policy", "new": "ntfy_http_header_permissions_policy" }
+    - { "old": "ntfy_container_image_force_pull", "new": "<removed> (the new community.docker.docker_image_pull module handles this natively)" }
+    - { "old": "ntfy_credentials", "new": "<superseded by `ntfy_auth_users_custom`, which expects bcrypt password hashes instead of plaintext passwords - see the role's documentation>" }
+
+- name: Fail if required ntfy settings not defined
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`).
+  when: "lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - ntfy_identifier
+    - ntfy_uid
+    - ntfy_gid
+    - ntfy_hostname
+    - ntfy_path_prefix
+    - ntfy_container_network
+
+- name: Fail if ntfy user declarations are incomplete
+  ansible.builtin.fail:
+    msg: >-
+      Each entry in `ntfy_auth_users` requires a `username` and a `password_hash` key.
+  when: "item.username | default('') | length == 0 or item.password_hash | default('') | length == 0"
+  with_items: "{{ ntfy_auth_users }}"
+  loop_control:
+    label: "{{ item.username | default('(entry without a username)') }}"
+
+# ntfy only accepts bcrypt hashes here, so a plaintext password would be stored as an
+# unusable hash, locking the user out without any obvious indication of why.
+- name: Fail if ntfy user declarations do not carry a bcrypt password hash
+  ansible.builtin.fail:
+    msg: >-
+      The `password_hash` value for the `{{ item.username }}` user in `ntfy_auth_users` does not look like a bcrypt hash.
+      ntfy expects a hash here, not a plaintext password.
+      You can generate one by running: docker run --rm -it {{ ntfy_container_image }} user hash
+  when: "not item.password_hash | string is match('\\$2[aby]?\\$')"
+  with_items: "{{ ntfy_auth_users }}"
+  loop_control:
+    label: "{{ item.username }}"
+
+- name: Fail if ntfy access-control declarations are incomplete
+  ansible.builtin.fail:
+    msg: >-
+      Each entry in `ntfy_auth_access` requires a `username`, a `topic_pattern` and an `access` key.
+  when: "item.username | default('') | length == 0 or item.topic_pattern | default('') | length == 0 or item.access | default('') | length == 0"
+  with_items: "{{ ntfy_auth_access }}"
+  loop_control:
+    label: "{{ item.username | default('(entry without a username)') }}"
+
+- name: Fail if SMTP settings are missing (and SMTP is enabled by setting host)
+  ansible.builtin.fail:
+    msg: >-
+      You need to define a required configuration setting (`{{ item }}`) to correctly set up email via SMTP.
+  when: "ntfy_smtp_sender_enabled | bool and lookup('vars', item, default='') | string | length == 0"
+  with_items:
+    - ntfy_smtp_sender_addr_host
+    - ntfy_smtp_sender_from
+
+- name: Run if Traefik is enabled
+  when: ntfy_container_labels_traefik_enabled | bool
+  block:
+    - name: Fail if Traefik settings required for ntfy are not defined
+      ansible.builtin.fail:
+        msg: >-
+          You need to define a required configuration setting (`{{ item }}`).
+      when: "lookup('vars', item, default='') | string | length == 0"
+      with_items:
+        - ntfy_container_labels_traefik_hostname
+        - ntfy_container_labels_traefik_path_prefix
+
+    # We ensure it doesn't end with a slash, because we handle both (slash and no-slash).
+    # Knowing that `ntfy_container_labels_traefik_path_prefix` does not end with a slash
+    # ensures we know how to set these routes up without having to do "does it end with a slash" checks elsewhere.
+    - name: Fail if ntfy_container_labels_traefik_path_prefix ends with a slash
+      ansible.builtin.fail:
+        msg: >-
+          ntfy_container_labels_traefik_path_prefix (`{{ ntfy_container_labels_traefik_path_prefix }}`) must either be `/` or not end with a slash (e.g. `/ntfy`).
+      when: "ntfy_container_labels_traefik_path_prefix != '/' and ntfy_container_labels_traefik_path_prefix[-1] == '/'"
+
+- name: Run if Traefik is enabled for Prometheus endpoint
+  when: ntfy_container_labels_traefik_metrics_enabled | bool
+  block:
+    - name: Fail if Traefik settings required for ntfy metrics endpoint are not defined
+      ansible.builtin.fail:
+        msg: >-
+          You need to define a required configuration setting (`{{ item.name }}`) for enabling the Prometheus endpoint.
+      when: "item.when | bool and lookup('vars', item.name, default='') | string | length == 0"
+      with_items:
+        - { "name": "ntfy_container_labels_traefik_metrics_hostname", when: true }
+        - { "name": "ntfy_container_labels_traefik_metrics_path_prefix", when: true }
+        - { "name": "ntfy_container_labels_traefik_metrics_middleware_basic_auth_users", when: "{{ ntfy_container_labels_traefik_metrics_middleware_basic_auth_enabled }}" }
+
+    # We ensure it doesn't end with a slash, because we handle both (slash and no-slash).
+    # Knowing that `ntfy_container_labels_traefik_metrics_path_prefix` does not end with a slash
+    # ensures we know how to set these routes up without having to do "does it end with a slash" checks elsewhere.
+    - name: Fail if ntfy_container_labels_traefik_metrics_path_prefix ends with a slash
+      ansible.builtin.fail:
+        msg: >-
+          ntfy_container_labels_traefik_metrics_path_prefix (`{{ ntfy_container_labels_traefik_metrics_path_prefix }}`) must either be `/` or not end with a slash (e.g. `/metrics`).
+      when: "ntfy_container_labels_traefik_metrics_path_prefix != '/' and ntfy_container_labels_traefik_metrics_path_prefix[-1] == '/'"
