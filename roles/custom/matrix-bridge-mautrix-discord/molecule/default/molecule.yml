@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: requirements.yml
+    force: true
+driver:
+  name: docker
+platforms:
+  - name: mautrix-discord-${MOLECULE_DISTRO:-ubuntu2604}-default
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-ubuntu2604}-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callback_result_format: yaml
+  inventory:
+    group_vars:
+      all:
+        matrix_bridge_mautrix_discord_container_network: mautrix-discord-molecule
+
+        # The stub prepare.yml stands up. Not a real homeserver, and nothing is asserted
+        # about it. There is deliberately no Discord on the other side either.
+        matrix_bridge_mautrix_discord_homeserver_address: http://matrix.molecule.local:8008
+
+        # Postgres, because that is what `group_vars/matrix_servers` selects whenever postgres
+        # is enabled - which is the default, so it is what essentially every real deployment
+        # runs. prepare.yml stands one up. Name and user differ from the role's defaults, so
+        # reaching the database proves the role built its connection string out of these.
+        matrix_bridge_mautrix_discord_database_engine: postgres
+        matrix_bridge_mautrix_discord_database_hostname: matrix-postgres-molecule
+        matrix_bridge_mautrix_discord_database_name: molecule_discord
+        matrix_bridge_mautrix_discord_database_username: molecule_discord
+        matrix_bridge_mautrix_discord_database_password: molecule_pg_password_a17f34
+
+        # Here these only have to reach the rendered configuration and the registration.
+        matrix_bridge_mautrix_discord_appservice_token: molecule_as_token_d15c07
+        matrix_bridge_mautrix_discord_homeserver_token: molecule_hs_token_a4e2b8
+
+        # Different from the role's defaults, so verify.yml can tell what the role rendered
+        # apart from what the bridge would have chosen.
+        matrix_bridge_mautrix_discord_appservice_bot_username: molecule-discordbot
+        matrix_bridge_mautrix_discord_homeserver_domain: molecule.local
+        matrix_bridge_mautrix_discord_bridge_command_prefix: "!molecule-discord"
+        # The role defaults to `warn`, the bridge's own shipped configuration to `debug`.
+        # `info` is neither.
+        matrix_bridge_mautrix_discord_logging_level: info
+
+        # Unlike most bridge roles here, mautrix-discord *requires* a public address:
+        # `validate_config.yml` fails without one, and it is derived from these three.
+        # Discord fetches avatars over it in relay mode. Nothing reaches it in this scenario,
+        # but it has to be set for the role to run at all.
+        #
+        # A non-`/` path prefix and a non-default scheme are chosen so the avatar-proxy labels
+        # verify.yml reads can only look the way they do if the role composed them.
+        matrix_bridge_mautrix_discord_hostname: discord.molecule.local
+        matrix_bridge_mautrix_discord_path_prefix: /discord-bridge
+        matrix_bridge_mautrix_discord_scheme: http
+        matrix_bridge_mautrix_discord_bridge_avatar_proxy_key: molecule_avatar_proxy_key_7c1d
+
+        # verify.yml runs as its own play, where the role's defaults are out of scope,
+        # so the paths it reads are pinned here to match what the role derives.
+        matrix_bridge_mautrix_discord_base_path: /matrix/mautrix-discord
+        matrix_bridge_mautrix_discord_config_path: /matrix/mautrix-discord/config
+        matrix_bridge_mautrix_discord_data_path: /matrix/mautrix-discord/data
+  env:
+    # Workaround for https://github.com/ansible/molecule/issues/4391
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/../..:/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles:${ANSIBLE_HOME:-~/.ansible}/roles
+scenario:
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - cleanup
+    - destroy
+verifier:
+  name: ansible

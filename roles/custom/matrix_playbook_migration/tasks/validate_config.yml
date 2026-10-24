@@ -1,0 +1,946 @@
+# SPDX-FileCopyrightText: 2022-2025 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2024, 2025 MDAD project contributors
+# SPDX-FileCopyrightText: 2024-2026 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: (Deprecation) Catch and report renamed Matrix playbook settings
+  ansible.builtin.fail:
+    msg: >-
+      Your configuration contains a variable, which now has a different name.
+      Please rename the variable (`{{ item.old }}` -> `{{ item.new }}`) on your configuration file (vars.yml).
+  when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+  with_items:
+    - {'old': 'matrix_vars_yml_snapshotting_enabled', 'new': 'devture_playbook_state_preserver_vars_preservation_enabled'}
+    - {'old': 'matrix_vars_yml_snapshotting_src', 'new': 'devture_playbook_state_preserver_vars_preservation_src'}
+    - {'old': 'matrix_playbook_commit_hash_preservation_enabled', 'new': 'devture_playbook_state_preserver_commit_hash_preservation_enabled'}
+
+    - {'old': 'matrix_ntpd_package', 'new': 'devture_timesync_ntpd_package'}
+    - {'old': 'matrix_ntpd_service', 'new': 'devture_timesync_ntpd_service'}
+
+    - {'old': 'matrix_systemd_unit_home_path', 'new': 'devture_systemd_docker_base_systemd_unit_home_path'}
+    - {'old': 'matrix_systemd_path', 'new': 'devture_systemd_docker_base_systemd_path'}
+    - {'old': 'matrix_host_command_docker', 'new': 'devture_systemd_docker_base_host_command_docker'}
+    - {'old': 'matrix_host_command_sh', 'new': 'devture_systemd_docker_base_host_command_sh'}
+    - {'old': 'matrix_host_command_systemctl', 'new': 'devture_systemd_docker_base_host_command_systemctl'}
+
+    - {'old': 'matrix_container_retries_count', 'new': 'devture_playbook_help_container_retries_count'}
+    - {'old': 'matrix_container_retries_delay', 'new': 'devture_playbook_help_container_retries_delay'}
+    - {'old': 'matrix_geturl_retries_count', 'new': 'devture_playbook_help_geturl_retries_count'}
+    - {'old': 'matrix_geturl_retries_delay', 'new': 'devture_playbook_help_geturl_retries_delay'}
+
+    - {'old': 'matrix_nginx_proxy_synapse_cache_path', 'new': 'matrix_synapse_reverse_proxy_companion_synapse_cache_path'}
+    - {'old': 'matrix_nginx_proxy_synapse_cache_enabled', 'new': 'matrix_synapse_reverse_proxy_companion_synapse_cache_enabled'}
+
+    - {'old': 'matrix_docker_installation_enabled', 'new': 'matrix_playbook_docker_installation_enabled'}
+    - {'old': 'matrix_docker_package_name', 'new': '<Not applicable. Docker is installed using https://github.com/geerlingguy/ansible-role-docker now>'}
+
+    - {'old': 'matrix_systemd_services_list', 'new': 'devture_systemd_service_manager_services_list_additional'}
+    - {'old': 'matrix_common_after_systemd_service_start_wait_for_timeout_seconds', 'new': 'devture_systemd_service_manager_up_verification_delay_seconds'}
+    - {'old': 'matrix_systemd_services_autostart_enabled', 'new': 'devture_systemd_service_manager_services_autostart_enabled'}
+    - {'old': 'matrix_prometheus_node_exporter_metrics_proxying_enabled', 'new': '<prometheus_node_exporter_container_labels_traefik_metrics_enabled or matrix_metrics_exposure_enabled>'}
+    - {'old': 'matrix_prometheus_postgres_exporter_metrics_proxying_enabled', 'new': '<prometheus_postgres_exporter_container_labels_traefik_metrics_enabled or matrix_metrics_exposure_enabled>'}
+    - {'old': 'matrix_playbook_traefik_certs_dumper_role_enabled', 'new': 'traefik_certs_dumper_enabled'}
+    - {'old': 'matrix_playbook_traefik_role_enabled', 'new': 'traefik_enabled'}
+
+    # Most important variables from the old Prometheus role here, for people who miss the changelog entry
+    - {'old': 'matrix_prometheus_enabled', 'new': 'prometheus_enabled'}
+    - {'old': 'matrix_prometheus_process_default_arguments', 'new': 'prometheus_process_default_arguments'}
+    - {'old': 'matrix_prometheus_process_extra_arguments', 'new': 'prometheus_process_extra_arguments'}
+    - {'old': 'matrix_prometheus_configuration_extension_yaml', 'new': 'prometheus_configuration_extension_yaml'}
+    - {'old': 'matrix_prometheus_scraper_synapse_enabled', 'new': 'matrix_prometheus_services_connect_synapse_enabled'}
+    - {'old': 'matrix_prometheus_scraper_synapse_targets', 'new': '<superseded by matrix_prometheus_services_connect_scraper_synapse_main_process_static_configs_target>'}
+    - {'old': 'matrix_prometheus_scraper_synapse_workers_enabled_list', 'new': 'matrix_prometheus_services_connect_scraper_synapse_workers_enabled_list'}
+    - {'old': 'matrix_prometheus_scraper_synapse_rules_synapse_tag', 'new': 'matrix_prometheus_services_connect_synapse_rules_download_synapse_tag'}
+    - {'old': 'matrix_prometheus_scraper_node_enabled', 'new': 'prometheus_self_node_scraper_enabled'}
+    - {'old': 'matrix_prometheus_scraper_node_targets', 'new': '<superseded by prometheus_self_node_scraper_static_configs_target>'}
+    - {'old': 'matrix_prometheus_scraper_postgres_enabled', 'new': 'matrix_prometheus_services_connect_scraper_postgres_enabled'}
+    - {'old': 'matrix_prometheus_scraper_postgres_targets', 'new': '<superseded by matrix_prometheus_services_connect_scraper_postgres_static_configs_target>'}
+    - {'old': 'matrix_prometheus_scraper_hookshot_enabled', 'new': 'matrix_prometheus_services_connect_scraper_hookshot_enabled'}
+    - {'old': 'matrix_prometheus_scraper_hookshot_targets', 'new': '<superseded by matrix_prometheus_services_connect_scraper_hookshot_static_configs_target>'}
+    - {'old': 'matrix_prometheus_scraper_nginxlog_enabled', 'new': 'matrix_prometheus_services_connect_scraper_nginxlog_enabled'}
+    - {'old': 'matrix_prometheus_scraper_nginxlog_server_port', 'new': 'matrix_prometheus_services_connect_scraper_nginxlog_static_configs_target'}
+
+    - {'old': 'matrix_prosody_jitsi_max_participants', 'new': 'jitsi_prosody_max_participants'}
+    - {'old': 'jitsi_require_well_known', 'new': 'jitsi_web_well_known_element_jitsi_enabled'}
+    - {'old': 'jitsi_wellknown_element_jitsi_json', 'new': 'jitsi_web_well_known_element_jitsi_json'}
+    - {'old': 'exim_relay_docker_image', 'new': 'exim_relay_container_image'}
+    - {'old': 'exim_relay_docker_image_name_prefix', 'new': 'exim_relay_container_image_name_prefix'}
+    - {'old': 'exim_relay_docker_image_force_pull', 'new': 'exim_relay_container_image_force_pull'}
+
+    - {'old': 'matrix_playbook_reverse_proxy_traefik_middleware_compession_enabled', 'new': 'matrix_playbook_reverse_proxy_traefik_middleware_compression_enabled'}
+    - {'old': 'matrix_playbook_reverse_proxy_traefik_middleware_compession_name', 'new': 'matrix_playbook_reverse_proxy_traefik_middleware_compression_name'}
+
+    - {'old': 'matrix_synapse_account_threepid_delegates_msisdn_mas1sd_url', 'new': '<removed>'}
+
+    - {'old': 'cinny_docker_image', 'new': 'cinny_container_image'}
+    - {'old': 'cinny_docker_image_registry_prefix', 'new': 'cinny_container_image_registry_prefix'}
+    - {'old': 'cinny_docker_image_registry_prefix_upstream', 'new': 'cinny_container_image_registry_prefix_upstream'}
+    - {'old': 'cinny_docker_image_registry_prefix_upstream_default', 'new': 'cinny_container_image_registry_prefix_upstream_default'}
+
+    - {'old': 'coturn_docker_image', 'new': 'coturn_container_image'}
+    - {'old': 'coturn_docker_image_registry_prefix', 'new': 'coturn_container_image_registry_prefix'}
+    - {'old': 'coturn_docker_image_registry_prefix_upstream', 'new': 'coturn_container_image_registry_prefix_upstream'}
+    - {'old': 'coturn_docker_image_registry_prefix_upstream_default', 'new': 'coturn_container_image_registry_prefix_upstream_default'}
+
+    - {'old': 'ddclient_docker_image', 'new': 'ddclient_container_image'}
+    - {'old': 'ddclient_docker_image_registry_prefix', 'new': 'ddclient_container_image_registry_prefix'}
+    - {'old': 'ddclient_docker_image_registry_prefix_upstream', 'new': 'ddclient_container_image_registry_prefix_upstream'}
+    - {'old': 'ddclient_docker_image_registry_prefix_upstream_default', 'new': 'ddclient_container_image_registry_prefix_upstream_default'}
+
+    - {'old': 'hydrogen_docker_image', 'new': 'hydrogen_container_image'}
+    - {'old': 'hydrogen_docker_image_registry_prefix', 'new': 'hydrogen_container_image_registry_prefix'}
+    - {'old': 'hydrogen_docker_image_registry_prefix_upstream', 'new': 'hydrogen_container_image_registry_prefix_upstream'}
+    - {'old': 'hydrogen_docker_image_registry_prefix_upstream_default', 'new': 'hydrogen_container_image_registry_prefix_upstream_default'}
+
+    - {'old': 'prometheus_nginxlog_exporter_docker_image', 'new': 'prometheus_nginxlog_exporter_container_image'}
+    - {'old': 'prometheus_nginxlog_exporter_docker_image_registry_prefix', 'new': 'prometheus_nginxlog_exporter_container_image_registry_prefix'}
+    - {'old': 'prometheus_nginxlog_exporter_docker_image_registry_prefix_upstream', 'new': 'prometheus_nginxlog_exporter_container_image_registry_prefix_upstream'}
+    - {'old': 'prometheus_nginxlog_exporter_docker_image_registry_prefix_upstream_default', 'new': 'prometheus_nginxlog_exporter_container_image_registry_prefix_upstream_default'}
+    - {'old': 'prometheus_nginxlog_exporter_docker_image_arch_check_enabled', 'new': 'prometheus_nginxlog_exporter_container_image_arch_check_enabled'}
+    - {'old': 'prometheus_nginxlog_exporter_metrics_proxying_enabled', 'new': 'prometheus_nginxlog_exporter_container_labels_traefik_metrics_enabled'}
+    - {'old': 'prometheus_nginxlog_exporter_metrics_proxying_hostname', 'new': 'prometheus_nginxlog_exporter_container_labels_traefik_metrics_hostname'}
+    - {'old': 'prometheus_nginxlog_exporter_metrics_proxying_path_prefix', 'new': 'prometheus_nginxlog_exporter_container_labels_traefik_metrics_path_prefix'}
+    - {'old': 'prometheus_nginxlog_exporter_config_namespaces_matrix_source_tags_custom', 'new': 'prometheus_nginxlog_exporter_config_namespaces_source_tags_custom'}
+
+- name: (Deprecation) Catch and report matrix_postgres variables
+  ansible.builtin.fail:
+    msg: |-
+      The matrix-postgres role in the playbook has been replaced with the ansible-role-postgres role (https://github.com/mother-of-all-self-hosting/ansible-role-postgres).
+      The new role is pretty much the same, but uses differently named variables.
+
+      The matrix-postgres-backup role in the playbook has been replaced with the ansible-role-postgres-backup role (https://github.com/mother-of-all-self-hosting/ansible-role-postgres-backup).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `matrix_postgres`-prefixed variables (`matrix_postgres_*` -> `postgres_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_postgres_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_postgres_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix_mailer_ variables
+  ansible.builtin.fail:
+    msg: |-
+      The matrix-mailer role in the playbook has been replaced with the exim-relay role (https://github.com/mother-of-all-self-hosting/ansible-role-exim-relay).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `matrix_mailer`-prefixed variables (`matrix_mailer_*` -> `exim_relay_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_mailer_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mailer_.+', wantlist=True) | length > 0"
+
+- when: matrix_playbook_migration_matrix_prometheus_nginxlog_exporter_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_matrix_prometheus_nginxlog_exporter_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_prometheus_nginxlog_exporter_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_prometheus_nginxlog_exporter variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-prometheus-nginxlog-exporter role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-prometheus-nginxlog-exporter.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_prometheus_nginxlog_exporter_` -> `prometheus_nginxlog_exporter_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_matrix_prometheus_nginxlog_exporter_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_matrix_prometheus_nginxlog_exporter_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_prometheus_node_exporter_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_matrix_prometheus_node_exporter_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_prometheus_node_exporter_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_prometheus_node_exporter variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-prometheus-node-exporter role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-prometheus-node-exporter.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_prometheus_node_exporter_` -> `prometheus_node_exporter_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_matrix_prometheus_node_exporter_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_matrix_prometheus_node_exporter_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_prometheus_postgres_exporter_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_matrix_prometheus_postgres_exporter_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_prometheus_postgres_exporter_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_prometheus_postgres_exporter variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-prometheus-postgres-exporter role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-prometheus-postgres-exporter.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_prometheus_postgres_exporter_` -> `prometheus_postgres_exporter_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_matrix_prometheus_postgres_exporter_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_matrix_prometheus_postgres_exporter_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_backup_borg_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_backup_borg_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_backup_borg_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_backup_borg variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-backup-borg role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-backup_borg.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_backup_borg_` -> `backup_borg_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_backup_borg_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_backup_borg_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_grafana_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_grafana_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_grafana_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_grafana variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-grafana role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-grafana.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_grafana_` -> `grafana_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_grafana_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_grafana_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_ntfy_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_ntfy_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_ntfy_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_ntfy variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-ntfy role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-ntfy.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_ntfy_` -> `ntfy_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_ntfy_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_ntfy_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_redis_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_redis_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_redis_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_redis variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-redis role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-redis.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_redis_` -> `redis_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_redis_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_redis_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_redis_valkey_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_redis_valkey_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^redis_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report redis variables
+      ansible.builtin.fail:
+        msg: >-
+          The Redis role that used to be part of this playbook has been superseded by https://github.com/mother-of-all-self-hosting/ansible-role-valkey.
+
+          Please rename all variables (`redis_` -> `valkey_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_redis_valkey_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_redis_valkey_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_keydb_valkey_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_keydb_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^keydb_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report keydb variables
+      ansible.builtin.fail:
+        msg: >-
+          The KeyDB role that used to be part of this playbook has been superseded by https://github.com/mother-of-all-self-hosting/ansible-role-valkey.
+
+          Please rename all variables (`keydb_` -> `valkey_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_keydb_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_keydb_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_etherpad_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_etherpad_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_etherpad_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_etherpad variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-etherpad role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-etherpad.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_etherpad_` -> `etherpad_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_etherpad_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_etherpad_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_aux_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_aux_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_aux_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_aux variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-aux role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-aux.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_aux_` -> `aux_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_aux_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_aux_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_jitsi_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_jitsi_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_jitsi_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_jitsi variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-jitsi role that used to be part of this playbook has been replaced by https://github.com/mother-of-all-self-hosting/ansible-role-jitsi.
+          The new role is compatible with the old one, but uses different names for its variables.
+
+          Please rename all variables (`matrix_jitsi_` -> `jitsi_`) on your configuration file (vars.yml).
+
+          After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_jitsi_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_jitsi_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_bridge_postmoogle_migration_validation_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_postmoogle_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_bot_postmoogle_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_bot_postmoogle variables
+      ansible.builtin.fail:
+        msg: >-
+          Your configuration contains a variable, which now has a different name.
+
+          Please rename all variables (`matrix_bot_postmoogle_` -> `matrix_bridge_postmoogle_`) on your configuration file (vars.yml).
+
+          The following variables in your configuration need to be renamed: {{ matrix_playbook_migration_postmoogle_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_postmoogle_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_nginx_proxy_elimination_variable_transition_checks_enabled | bool
+  block:
+    - name: (Deprecation) Catch and report transitioned playbook settings during the matrix-nginx-proxy elimination
+      ansible.builtin.fail:
+        msg: >-
+          Your configuration contains a variable, which now has a different name.
+          Please rename the variable (`{{ item.old }}` -> `{{ item.new }}`) on your configuration file (vars.yml).
+      when: "lookup('ansible.builtin.varnames', ('^' + item.old + '$'), wantlist=True) | length > 0"
+      with_items:
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_enabled', 'new': 'matrix_metrics_exposure_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_basic_auth_enabled', 'new': 'matrix_metrics_exposure_http_basic_auth_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_basic_auth_username', 'new': '<superseded by matrix_metrics_exposure_http_basic_auth_users>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_basic_auth_password', 'new': '<superseded by matrix_metrics_exposure_http_basic_auth_users>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_basic_auth_raw_content', 'new': '<superseded by matrix_metrics_exposure_http_basic_auth_users>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_additional_location_configuration_blocks', 'new': '<superseded by adding labels to each individual service that you care about>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_additional_system_location_configuration_blocks', 'new': '<superseded by adding labels to each individual service that you care about>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_metrics_additional_user_location_configuration_blocks', 'new': '<superseded by adding labels to each individual service that you care about>'}
+
+        - {'old': 'matrix_well_known_matrix_server_enabled', 'new': 'matrix_static_files_file_matrix_server_enabled'}
+        - {'old': 'matrix_well_known_matrix_support_enabled', 'new': 'matrix_static_files_file_matrix_support_enabled'}
+        - {'old': 'matrix_homeserver_admin_contacts', 'new': 'matrix_static_files_file_matrix_support_property_m_contacts'}
+        - {'old': 'matrix_homeserver_support_url', 'new': 'matrix_static_files_file_matrix_support_property_m_support_page'}
+        - {'old': 'matrix_well_known_matrix_client_io_element_e2ee_default', 'new': 'matrix_static_files_file_matrix_client_property_io_element_e2ee_default'}
+        - {'old': 'matrix_well_known_matrix_client_io_element_e2ee_secure_backup_required', 'new': 'matrix_static_files_file_matrix_client_property_io_element_e2ee_secure_backup_required'}
+        - {'old': 'matrix_well_known_matrix_client_io_element_e2ee_secure_backup_setup_methods', 'new': 'matrix_static_files_file_matrix_client_property_io_element_e2ee_secure_backup_setup_methods'}
+        - {'old': 'matrix_well_known_matrix_client_configuration_extension_json', 'new': 'matrix_static_files_file_matrix_client_configuration_extension_json'}
+        - {'old': 'matrix_well_known_matrix_server_configuration_extension_json', 'new': 'matrix_static_files_file_matrix_server_configuration_extension_json'}
+        - {'old': 'matrix_well_known_matrix_support_configuration_extension_json', 'new': 'matrix_static_files_file_matrix_support_configuration_extension_json'}
+        - {'old': 'matrix_nginx_proxy_self_check_validate_certificates', 'new': 'matrix_static_files_self_check_validate_certificates'}
+        - {'old': 'matrix_nginx_proxy_self_check_well_known_matrix_client_follow_redirects', 'new': 'matrix_static_files_self_check_well_known_matrix_client_follow_redirects'}
+        - {'old': 'matrix_nginx_proxy_base_domain_serving_enabled', 'new': 'matrix_static_files_container_labels_base_domain_enabled'}
+        - {'old': 'matrix_nginx_proxy_base_domain_hostname', 'new': 'matrix_static_files_container_labels_base_domain_traefik_hostname'}
+        - {'old': 'matrix_nginx_proxy_base_domain_homepage_enabled', 'new': 'matrix_static_files_file_index_html_enabled'}
+        - {'old': 'matrix_nginx_proxy_base_domain_homepage_template', 'new': 'matrix_static_files_file_index_html_template'}
+        - {'old': 'matrix_nginx_proxy_base_domain_create_directory', 'new': '<no longer necessary; see matrix_static_files_file_index_html_enabled>'}
+        - {'old': 'matrix_nginx_proxy_proxy_riot_compat_redirect_enabled', 'new': '<redirecting the Riot domain to an Element domain is no longer supported - you can implement it yourself using matrix_client_element_container_labels_additional_labels>'}
+        - {'old': 'matrix_nginx_proxy_proxy_riot_compat_redirect_hostname', 'new': '<redirecting the Riot domain to an Element domain is no longer supported - you can implement it yourself using matrix_client_element_container_labels_additional_labels>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_client_redirect_enabled', 'new': '<superseded by matrix_synapse_container_labels_public_client_root_redirection_enabled or other equivalent variables based on the homeserver implementation you use>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_client_redirect_root_uri_to_domain', 'new': '<superseded by matrix_synapse_container_labels_public_client_root_redirection_url or other equivalent variables based on the homeserver implementation you use>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_client_api_forwarded_location_synapse_client_api_enabled', 'new': 'matrix_synapse_container_labels_public_client_synapse_client_api_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_client_api_forwarded_location_synapse_oidc_api_enabled', 'new': '<replaced by matrix_synapse_container_labels_public_client_synapse_oidc_api_enabled, but if you use matrix_synapse_oidc_enabled then it would be toggled automatically; see the new recommended OIDC example configuration in docs/configuring-playbook-synapse.md>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_client_api_forwarded_location_synapse_admin_api_enabled', 'new': 'matrix_synapse_container_labels_public_client_synapse_admin_api_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_identity_api_enabled', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_identity_api_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_identity_api_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_user_directory_search_enabled', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_user_directory_search_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_user_directory_search_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_user_directory_search_v3_to_r0_redirect_enabled', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_3pid_registration_enabled', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_3pid_registration_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_3pid_registration_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_3pid_registration_v3_to_r0_redirect_enabled', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_enabled', 'new': 'matrix_conduit_container_labels_traefik_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_block_federation_api_on_client_port', 'new': '<not supported anymore - the /_matrix/federation endpoints are now also being served on the Client-Server API port>'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_federation_api_enabled', 'new': 'matrix_conduit_container_labels_public_federation_api_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_client_api_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_client_api_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_federation_api_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_federation_api_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_conduit_additional_server_configuration_blocks', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_enabled', 'new': 'matrix_dendrite_container_labels_traefik_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_block_federation_api_on_client_port', 'new': '<not supported anymore - the /_matrix/federation endpoints are now also being served on the Client-Server API port>'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_federation_api_enabled', 'new': 'matrix_dendrite_container_labels_public_federation_api_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_client_api_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_client_api_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_federation_api_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_federation_api_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_dendrite_additional_server_configuration_blocks', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_synapse_enabled', 'new': 'matrix_synapse_container_labels_traefik_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_synapse_federation_api_enabled', 'new': 'matrix_synapse_container_labels_public_federation_api_enabled'}
+        - {'old': 'matrix_nginx_proxy_proxy_synapse_client_api_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_synapse_client_api_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_synapse_federation_api_addr_with_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_synapse_federation_api_addr_sans_container', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_synapse_additional_server_configuration_blocks', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_proxy_matrix_additional_server_configuration_blocks', 'new': '<removed>'}
+        - {'old': 'matrix_nginx_proxy_access_log_enabled', 'new': 'traefik_config_accessLog_enabled'}
+        - {'old': 'matrix_nginx_proxy_container_labels_traefik_proxy_matrix_federation_hostname', 'new': 'matrix_server_fqn_matrix_federation'}
+        - {'old': 'etherpad_nginx_proxy_dimension_integration_enabled', 'new': '<removed>'}
+        - {'old': 'etherpad_nginx_proxy_dimension_integration_path_prefix', 'new': '<removed>'}
+        - {'old': 'matrix_prometheus_services_proxy_connect_prometheus_node_exporter_metrics_proxying_enabled', 'new': '<removed>'}
+        - {'old': 'matrix_prometheus_services_proxy_connect_prometheus_node_exporter_matrix_nginx_proxy_not_enabled_proxy_pass_host', 'new': '<removed>'}
+        - {'old': 'matrix_prometheus_services_proxy_connect_prometheus_postgres_exporter_metrics_proxying_enabled', 'new': '<removed>'}
+        - {'old': 'matrix_prometheus_services_proxy_connect_prometheus_postgres_exporter_matrix_nginx_proxy_not_enabled_proxy_pass_host', 'new': '<removed>'}
+        - {'old': 'matrix_docker_network', 'new': '<removed in favor of various other variables - matrix_addons_container_network, matrix_monitoring_container_network, matrix_homeserver_container_network, etc.>'}
+        - {'old': 'matrix_playbook_ssl_retrieval_method', 'new': '<removed; see docs/configuring-playbook-ssl-certificates.md for alternatives>'}
+        - {'old': 'matrix_ssl_lets_encrypt_support_email', 'new': 'traefik_config_certificatesResolvers_acme_email'}
+        - {'old': 'matrix_federation_traefik_entrypoint', 'new': 'matrix_federation_traefik_entrypoint_name'}
+
+- when: matrix_playbook_migration_matrix_nginx_proxy_leftover_variable_validation_checks_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_nginx_proxy_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_nginx_proxy_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report leftover matrix_nginx_proxy variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-nginx-proxy role that used to be part of this playbook has been removed.
+
+          You should remove all its variables (`matrix_nginx_proxy_*`) from your configuration file (vars.yml).
+
+          The following variables in your configuration need to be removed: {{ matrix_playbook_migration_nginx_proxy_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_nginx_proxy_migration_vars | length > 0"
+
+- when: matrix_playbook_migration_matrix_ssl_leftover_variable_checks_enabled | bool
+  block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_ssl_migration_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_ssl_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_ssl variables
+      ansible.builtin.fail:
+        msg: >-
+          The matrix-nginx-proxy role that used to be part of this playbook has been removed.
+
+          You should remove all its variables (`matrix_ssl_*`) from your configuration file (vars.yml).
+
+          The following variables in your configuration need to be removed: {{ matrix_playbook_migration_ssl_migration_vars | join(', ') }}
+      when: "matrix_playbook_migration_ssl_migration_vars | length > 0"
+
+- block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_matrix_synapse_container_labels_public_client_synapse_oidc_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_synapse_container_labels_public_client_synapse_oidc_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_synapse_container_labels_public_client_synapse_oidc variables
+      ansible.builtin.fail:
+        msg: >-
+          We found usage of the following variables which are now removed: {{ matrix_playbook_migration_matrix_synapse_container_labels_public_client_synapse_oidc_vars | join(', ') }}
+      when: "matrix_playbook_migration_matrix_synapse_container_labels_public_client_synapse_oidc_vars | length > 0"
+
+- block:
+    - ansible.builtin.set_fact:
+        matrix_playbook_migration_matrix_synapse_reverse_proxy_companion_container_labels_public_client_synapse_oidc_vars: |-
+          {{ lookup('ansible.builtin.varnames', '^matrix_synapse_reverse_proxy_companion_container_labels_public_client_synapse_oidc_.+', wantlist=True) }}
+
+    - name: (Deprecation) Catch and report matrix_synapse_reverse_proxy_companion_container_labels_public_client_synapse_oidc variables
+      ansible.builtin.fail:
+        msg: >-
+          We found usage of the following variables which are now removed: {{ matrix_playbook_migration_matrix_synapse_reverse_proxy_companion_container_labels_public_client_synapse_oidc_vars | join(', ') }}
+      when: "matrix_playbook_migration_matrix_synapse_reverse_proxy_companion_container_labels_public_client_synapse_oidc_vars | length > 0"
+
+- name: (Deprecation) Catch and report devture_postgres_backup variables
+  ansible.builtin.fail:
+    msg: |-
+      The postgres-backup role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-postgres-backup).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `devture_postgres_backup_`-prefixed variables (`devture_postgres_backup_*` -> `postgres_backup_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^devture_postgres_backup_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^devture_postgres_backup_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report devture_postgres variables
+  ansible.builtin.fail:
+    msg: |-
+      The Postgres role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-postgres).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `devture_postgres_`-prefixed variables (`devture_postgres_*` -> `postgres_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^devture_postgres_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^devture_postgres_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report traefik_certs_dumper variables
+  ansible.builtin.fail:
+    msg: |-
+      The traefik-certs-dumper role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-traefik-certs-dumper).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `devture_traefik_certs_dumper_`-prefixed variables (`devture_traefik_certs_dumper_*` -> `traefik_certs_dumper_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^devture_traefik_certs_dumper_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^devture_traefik_certs_dumper_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report devture_traefik variables
+  ansible.builtin.fail:
+    msg: |-
+      The traefik role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-traefik).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `devture_traefik_`-prefixed variables (`devture_traefik_*` -> `traefik_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^devture_traefik_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^devture_traefik_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report devture_container_socket_proxy variables
+  ansible.builtin.fail:
+    msg: |-
+      The container-socket-proxy role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-container-socket-proxy).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `devture_container_socket_proxy_`-prefixed variables (`devture_container_socket_proxy_*` -> `container_socket_proxy_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^devture_container_socket_proxy_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^devture_container_socket_proxy_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report Go-NEB variables
+  ansible.builtin.fail:
+    msg: |-
+      Go-NEB was completely removed from the playbook in May 2026.
+
+      Please remove all `matrix_bot_go_neb_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bot manually. See `docs/configuring-playbook-bot-go-neb.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_bot_go_neb_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_bot_go_neb_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report ma1sd variables
+  ansible.builtin.fail:
+    msg: |-
+      ma1sd was completely removed from the playbook in February 2026.
+
+      Please remove all `matrix_ma1sd_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the component manually. See `docs/configuring-playbook-ma1sd.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_ma1sd_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_ma1sd_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-appservice-slack variables
+  ansible.builtin.fail:
+    msg: |-
+      matrix-appservice-slack was completely removed from the playbook in February 2026.
+
+      Please remove all `matrix_appservice_slack_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-appservice-slack.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_appservice_slack_.+', wantlist=True) | join(', ') }}
+
+      You might probably wish to have a look at mautrix-slack, another bridge to Slack. Refer to `docs/configuring-playbook-bridge-mautrix-slack.md` for more information.
+  when: "lookup('ansible.builtin.varnames', '^matrix_appservice_slack_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-appservice-webhooks variables
+  ansible.builtin.fail:
+    msg: |-
+      matrix-appservice-webhooks was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_appservice_webhooks_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-appservice-webhooks.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_appservice_webhooks_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_appservice_webhooks_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-chatgpt-bot variables
+  ansible.builtin.fail:
+    msg: |-
+      matrix-chatgpt-bot was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_bot_chatgpt_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bot manually. See `docs/configuring-playbook-bot-chatgpt.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_bot_chatgpt_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_bot_chatgpt_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-client-cinny variables
+  ansible.builtin.fail:
+    msg: |-
+      The matrix-client-cinny role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-cinny).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `matrix_client_cinny_`-prefixed variables (`matrix_client_cinny_*` -> `cinny_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_client_cinny_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_client_cinny_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-client-hydrogen variables
+  ansible.builtin.fail:
+    msg: |-
+      The matrix-client-hydrogen role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-hydrogen).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `matrix_client_hydrogen_`-prefixed variables (`matrix_client_hydrogen_*` -> `hydrogen_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_client_hydrogen_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_client_hydrogen_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-coturn variables
+  ansible.builtin.fail:
+    msg: |-
+      The matrix-coturn role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-coturn).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `matrix_coturn_`-prefixed variables (`matrix_coturn_*` -> `coturn_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_coturn_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_coturn_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-conduwuit variables
+  ansible.builtin.fail:
+    msg: |-
+      matrix-conduwuit was completely removed from the playbook in February 2026.
+
+      Please remove all `matrix_conduwuit*` variables from your configuration file (vars.yml).
+
+      You may wish to migrate to Continuwuity, a drop-in replacement for conduwuit. See `docs/configuring-playbook-continuwuity.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_conduwuit.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_conduwuit.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-dynamic-dns variables
+  ansible.builtin.fail:
+    msg: |-
+      The matrix-dynamic-dns role in the playbook now lives under the MASH organization (https://github.com/mother-of-all-self-hosting/ansible-role-ddclient).
+      The new role is pretty much the same, but uses differently named variables.
+
+      Please rename all `matrix_dynamic_dns_`-prefixed variables (`matrix_dynamic_dns_*` -> `ddclient_*`) on your configuration file (vars.yml).
+
+      After renaming them, please do not forget to fetch the Ansible role. See docs/maintenance-upgrading-services.md for details about how to do so.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_dynamic_dns_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_dynamic_dns_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-registration-bot variables
+  ansible.builtin.fail:
+    msg: |-
+      matrix-registration-bot was completely removed from the playbook in July 2026.
+
+      Please remove all `matrix_bot_matrix_registration_bot_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the component manually. See `docs/configuring-playbook-bot-matrix-registration-bot.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_bot_matrix_registration_bot_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_bot_matrix_registration_bot_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-appservice-kakaotalk variables
+  ansible.builtin.fail:
+    msg: |-
+      matrix-appservice-kakaotalk was completely removed from the playbook in July 2026, because its upstream repository became unreachable and the component could only be installed by self-building it.
+
+      Please remove all `matrix_appservice_kakaotalk_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the component manually. See `docs/configuring-playbook-bridge-appservice-kakaotalk.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_appservice_kakaotalk_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_appservice_kakaotalk_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-ldap-registration-proxy variables
+  ansible.builtin.fail:
+    msg: |-
+      matrix-ldap-registration-proxy was completely removed from the playbook in May 2026.
+
+      Please remove all `matrix_ldap_registration_proxy_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the component manually. See `docs/configuring-playbook-matrix-ldap-registration-proxy.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_ldap_registration_proxy_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_ldap_registration_proxy_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report mautrix-facebook variables
+  ansible.builtin.fail:
+    msg: |-
+      mautrix-facebook was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_mautrix_facebook_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-mautrix-facebook.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_mautrix_facebook_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mautrix_facebook_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report mautrix-hangouts variables
+  ansible.builtin.fail:
+    msg: |-
+      The Google Hangouts service was discontinued on 1st of November 2022.
+      The mautrix-hangouts bridge has been deprecated in the playbook since December 2024 and was completely removed from the playbook in February 2025.
+
+      Please remove all `matrix_mautrix_hangouts_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-mautrix-hangouts.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_mautrix_hangouts_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mautrix_hangouts_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report mautrix-instagram variables
+  ansible.builtin.fail:
+    msg: |-
+      mautrix-instagram was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_mautrix_instagram_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-mautrix-instagram.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_mautrix_instagram_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mautrix_instagram_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report mx-puppet-discord variables
+  ansible.builtin.fail:
+    msg: |-
+      The MX Puppet Discord bridge was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_mx_puppet_discord_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-mx-puppet-discord.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_mx_puppet_discord_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mx_puppet_discord_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report mx-puppet-instagram variables
+  ansible.builtin.fail:
+    msg: |-
+      The MX Puppet Instagram bridge was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_mx_puppet_instagram_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-mx-puppet-instagram.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_mx_puppet_instagram_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mx_puppet_instagram_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report mx-puppet-slack variables
+  ansible.builtin.fail:
+    msg: |-
+      The MX Puppet Slack bridge was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_mx_puppet_slack_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-mx-puppet-slack.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_mx_puppet_slack_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mx_puppet_slack_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report mx-puppet-twitter variables
+  ansible.builtin.fail:
+    msg: |-
+      The MX Puppet Twitter bridge was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_mx_puppet_twitter_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-mx-puppet-twitter.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_mx_puppet_twitter_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_mx_puppet_twitter_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report the Dimension integration manager variables
+  ansible.builtin.fail:
+    msg: |-
+      The Dimension integration manager was completely removed from the playbook in February 2026.
+
+      Please remove all `matrix_dimension_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the component manually. See `docs/configuring-playbook-dimension.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_dimension_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_dimension_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report Email2Matrix variables
+  ansible.builtin.fail:
+    msg: |-
+      The Email2Matrix service has been superseded by the Postmoogle bridge for a long time now and was completely removed from the playbook in February 2025.
+
+      Please remove all `matrix_email2matrix_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-email2matrix.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_email2matrix_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_email2matrix_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report go-skype-bridge variables
+  ansible.builtin.fail:
+    msg: |-
+      The go-skype-bridge was completely removed from the playbook in November 2025, as Skype has been discontinued since May 2025.
+
+      Please remove all `matrix_go_skype_bridge_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the bridge manually. See `docs/configuring-playbook-bridge-go-skype-bridge.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_go_skype_bridge_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_go_skype_bridge_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report matrix-registration variables
+  ansible.builtin.fail:
+    msg: |-
+      The matrix-registration service was completely removed from the playbook in May 2026.
+
+      Please remove all `matrix_registration_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the component manually. See `docs/configuring-playbook-matrix-registration.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_registration_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_registration_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report the Sliding Sync proxy variables
+  ansible.builtin.fail:
+    msg: |-
+      The Sliding Sync proxy was completely removed from the playbook in November 2025.
+
+      Please remove all `matrix_sliding_sync_*` variables from your configuration file (vars.yml).
+
+      You may also wish to uninstall the proxy manually. See `docs/configuring-playbook-sliding-sync-proxy.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_sliding_sync_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_sliding_sync_.+', wantlist=True) | length > 0"
+
+- name: (Deprecation) Catch and report the synapse-auto-invite-accept variables
+  ansible.builtin.fail:
+    msg: |-
+      synapse-auto-invite-accept was completely removed from the playbook in February 2026, as the same functionality is available since Synapse v1.109.0.
+
+      Please remove all `matrix_synapse_ext_synapse_auto_accept_invite_*` variables from your configuration file (vars.yml).
+
+      To enable the native feature, see `docs/configuring-playbook-synapse-auto-accept-invite.md` for more information.
+
+      The following variables in your configuration need to be removed: {{ lookup('ansible.builtin.varnames', '^matrix_synapse_ext_synapse_auto_accept_invite_.+', wantlist=True) | join(', ') }}
+  when: "lookup('ansible.builtin.varnames', '^matrix_synapse_ext_synapse_auto_accept_invite_.+', wantlist=True) | length > 0"
+
+# Note: we intentionally do NOT use a blanket `^matrix_synapse_admin_.+` pattern here.
+# The matrix-synapse role has its own `matrix_synapse_admin_contact` variable (and others like
+# `matrix_synapse_container_labels_*_synapse_admin_api_*`) that share the same prefix but relate
+# to the Synapse Admin HTTP API, not the Ketesa web UI. A blanket match would produce false positives.
+- name: (Deprecation) Catch and report matrix-synapse-admin variables renamed to matrix-ketesa
+  ansible.builtin.fail:
+    msg: |-
+      Synapse Admin has been rebranded to Ketesa. The `matrix-synapse-admin` role has been renamed to `matrix-ketesa`.
+
+      All `matrix_synapse_admin_*` variables must be renamed to `matrix_ketesa_*` in your configuration file (vars.yml).
+
+      Additionally, note that the Docker image changed from `ghcr.io/etkecc/synapse-admin` to `ghcr.io/etkecc/ketesa`.
+
+      See `docs/configuring-playbook-ketesa.md` for more information.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_synapse_admin_(enabled|base_path|config|container|hostname|path_prefix|http_|floc_|hsts_|restart_|systemd_)', wantlist=True) | join(', ') }}
+  when:
+    - matrix_playbook_migration_matrix_synapse_admin_ketesa_variable_transition_checks_enabled | bool
+    - "lookup('ansible.builtin.varnames', '^matrix_synapse_admin_(enabled|base_path|config|container|hostname|path_prefix|http_|floc_|hsts_|restart_|systemd_)', wantlist=True) | length > 0"
+
+# In July 2026, all bridge roles (`roles/custom/matrix-bridge-*`) had their variable prefixes renamed to a uniform scheme,
+# where the variable prefix matches the role directory name (e.g. `matrix_mautrix_telegram_` -> `matrix_bridge_mautrix_telegram_`).
+# This catches all old-style prefixes at once and points people to the CHANGELOG, which contains the full rename map.
+# Prefixes of bridges removed from the playbook before this rename (e.g. `matrix_mautrix_facebook_`) are intentionally not matched here.
+# They are caught by their own dedicated tasks above, which ask for removal instead of renaming.
+- name: (Deprecation) Catch and report bridge variables that use pre-rename prefixes
+  ansible.builtin.fail:
+    msg: |-
+      Your configuration contains bridge variables which now have different names.
+
+      All bridge variables were renamed so that each variable prefix matches its role directory name (`matrix_bridge_*`).
+      For example, `matrix_mautrix_telegram_enabled` is now `matrix_bridge_mautrix_telegram_enabled`.
+
+      Please rename all such variables in your configuration file (vars.yml).
+      See the `Bridge variables have been renamed` entry in the CHANGELOG (https://github.com/spantaleev/matrix-docker-ansible-deploy/blob/master/CHANGELOG.md) for the full rename map.
+
+      The following variables in your configuration need to be renamed: {{ lookup('ansible.builtin.varnames', '^matrix_(appservice_discord|appservice_irc|beeper_linkedin|heisenbridge|hookshot|mautrix_androidsms|mautrix_bluesky|mautrix_discord|mautrix_gmessages|mautrix_googlechat|mautrix_gvoice|mautrix_imessage|mautrix_meta_instagram|mautrix_meta_messenger|mautrix_signal|mautrix_slack|mautrix_telegram|mautrix_twitter|mautrix_whatsapp|mautrix_wsproxy|meshtastic_relay|mx_puppet_groupme|mx_puppet_steam|postmoogle|rustpush_bridge|sms_bridge|steam_bridge|wechat)_.+', wantlist=True) | join(', ') }}
+  when:
+    - matrix_playbook_migration_bridge_prefix_rename_validation_enabled | bool
+    - "lookup('ansible.builtin.varnames', '^matrix_(appservice_discord|appservice_irc|beeper_linkedin|heisenbridge|hookshot|mautrix_androidsms|mautrix_bluesky|mautrix_discord|mautrix_gmessages|mautrix_googlechat|mautrix_gvoice|mautrix_imessage|mautrix_meta_instagram|mautrix_meta_messenger|mautrix_signal|mautrix_slack|mautrix_telegram|mautrix_twitter|mautrix_whatsapp|mautrix_wsproxy|meshtastic_relay|mx_puppet_groupme|mx_puppet_steam|postmoogle|rustpush_bridge|sms_bridge|steam_bridge|wechat)_.+', wantlist=True) | length > 0"

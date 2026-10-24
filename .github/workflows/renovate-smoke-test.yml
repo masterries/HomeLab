@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+name: Renovate smoke test
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    paths:
+      - '.github/renovate.json'
+      - '.github/workflows/renovate-smoke-test.yml'
+      - '.github/workflows/renovate.yml'
+      - 'bin/renovate-smoke-test.sh'
+  pull_request:
+    paths:
+      - '.github/renovate.json'
+      - '.github/workflows/renovate-smoke-test.yml'
+      - '.github/workflows/renovate.yml'
+      - 'bin/renovate-smoke-test.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate config and runtime with the pinned Renovate image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Same-repository pull requests already run via the push event;
+    # run pull_request jobs only for pull requests from forks.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate configuration and extract repository dependencies
+        shell: bash
+        run: bin/renovate-smoke-test.sh

@@ -1,0 +1,16 @@
+#jinja2: lstrip_blocks: True
+[Unit]
+Description=Migrates locally-stored Synapse media store files to S3
+{% for service in matrix_synapse_ext_synapse_s3_storage_provider_migrate_systemd_required_services_list %}
+Requires={{ service }}
+After={{ service }}
+{% endfor %}
+{% for service in matrix_synapse_ext_synapse_s3_storage_provider_migrate_systemd_wanted_services_list %}
+Wants={{ service }}
+{% endfor %}
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+Environment="HOME={{ devture_systemd_docker_base_systemd_unit_home_path }}"
+ExecStart={{ matrix_synapse_ext_s3_storage_provider_bin_path }}/migrate

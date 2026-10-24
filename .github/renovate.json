@@ -1,0 +1,229 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "branchConcurrentLimit": 5,
+  "prConcurrentLimit": 3,
+  "hostRules": [
+    {
+      "matchHost": "https://mau.dev",
+      "concurrentRequestLimit": 2,
+      "maxRequestsPerSecond": 2
+    },
+    {
+      "matchHost": "https://dock.mau.dev",
+      "concurrentRequestLimit": 4,
+      "maxRequestsPerSecond": 4
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/defaults/main.yml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-.]+?) depName=(?<depName>[^\\s]+?)(?: (?:lookupName|packageName)=(?<packageName>[^\\s]+?))?(?: versioning=(?<versioning>[a-z-0-9]+?))?\\s+[A-Za-z0-9_]+?(?:_version|_tag)\\s*:\\s*[\"']?(?<currentValue>.+?)[\"']?\\s"
+      ]
+    },
+    {
+      "description": "Helper container images used by the Molecule scenarios. They are pinned once in molecule-shared/vars.yml rather than inline in each role's verify.yml, so this manager keeps that single pin current.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^molecule-shared/vars\\.yml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-.]+?) depName=(?<depName>[^\\s]+?)\\s+[A-Za-z0-9_]+?\\s*:\\s*[\"'][^:]+:(?<currentValue>[^\"']+)[\"']"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Update the self-hosted Renovate runner version",
+      "managerFilePatterns": [
+        "/^\\.github\\/workflows\\/renovate\\.yml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) packageName=(?<packageName>\\S+)\\s+MATRIX_RENOVATE_VERSION: '(?<currentValue>[^']+)'"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Update the ghcr.io/devture/ansible image referenced in the documentation. The devcontainer's Dockerfile is handled by the built-in dockerfile manager.",
+      "managerFilePatterns": [
+        "/^docs\\/ansible\\.md$/"
+      ],
+      "matchStrings": [
+        "ghcr\\.io\\/devture\\/ansible:(?<currentValue>[^\\s`]+)"
+      ],
+      "depNameTemplate": "ghcr.io/devture/ansible",
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Roles use `vUPSTREAM-N` tags. `sourceUrl` is only known after lookup, so `matchSourceUrls` cannot select the versioning; match the datasource instead",
+      "ignoreUnstable": false,
+      "versioning": "loose",
+      "matchDatasources": ["git-tags"]
+    },
+    {
+      "description": "mautrix images are dual-tagged (v0.YYMM.PATCH and vYY.MM[.PATCH]). Stick to the v0 scheme: it matches the git tags (needed for self-building) and has a consistent number of components (the calver tags do not, which makes Renovate stop offering updates).",
+      "matchPackageNames": [
+        "dock.mau.dev/mautrix/**"
+      ],
+      "allowedVersions": "/^v0\\./"
+    },
+    {
+      "description": "ghcr.io/devture/ansible is tagged `<Alpine ansible package version>-<release>` (e.g. `14.0.0-r0-3`). Docker versioning would consider `-r0-3` a compatibility suffix and never offer `-r0-4`",
+      "matchDepNames": [
+        "ghcr.io/devture/ansible"
+      ],
+      "versioning": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-r(?<build>\\d+)-(?<revision>\\d+)$"
+    },
+    {
+      "description": "Housekeeping updates merge via branch push (no PR, no email); a failure on the branch still surfaces as a PR. i18n/requirements.txt bumps are exercised by the Matrix i18n workflow before merging.",
+      "matchFileNames": [
+        ".github/workflows/close-stale-issues.yml",
+        ".github/workflows/i18n.yml",
+        ".github/workflows/lock-threads.yml",
+        ".github/workflows/matrix.yml",
+        ".github/workflows/renovate-smoke-test.yml",
+        ".github/workflows/renovate.yml",
+        ".github/workflows/update-translations.yml",
+        "flake.nix",
+        "flake.lock",
+        "i18n/requirements.txt",
+        "mise.toml"
+      ],
+      "automerge": true,
+      "automergeType": "branch"
+    },
+    {
+      "description": "Automerge updates of the self-hosted Renovate runner (via branch push - no PR). Monthly, since upstream releases several times a day and staying on the very latest version brings little benefit.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchDepNames": [
+        "matrix-renovate-runner"
+      ],
+      "allowedVersions": "!/^44\\.64\\.0$/",
+      "schedule": [
+        "* 0-5 1 * *"
+      ],
+      "automerge": true,
+      "automergeType": "branch"
+    },
+    {
+      "description": "Molecule's own dependencies merge via branch push (no PR, no email). Shared helper image updates run their consuming scenarios, including indirect consumers through shared tasks. Shared Python and Ansible requirements and workflow changes run every scenario. An update only merges once the selected checks pass; a failure surfaces as a PR instead. A new Postgres major is exercised by every Postgres-consuming scenario before merging.",
+      "matchFileNames": [
+        "molecule-shared/**",
+        ".github/workflows/molecule.yml"
+      ],
+      "automerge": true,
+      "automergeType": "branch"
+    },
+    {
+      "description": "Molecule's pinned ansible-core 2.21 supports controller Python through 3.14. Keep Python updates below 3.15 until Ansible supports the newer minor and the scenarios pass on it.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/molecule.yml"
+      ],
+      "matchDepNames": [
+        "python"
+      ],
+      "matchDepTypes": [
+        "uses-with"
+      ],
+      "allowedVersions": "<3.15"
+    },
+    {
+      "description": "Automerge patch bumps of components whose role has a Molecule scenario (via branch push - no PR). A bump touches that role's defaults/main.yml, which makes the Molecule workflow run that role's scenario, so the update only merges once the component has been started on the configuration the role renders. Patch is the baseline for every covered role; explicitly approved roles may also appear in the narrower minor rule below. Keep this list in step with the roles that have a scenario - bin/check-molecule-automerge-list.py (patch rule) enforces that.",
+      "matchFileNames": [
+        "roles/custom/matrix-alertmanager-receiver/defaults/main.yml",
+        "roles/custom/matrix-authentication-service/defaults/main.yml",
+        "roles/custom/matrix-bot-baibot/defaults/main.yml",
+        "roles/custom/matrix-bot-draupnir/defaults/main.yml",
+        "roles/custom/matrix-bot-honoroit/defaults/main.yml",
+        "roles/custom/matrix-bot-maubot/defaults/main.yml",
+        "roles/custom/matrix-bot-matrix-reminder-bot/defaults/main.yml",
+        "roles/custom/matrix-bot-meowlnir/defaults/main.yml",
+        "roles/custom/matrix-bridge-beeper-line/defaults/main.yml",
+        "roles/custom/matrix-bridge-heisenbridge/defaults/main.yml",
+        "roles/custom/matrix-bridge-hookshot/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-bluesky/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-discord/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-gmessages/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-googlechat/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-gvoice/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-linkedin/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-meta-instagram/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-meta-messenger/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-signal/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-slack/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-telegram/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-twitter/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-whatsapp/defaults/main.yml",
+        "roles/custom/matrix-bridge-postmoogle/defaults/main.yml",
+        "roles/custom/matrix-bridge-steam/defaults/main.yml",
+        "roles/custom/matrix-client-element/defaults/main.yml",
+        "roles/custom/matrix-client-fluffychat/defaults/main.yml",
+        "roles/custom/matrix-element-admin/defaults/main.yml",
+        "roles/custom/matrix-element-call/defaults/main.yml",
+        "roles/custom/matrix-ketesa/defaults/main.yml",
+        "roles/custom/matrix-livekit-jwt-service/defaults/main.yml",
+        "roles/custom/matrix-static-files/defaults/main.yml",
+        "roles/custom/matrix-synapse/defaults/main.yml",
+        "roles/custom/matrix-synapse-auto-compressor/defaults/main.yml",
+        "roles/custom/matrix-tuwunel/defaults/main.yml"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "branch"
+    },
+    {
+      "description": "Automerge minor bumps of explicitly approved components with a weight-bearing Molecule scenario (via branch push - no PR). This list is intentionally narrower than the patch rule: the scenario must exercise enough real behavior to be a useful compatibility gate across a minor release. A failure surfaces as a PR instead. Keep every entry backed by a scenario and the patch rule - bin/check-molecule-automerge-list.py (minor rule) enforces that.",
+      "matchFileNames": [
+        "roles/custom/matrix-authentication-service/defaults/main.yml",
+        "roles/custom/matrix-bot-honoroit/defaults/main.yml",
+        "roles/custom/matrix-bot-meowlnir/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-bluesky/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-gmessages/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-googlechat/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-gvoice/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-linkedin/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-slack/defaults/main.yml",
+        "roles/custom/matrix-bridge-mautrix-twitter/defaults/main.yml",
+        "roles/custom/matrix-bridge-steam/defaults/main.yml",
+        "roles/custom/matrix-client-fluffychat/defaults/main.yml",
+        "roles/custom/matrix-element-admin/defaults/main.yml",
+        "roles/custom/matrix-element-call/defaults/main.yml",
+        "roles/custom/matrix-livekit-jwt-service/defaults/main.yml",
+        "roles/custom/matrix-static-files/defaults/main.yml",
+        "roles/custom/matrix-synapse-auto-compressor/defaults/main.yml"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "automerge": true,
+      "automergeType": "branch"
+    }
+  ],
+  "pre-commit": {
+    "enabled": true
+  },
+  "nix": {
+    "enabled": true,
+    "lockFileMaintenance": {
+      "enabled": true
+    }
+  }
+}

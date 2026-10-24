@@ -1,0 +1,65 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2018-2026, Slavi Pantaleev, Aine Etke, MDAD community members
+# This file is distributed under the same license as the matrix-docker-ansible-deploy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: matrix-docker-ansible-deploy \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-19 07:40+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../../docs/configuring-playbook-conduwuit.md:18
+msgid "Configuring conduwuit (optional, removed)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:20
+msgid "🪦 The playbook used to be able to install and configure the [conduwuit](https://conduwuit.puppyirl.gay/) Matrix server, but no longer includes this component, as it's been abandoned and unmaintained."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:22
+msgid "Uninstalling the service manually"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:24
+msgid "If you still have conduwuit installed on your Matrix server, the playbook can no longer help you uninstall it and you will need to do it manually."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:26
+msgid "To uninstall the service, run the command below on the server:"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:32
+msgid "Migrating to Tuwunel"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:34
+msgid "[Tuwunel](configuring-playbook-tuwunel.md) is a fork of conduwuit, [endorsed as conduwuit's successor](https://github.com/spantaleev/matrix-docker-ansible-deploy/pull/5200#issuecomment-4396211185) by the former conduwuit maintainer. It reads conduwuit's database directly, so migration is possible. Please refer to [this section](./configuring-playbook-tuwunel.md#migrating-from-conduwuit) for details."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:36
+msgid "Migrating to Continuwuity"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:38
+msgid "Since [Continuwuity](configuring-playbook-continuwuity.md) is a drop-in replacement for conduwuit, migration is possible. Please refer to [this section](./configuring-playbook-continuwuity.md#migrating-from-conduwuit) for details."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:40
+msgid "Removing data manually"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:42
+msgid "If you are not going to migrate to [Tuwunel](configuring-playbook-tuwunel.md) or [Continuwuity](configuring-playbook-continuwuity.md), you can remove data by running the command on the server:"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-conduwuit.md:49
+msgid "Once you removing the path, there is no going back. Your data on the homeserver (including chat history, rooms, etc.) will be deleted and not be possible to restore them. Please be certain."
+msgstr ""

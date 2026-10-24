@@ -1,0 +1,161 @@
+<!--
+SPDX-FileCopyrightText: 2018-2024 Slavi Pantaleev
+SPDX-FileCopyrightText: 2020 Aaron Raimist
+SPDX-FileCopyrightText: 2020 Christian Wolf
+SPDX-FileCopyrightText: 2020 Marcel Partap
+SPDX-FileCopyrightText: 2020-2024 MDAD project contributors
+SPDX-FileCopyrightText: 2022 Alejo Diaz
+SPDX-FileCopyrightText: 2022 Julian Foad
+SPDX-FileCopyrightText: 2024-2026 Suguru Hirahara
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+# Configuring a TURN server (optional, advanced)
+
+By default, the [coturn](https://github.com/coturn/coturn) TURN server component is enabled automatically only when [Jitsi](configuring-playbook-jitsi.md) is enabled. If you're not using Jitsi, coturn is not enabled by default.
+
+If you explicitly need coturn while not using Jitsi, enable it with:
+
+```yaml
+coturn_enabled: true
+```
+
+and configure its IP-related settings in the section below.
+
+If you'd like coturn to stay disabled even when Jitsi is enabled, or if you prefer to use an external TURN provider, see [disabling coturn](#disabling-coturn) section below.
+
+When Coturn is not enabled, homeservers (like Synapse) would not point to TURN servers and *legacy* audio/video call functionality may fail. If you're using [Matrix RTC](configuring-playbook-matrix-rtc.md) (for [Element Call](configuring-playbook-element-call.md)), you likely don't have a need to enable coturn.
+
+## Adjusting firewall rules
+
+To ensure Coturn functions correctly, the following firewall rules and port forwarding settings are required when coturn is enabled:
+
+- `3478/tcp`: STUN/TURN over TCP
+- `3478/udp`: STUN/TURN over UDP
+- `5349/tcp`: TURN over TCP
+- `5349/udp`: TURN over UDP
+- `49152-49172/udp`: TURN/UDP relay range
+
+If LiveKit's embedded TURN is enabled at the same time (for MatrixRTC/Element Call), keep the Coturn relay range distinct from LiveKit's relay range (`livekit_server_config_turn_relay_range_start`/`livekit_server_config_turn_relay_range_end`).
+
+💡 Docker configures the server's internal firewall for you. In most cases, you don't need to do anything special on the host itself.
+
+## Adjusting the playbook configuration
+
+### Define public IP manually (optional)
+
+If you enable coturn (either via Jitsi or manually), we recommend that you configure the public IP addresses of your server in the `vars.yml` file:
+
+```yaml
+# You can define multiple IP addresses if your server has multiple external IP addresses
+coturn_turn_external_ip_addresses: ["YOUR_PUBLIC_IP"]
+```
+
+If you'd like to rely on external IP address auto-detection (not recommended unless you need it), avoid configuring this variable. The playbook will automatically contact an [echoip](https://github.com/mpolden/echoip)-compatible service (`https://ifconfig.co/json` by default) to determine your server's IP address. This API endpoint is configurable via the `coturn_turn_external_ip_address_auto_detection_echoip_service_url` variable.
+
+>[!NOTE]
+> You can self-host the echoip service by using the [Mother-of-All-Self-Hosting (MASH)](https://github.com/mother-of-all-self-hosting/mash-playbook) Ansible playbook. See [this page](https://github.com/mother-of-all-self-hosting/mash-playbook/blob/main/docs/services/echoip.md) for the instruction to install it with the playbook. If you are wondering how to use it for your Matrix server, refer to [this page](https://github.com/mother-of-all-self-hosting/mash-playbook/blob/main/docs/setting-up-services-on-mdad-server.md) for the overview.
+
+### Change the authentication mechanism (optional)
+
+The playbook uses the [`auth-secret` authentication method](https://github.com/coturn/coturn/blob/873cabd6a2e5edd7e9cc5662cac3ffe47fe87a8e/README.turnserver#L186-L199) by default, but you may switch to the [`lt-cred-mech` method](https://github.com/coturn/coturn/blob/873cabd6a2e5edd7e9cc5662cac3ffe47fe87a8e/README.turnserver#L178) which [some report](https://github.com/spantaleev/matrix-docker-ansible-deploy/issues/3191) to be working better.
+
+To do so, add the following configuration to your `vars.yml` file:
+
+```yaml
+coturn_authentication_method: lt-cred-mech
+```
+
+Regardless of the selected authentication method, the playbook generates secrets automatically and passes them to the homeserver and coturn.
+
+If [Jitsi](configuring-playbook-jitsi.md) is installed, note that switching to `lt-cred-mech` will disable the integration between Jitsi and your coturn server, as Jitsi seems to support the `auth-secret` authentication method only.
+
+### Customize the Coturn hostname (optional)
+
+By default, Coturn uses the same hostname as your Matrix homeserver (the value of `matrix_server_fqn_matrix`, which is typically `matrix.example.com`).
+
+If you'd like to use a custom subdomain for Coturn (e.g., `turn.example.com` or `t.matrix.example.com`), add the following configuration to your `vars.yml` file:
+
+```yaml
+coturn_hostname: turn.example.com
+```
+
+The playbook will automatically:
+- Configure Coturn to use this hostname
+- Obtain an SSL certificate for the custom domain via Traefik
+- Update all TURN URIs to point to the custom domain
+
+**Note**: Make sure the custom hostname resolves to your server's IP address via DNS before running the playbook.
+
+### Use your own external coturn server (optional)
+
+If you'd like to use another TURN server (be it coturn or some other one), add the following configuration to your `vars.yml` file. Make sure to replace `HOSTNAME_OR_IP` with your own.
+
+```yaml
+# Disable integrated coturn server
+coturn_enabled: false
+
+# Point Synapse to your other coturn server
+matrix_synapse_turn_uris:
+- turns:HOSTNAME_OR_IP?transport=udp
+- turns:HOSTNAME_OR_IP?transport=tcp
+- turn:HOSTNAME_OR_IP?transport=udp
+- turn:HOSTNAME_OR_IP?transport=tcp
+```
+
+If you have or want to enable Jitsi, you might want to enable the TURN server there too. If you do not do it, Jitsi will fall back to an upstream service.
+
+```yaml
+jitsi_web_stun_servers:
+- stun:HOSTNAME_OR_IP:PORT
+```
+
+You can put multiple host/port combinations if you'd like to.
+
+### Edit the reloading schedule (optional)
+
+By default the service is reloaded on 6:30 a.m. every day based on the `coturn_reload_schedule` variable so that new SSL certificates can kick in. It is defined in the format of systemd timer calendar.
+
+To edit the schedule, add the following configuration to your `vars.yml` file (adapt to your needs):
+
+```yaml
+coturn_reload_schedule: "*-*-* 06:30:00"
+```
+
+**Note**: the actual job may run with a delay. See `coturn_reload_schedule_randomized_delay_sec` for its default value.
+
+### Extending the configuration
+
+There are some additional things you may wish to configure about the TURN server.
+
+Take a look at:
+
+- `roles/galaxy/coturn/defaults/main.yml` for some variables that you can customize via your `vars.yml` file
+
+## Disabling coturn
+
+Coturn is only enabled by default when [Jitsi](configuring-playbook-jitsi.md) is enabled. In most instances, you don't need to explicitly disable it.
+
+To force the playbook to not install Coturn (even when Jitsi is enabled), add the following configuration to your `vars.yml` file:
+
+```yaml
+coturn_enabled: false
+```
+
+## Installing
+
+After configuring the playbook, run it with [playbook tags](playbook-tags.md) as below:
+
+<!-- NOTE: let this conservative command run (instead of install-all) to make it clear that failure of the command means something is clearly broken. -->
+```sh
+ansible-playbook -i inventory/hosts setup.yml --tags=setup-all,start
+```
+
+The shortcut commands with the [`just` program](just.md) are also available: `just install-all` or `just setup-all`
+
+`just install-all` is useful for maintaining your setup quickly ([2x-5x faster](../CHANGELOG.md#2x-5x-performance-improvements-in-playbook-runtime) than `just setup-all`) when its components remain unchanged. If you adjust your `vars.yml` to remove other components, you'd need to run `just setup-all`, or these components will still remain installed. Note these shortcuts run the `ensure-matrix-users-created` tag too.
+
+## Troubleshooting
+
+As with all other services, you can find the logs in [systemd-journald](https://www.freedesktop.org/software/systemd/man/systemd-journald.service.html) by logging in to the server with SSH and running `journalctl -fu matrix-coturn`.

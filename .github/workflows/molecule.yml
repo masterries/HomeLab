@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+name: Molecule
+
+# Unlike the MASH role repositories, where one repository holds one role, every
+# role here lives in the same repository. Running every scenario on every push
+# would be unaffordable, so a first job works out which roles the push actually
+# touched and the matrix is built from that. A push that changes documentation,
+# or a role with no scenario yet, runs nothing at all.
+on:  # yamllint disable-line rule:truthy
+  push:
+    paths:
+      - "roles/custom/**"
+      - "molecule-shared/**"
+      - ".github/workflows/molecule.yml"
+      - "bin/molecule-select-roles.py"
+      - "bin/test-molecule-select-roles.py"
+  pull_request:
+    paths:
+      - "roles/custom/**"
+      - "molecule-shared/**"
+      - ".github/workflows/molecule.yml"
+      - "bin/molecule-select-roles.py"
+      - "bin/test-molecule-select-roles.py"
+  workflow_dispatch:
+    inputs:
+      role:
+        description: "Single role to test (directory name under roles/custom), or empty for all roles that have a scenario"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Work out which roles to test
+    runs-on: ubuntu-latest
+
+    # Same rule as the MASH repositories: a pull request from a branch of this
+    # repository would otherwise run everything twice, once for the push and
+    # once for the pull request.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
+
+    outputs:
+      roles: ${{ steps.detect.outputs.roles }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Test scenario selection
+        run: python3 bin/test-molecule-select-roles.py
+
+      - name: Detect roles with a Molecule scenario that this change touches
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          INPUT_ROLE: ${{ inputs.role }}
+        run: python3 bin/molecule-select-roles.py
+
+  molecule:
+    name: "Molecule: ${{ matrix.role }}"
+    runs-on: ubuntu-latest
+
+    needs: detect
+    if: needs.detect.outputs.roles != '[]'
+
+    strategy:
+      matrix:
+        role: ${{ fromJson(needs.detect.outputs.roles) }}
+      fail-fast: false
+
+    env:
+      MOLECULE_DISTRO: ubuntu2604
+      PY_COLORS: "1"
+      ANSIBLE_FORCE_COLOR: "1"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          # ansible-core 2.21 supports controller Python through 3.14.
+          python-version: "3.14"
+
+      - name: Install test dependencies
+        run: python3 -m pip install -r molecule-shared/requirements.txt
+
+      - name: Run Molecule
+        working-directory: roles/custom/${{ matrix.role }}
+        run: molecule test --scenario-name default

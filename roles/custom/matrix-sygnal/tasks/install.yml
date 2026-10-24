@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: 2021 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2022 Jim Myhrberg
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2022 Nikita Chernyi
+# SPDX-FileCopyrightText: 2022 Sebastian Gumprich
+# SPDX-FileCopyrightText: 2024 David Mehren
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Ensure Sygnal paths exists
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0750'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  with_items:
+    - "{{ matrix_sygnal_base_path }}"
+    - "{{ matrix_sygnal_config_path }}"
+    - "{{ matrix_sygnal_data_path }}"
+
+- name: Ensure Sygnal config installed
+  ansible.builtin.copy:
+    content: "{{ matrix_sygnal_configuration | to_nice_yaml(indent=2, width=999999) }}"
+    dest: "{{ matrix_sygnal_config_path }}/sygnal.yaml"
+    mode: '0640'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  register: matrix_sygnal_config_result
+
+- name: Ensure Sygnal labels installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/labels.j2"
+    dest: "{{ matrix_sygnal_base_path }}/labels"
+    mode: '0640'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  register: matrix_sygnal_support_files_result
+
+- name: Ensure Sygnal image is pulled
+  community.docker.docker_image_pull:
+    name: "{{ matrix_sygnal_container_image }}"
+    pull: always
+  register: matrix_sygnal_container_image_pull_result
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: matrix_sygnal_container_image_pull_result is not failed
+
+- name: Ensure Sygnal container network is created
+  when: matrix_sygnal_container_network != 'host'
+  community.general.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ matrix_sygnal_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+
+- name: Ensure matrix-sygnal.service installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/matrix-sygnal.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/matrix-sygnal.service"
+    mode: '0644'
+  register: matrix_sygnal_systemd_service_result
+
+- name: Determine whether Sygnal needs a restart
+  ansible.builtin.set_fact:
+    matrix_sygnal_restart_necessary: >-
+      {{
+        matrix_sygnal_config_result.changed | default(false)
+        or matrix_sygnal_support_files_result.changed | default(false)
+        or matrix_sygnal_systemd_service_result.changed | default(false)
+        or matrix_sygnal_container_image_pull_result.changed | default(false)
+      }}

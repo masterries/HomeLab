@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: requirements.yml
+    force: true
+driver:
+  name: docker
+platforms:
+  - name: mautrix-whatsapp-${MOLECULE_DISTRO:-ubuntu2604}-default
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-ubuntu2604}-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callback_result_format: yaml
+  inventory:
+    group_vars:
+      all:
+        matrix_bridge_mautrix_whatsapp_container_network: mautrix-whatsapp-molecule
+
+        # The stub prepare.yml stands up. Not a real homeserver, and nothing is asserted
+        # about it.
+        matrix_bridge_mautrix_whatsapp_homeserver_address: http://matrix.molecule.local:8008
+
+        # Postgres, because that is what `group_vars/matrix_servers` selects whenever postgres
+        # is enabled - which is the default, so it is what essentially every real deployment
+        # runs. prepare.yml stands one up. The password differs from the role's default, so
+        # reaching the database at all means the role's connection string was built from these.
+        # Database name and user differ from the role's defaults, so the bridge reaching the
+        # database at all proves the role built its connection string out of these rather
+        # than out of anything it would have picked on its own. prepare.yml creates them.
+        matrix_bridge_mautrix_whatsapp_database_engine: postgres
+        matrix_bridge_mautrix_whatsapp_database_hostname: matrix-postgres-molecule
+        matrix_bridge_mautrix_whatsapp_database_name: molecule_whatsapp
+        matrix_bridge_mautrix_whatsapp_database_username: molecule_whatsapp
+        matrix_bridge_mautrix_whatsapp_database_password: molecule_pg_password_5e8c21
+
+        # Here these only have to reach the rendered configuration and the registration.
+        matrix_bridge_mautrix_whatsapp_appservice_token: molecule_as_token_4f2a91
+        matrix_bridge_mautrix_whatsapp_homeserver_token: molecule_hs_token_9b3e77
+
+        # Different from the role's defaults, so verify.yml can tell what the role rendered
+        # apart from what the bridge would have chosen.
+        matrix_bridge_mautrix_whatsapp_appservice_bot_username: molecule-whatsappbot
+        matrix_bridge_mautrix_whatsapp_homeserver_domain: molecule.local
+
+        # Traefik is not deployed here, so the labels the role would render for it are
+        # switched off and their absence is asserted instead.
+        matrix_bridge_mautrix_whatsapp_container_labels_traefik_enabled: false
+
+        # verify.yml runs as its own play, where the role's defaults are out of scope,
+        # so the paths it reads are pinned here to match what the role derives.
+        matrix_bridge_mautrix_whatsapp_base_path: /matrix/mautrix-whatsapp
+        matrix_bridge_mautrix_whatsapp_config_path: /matrix/mautrix-whatsapp/config
+        matrix_bridge_mautrix_whatsapp_data_path: /matrix/mautrix-whatsapp/data
+  env:
+    # Workaround for https://github.com/ansible/molecule/issues/4391
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/../..:/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles:${ANSIBLE_HOME:-~/.ansible}/roles
+scenario:
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - cleanup
+    - destroy
+verifier:
+  name: ansible

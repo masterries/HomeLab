@@ -1,0 +1,60 @@
+---
+
+exclude: "^(LICENSES/|var/)"
+
+# See: https://pre-commit.com/hooks.html
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-shebang-scripts-are-executable
+      - id: check-toml
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+        args: ["--skip=*.po,*.pot,i18n/"]
+  - repo: https://github.com/fsfe/reuse-tool  # https://reuse.software/dev/#pre-commit-hook
+    rev: v6.2.0
+    hooks:
+      - id: reuse
+  - repo: https://github.com/ansible/ansible-lint
+    rev: v26.10.1
+    hooks:
+      - id: ansible-lint
+        files: '^roles/custom/'
+        args: ['roles/custom']
+        pass_filenames: false
+  - repo: local
+    hooks:
+      - id: check-group-vars-jinja
+        name: Check the Jinja syntax in group_vars
+        entry: bin/check-group-vars-jinja.py
+        language: python
+        additional_dependencies: ['jinja2==3.1.6', 'pyyaml==6.0.3']
+        files: '^(group_vars/(matrix_servers|jitsi_jvb_servers)|bin/check-group-vars-jinja\.py|\.pre-commit-config\.yaml)$'
+        args: ['group_vars/matrix_servers', 'group_vars/jitsi_jvb_servers']
+        pass_filenames: false
+      - id: check-examples-vars-migration-version
+        name: Check examples/vars.yml migration version matches expected
+        entry: bin/check-examples-vars-migration-version.sh
+        language: script
+        files: '(examples/vars\.yml|roles/custom/matrix_playbook_migration/defaults/main\.yml)'
+        pass_filenames: false
+      - id: check-molecule-automerge-list
+        name: Check the Molecule automerge rules match the roles that have a scenario
+        entry: bin/check-molecule-automerge-list.py
+        language: script
+        files: '(\.github/renovate\.json|bin/check-molecule-automerge-list\.py|roles/custom/[^/]+/molecule/default/molecule\.yml)'
+        pass_filenames: false
+      - id: test-molecule-select-roles
+        name: Test Molecule scenario selection
+        entry: python3 bin/test-molecule-select-roles.py
+        language: system
+        files: '(\.github/workflows/molecule\.yml|bin/(test-)?molecule-select-roles\.py)'
+        pass_filenames: false

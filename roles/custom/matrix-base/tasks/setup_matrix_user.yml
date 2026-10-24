@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2020 - 2022 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2026 Chiu Ki Sit
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- ansible.builtin.include_tasks: "{{ role_path }}/tasks/setup_matrix_user_synology.yml"
+  when: matrix_base_host_is_synology
+
+- ansible.builtin.include_tasks: "{{ role_path }}/tasks/setup_matrix_user_linux.yml"
+  when: not matrix_base_host_is_synology

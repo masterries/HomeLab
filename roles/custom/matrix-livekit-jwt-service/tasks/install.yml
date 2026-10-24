@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2022 MDAD project contributors
+# SPDX-FileCopyrightText: 2024 wjbeckett
+# SPDX-FileCopyrightText: 2024 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Ensure LiveKit JWT Service paths exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: '0750'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  with_items:
+    - path: "{{ matrix_livekit_jwt_service_base_path }}"
+
+- name: Ensure LiveKit JWT Service support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ matrix_livekit_jwt_service_base_path }}/{{ item }}"
+    mode: '0640'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  with_items:
+    - env
+    - labels
+  register: matrix_livekit_jwt_service_support_files_result
+
+- name: Ensure LiveKit JWT Service container image is pulled
+  community.docker.docker_image_pull:
+    name: "{{ matrix_livekit_jwt_service_container_image }}"
+    pull: always
+  when: "not matrix_livekit_jwt_service_container_image_self_build | bool"
+  register: matrix_livekit_jwt_service_container_image_pull_result
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: matrix_livekit_jwt_service_container_image_pull_result is not failed
+
+- when: "matrix_livekit_jwt_service_container_image_self_build | bool"
+  block:
+    # A checkout owned by a different user (a uid change, an earlier clone by another user, etc.) would make the git task below fail on ownership or permissions.
+    - name: Ensure LiveKit JWT Service repository ownership is correct on self-build
+      ansible.builtin.file:
+        path: "{{ matrix_livekit_jwt_service_container_src_files_path }}"
+        state: directory
+        owner: "{{ matrix_user_name }}"
+        group: "{{ matrix_group_name }}"
+        recurse: true
+
+    - name: Ensure LiveKit JWT Service repository is present on self-build
+      ansible.builtin.git:
+        repo: "{{ matrix_livekit_jwt_service_container_repo }}"
+        version: "{{ matrix_livekit_jwt_service_container_repo_version }}"
+        dest: "{{ matrix_livekit_jwt_service_container_src_files_path }}"
+        force: "yes"
+      become: true
+      become_user: "{{ matrix_user_name }}"
+      # Keep this even though the task above normalizes ownership. Git may still see an ownership mismatch when Ansible becomes an unprivileged user (see #5065).
+      environment:
+        GIT_CONFIG_COUNT: "1"
+        GIT_CONFIG_KEY_0: safe.directory
+        GIT_CONFIG_VALUE_0: "{{ matrix_livekit_jwt_service_container_src_files_path }}"
+      register: matrix_livekit_jwt_service_git_pull_results
+
+    - name: Ensure LiveKit JWT Service container image is built
+      community.docker.docker_image_build:
+        name: "{{ matrix_livekit_jwt_service_container_image }}"
+        dockerfile: Dockerfile
+        path: "{{ matrix_livekit_jwt_service_container_src_files_path }}"
+        pull: true
+        rebuild: "{{ 'always' if matrix_livekit_jwt_service_git_pull_results.changed | bool else 'never' }}"
+      register: matrix_livekit_jwt_service_container_image_build_result
+
+- name: Ensure LiveKit JWT Service container network is created
+  when: matrix_livekit_jwt_service_container_network != 'host'
+  community.general.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ matrix_livekit_jwt_service_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+
+- name: Ensure LiveKit JWT Service systemd service is installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/matrix-livekit-jwt-service.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/matrix-livekit-jwt-service.service"
+    mode: '0644'
+  register: matrix_livekit_jwt_service_systemd_service_result
+
+- name: Determine whether LiveKit JWT Service needs a restart
+  ansible.builtin.set_fact:
+    matrix_livekit_jwt_service_restart_necessary: >-
+      {{
+        matrix_livekit_jwt_service_support_files_result.changed | default(false)
+        or matrix_livekit_jwt_service_systemd_service_result.changed | default(false)
+        or matrix_livekit_jwt_service_container_image_pull_result.changed | default(false)
+        or matrix_livekit_jwt_service_container_image_build_result.changed | default(false)
+      }}

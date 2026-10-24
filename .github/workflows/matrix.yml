@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2022 Nikita Chernyi
+# SPDX-FileCopyrightText: 2022 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+name: Matrix CI
+
+on: [push, pull_request]  # yamllint disable-line rule:truthy
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    name: Run prek hooks
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/archlinux:base-devel
+
+    steps:
+      # git must be installed before checkout so it does a proper clone
+      # (with .git directory) instead of a tarball download.
+      - name: Install git
+        run: pacman -Sy --noconfirm git
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Restore prek cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: var/prek
+          key: arch-prek-v1-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Install dependencies
+        run: pacman -S --noconfirm --needed just mise python
+
+      - name: Run prek hooks
+        run: |
+          # The checkout action sets safe.directory using its own bundled
+          # git, which is separate from the pacman-installed git that prek uses.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          just prek-run-on-all

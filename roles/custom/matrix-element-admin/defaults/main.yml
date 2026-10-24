@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2024 - 2025 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2024 - 2025 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+# Element Admin is a web-based administration panel for Synapse and Matrix Authentication Service
+# Project source code URL: https://github.com/element-hq/element-admin
+
+matrix_element_admin_enabled: true
+
+# renovate: datasource=docker depName=oci.element.io/element-admin
+matrix_element_admin_version: 0.1.18
+
+matrix_element_admin_scheme: https
+
+# The hostname at which Element Admin is served.
+matrix_element_admin_hostname: "admin.{{ matrix_server_fqn_element }}"
+
+# The path at which Element Admin is served.
+# This value must either be `/` or not end with a slash (e.g. `/element-admin`).
+matrix_element_admin_path_prefix: /
+
+matrix_element_admin_base_path: "{{ matrix_base_data_path }}/element-admin"
+
+matrix_element_admin_container_image_self_build: false
+matrix_element_admin_container_image_self_build_repo: https://github.com/element-hq/element-admin
+matrix_element_admin_container_image_self_build_repo_version: "{{ 'main' if matrix_element_admin_version == 'main' else matrix_element_admin_version }}"
+matrix_element_admin_container_src_path: "{{ matrix_element_admin_base_path }}/container-src"
+
+matrix_element_admin_container_image: "{{ matrix_element_admin_container_image_registry_prefix }}element-admin:{{ matrix_element_admin_container_image_tag }}"
+matrix_element_admin_container_image_tag: "{{ matrix_element_admin_version }}"
+matrix_element_admin_container_image_registry_prefix: "{{ matrix_element_admin_container_image_registry_prefix_upstream }}"
+matrix_element_admin_container_image_registry_prefix_upstream: "{{ matrix_element_admin_container_image_registry_prefix_upstream_default }}"
+matrix_element_admin_container_image_registry_prefix_upstream_default: "oci.element.io/"
+
+# The base container network. It will be auto-created by this role if it doesn't exist already.
+matrix_element_admin_container_network: ''
+
+# A list of additional container networks that the container would be connected to.
+# The role does not create these networks, so make sure they already exist.
+matrix_element_admin_container_additional_networks: "{{ matrix_element_admin_container_additional_networks_default + matrix_element_admin_container_additional_networks_auto + matrix_element_admin_container_additional_networks_custom }}"
+matrix_element_admin_container_additional_networks_default: []
+matrix_element_admin_container_additional_networks_auto: []
+matrix_element_admin_container_additional_networks_custom: []
+
+# matrix_element_admin_container_labels_traefik_enabled controls whether labels to assist a Traefik reverse-proxy will be attached to the container.
+# See `../templates/labels.j2` for details.
+#
+# To inject your own other container labels, see `matrix_element_admin_container_labels_additional_labels`.
+matrix_element_admin_container_labels_traefik_enabled: true
+matrix_element_admin_container_labels_traefik_docker_network: "{{ matrix_element_admin_container_network }}"
+matrix_element_admin_container_labels_traefik_hostname: "{{ matrix_element_admin_hostname }}"
+# The path prefix must either be `/` or not end with a slash (e.g. `/element-admin`).
+matrix_element_admin_container_labels_traefik_path_prefix: "{{ matrix_element_admin_path_prefix }}"
+matrix_element_admin_container_labels_traefik_rule: "Host(`{{ matrix_element_admin_container_labels_traefik_hostname }}`){% if matrix_element_admin_container_labels_traefik_path_prefix != '/' %} && PathPrefix(`{{ matrix_element_admin_container_labels_traefik_path_prefix }}`){% endif %}"
+matrix_element_admin_container_labels_traefik_priority: 0
+matrix_element_admin_container_labels_traefik_entrypoints: web-secure
+matrix_element_admin_container_labels_traefik_tls: "{{ matrix_element_admin_container_labels_traefik_entrypoints != 'web' }}"
+matrix_element_admin_container_labels_traefik_tls_certResolver: default  # noqa var-naming
+
+# matrix_element_admin_container_labels_additional_labels contains a multiline string with additional labels to add to the container label file.
+# See `../templates/labels.j2` for details.
+#
+# Example:
+# matrix_element_admin_container_labels_additional_labels: |
+#   my.label=1
+#   another.label="here"
+matrix_element_admin_container_labels_additional_labels: ''
+
+# A list of extra arguments to pass to the container
+matrix_element_admin_container_extra_arguments: []
+
+# Controls how long the pre-start cleanup should wait for stale container-name release
+# before failing startup explicitly.
+matrix_element_admin_container_cleanup_timeout_seconds: "{{ devture_systemd_docker_base_container_cleanup_timeout_seconds }}"
+
+# Controls the delay between pre-start cleanup retries.
+matrix_element_admin_container_cleanup_retry_delay_seconds: "{{ devture_systemd_docker_base_container_cleanup_retry_delay_seconds }}"
+
+# Shell command used in the systemd pre-start phase to deterministically remove a stale
+# container and wait until Docker releases its name.
+matrix_element_admin_container_cleanup_command: |
+  i=0;
+  while [ "$i" -lt {{ matrix_element_admin_container_cleanup_timeout_seconds }} ]; do
+  {{ devture_systemd_docker_base_host_command_docker }} stop -t {{ devture_systemd_docker_base_container_stop_grace_time_seconds }} matrix-element-admin >/dev/null 2>&1 || true;
+  {{ devture_systemd_docker_base_host_command_docker }} rm -f matrix-element-admin >/dev/null 2>&1 || true;
+  if {{ devture_systemd_docker_base_host_command_docker }} container inspect matrix-element-admin >/dev/null 2>&1; then
+  i=$((i + 1));
+  sleep {{ matrix_element_admin_container_cleanup_retry_delay_seconds }};
+  continue;
+  fi;
+  if {{ devture_systemd_docker_base_host_command_docker }} info >/dev/null 2>&1; then
+  exit 0;
+  fi;
+  echo "Failed to query Docker daemon while cleaning up matrix-element-admin" >&2;
+  exit 1;
+  done;
+  echo "Failed to remove stale container matrix-element-admin after {{ matrix_element_admin_container_cleanup_timeout_seconds }} attempts" >&2;
+  exit 1
+
+# A list of extra arguments to pass to the container process.
+matrix_element_admin_container_process_extra_arguments: []
+
+# List of systemd services that the Element Admin service depends on
+matrix_element_admin_systemd_required_services_list: "{{ matrix_element_admin_systemd_required_services_list_default + matrix_element_admin_systemd_required_services_list_auto + matrix_element_admin_systemd_required_services_list_custom }}"
+matrix_element_admin_systemd_required_services_list_default: "{{ [devture_systemd_docker_base_docker_service_name] if devture_systemd_docker_base_docker_service_name else [] }}"
+matrix_element_admin_systemd_required_services_list_auto: []
+matrix_element_admin_systemd_required_services_list_custom: []
+
+# List of systemd services that the Element Admin service wants
+matrix_element_admin_systemd_wanted_services_list: []
+
+# Controls the `SERVER_NAME` environment variable, which should point to a Matrix homeserver domain name.
+matrix_element_admin_environment_variable_server_name: "{{ matrix_domain }}"
+
+# Additional environment variables.
+#
+# Example:
+# matrix_element_admin_environment_variables_additional_variables: |
+#   SOMETHING=1
+#   ANOTHER="here"
+matrix_element_admin_environment_variables_additional_variables: ''
+
+# matrix_element_admin_restart_necessary controls whether the service
+# will be restarted (when true) or merely started (when false) by the
+# systemd service manager role (when conditional restart is enabled).
+#
+# This value is automatically computed during installation based on whether
+# any configuration files, the systemd service file, or the container image changed.
+# The default of `false` means "no restart needed" — appropriate when the role's
+# installation tasks haven't run (e.g., due to --tags skipping them).
+matrix_element_admin_restart_necessary: false

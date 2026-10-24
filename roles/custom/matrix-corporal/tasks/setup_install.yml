@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: 2018 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2019 Dan Arnfield
+# SPDX-FileCopyrightText: 2020 Chris van Dijk
+# SPDX-FileCopyrightText: 2020 MDAD project contributors
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2022 Nikita Chernyi
+# SPDX-FileCopyrightText: 2022 Sebastian Gumprich
+# SPDX-FileCopyrightText: 2024 David Mehren
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Ensure Matrix Corporal paths exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0750'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  with_items:
+    - "{{ matrix_corporal_base_path }}"
+    - "{{ matrix_corporal_config_dir_path }}"
+    - "{{ matrix_corporal_cache_dir_path }}"
+    - "{{ matrix_corporal_var_dir_path }}"
+
+# A checkout owned by a different user (a uid change, an earlier clone by another user, etc.) would make the git task below fail on ownership or permissions.
+- name: Ensure Matrix Corporal repository ownership is correct on self-build
+  ansible.builtin.file:
+    path: "{{ matrix_corporal_container_src_files_path }}"
+    state: directory
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+    recurse: true
+  when: matrix_corporal_container_image_self_build | bool
+
+- name: Ensure Matrix Corporal repository is present on self-build
+  ansible.builtin.git:
+    repo: "{{ matrix_corporal_container_image_self_build_repo }}"
+    dest: "{{ matrix_corporal_container_src_files_path }}"
+    version: "{{ matrix_corporal_container_image.split(':')[1] }}"
+    force: "yes"
+  become: true
+  become_user: "{{ matrix_user_name }}"
+  # Keep this even though the task above normalizes ownership. Git may still see an ownership mismatch when Ansible becomes an unprivileged user (see #5065).
+  environment:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: safe.directory
+    GIT_CONFIG_VALUE_0: "{{ matrix_corporal_container_src_files_path }}"
+  register: matrix_corporal_git_pull_results
+  when: matrix_corporal_container_image_self_build | bool
+
+- name: Ensure Matrix Corporal Docker image is built
+  community.docker.docker_image_build:
+    name: "{{ matrix_corporal_container_image }}"
+    dockerfile: etc/docker/Dockerfile
+    path: "{{ matrix_corporal_container_src_files_path }}"
+    pull: true
+    rebuild: "{{ 'always' if matrix_corporal_git_pull_results.changed | bool else 'never' }}"
+  when: matrix_corporal_container_image_self_build | bool
+  register: matrix_corporal_container_image_build_result
+
+- name: Ensure Matrix Corporal Docker image is pulled
+  community.docker.docker_image_pull:
+    name: "{{ matrix_corporal_container_image }}"
+    pull: always
+  when: not matrix_corporal_container_image_self_build | bool
+  register: matrix_corporal_container_image_pull_result
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: matrix_corporal_container_image_pull_result is not failed
+
+- name: Ensure Matrix Corporal config installed
+  ansible.builtin.copy:
+    content: "{{ matrix_corporal_configuration | to_nice_json }}"
+    dest: "{{ matrix_corporal_config_dir_path }}/config.json"
+    mode: '0644'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  register: matrix_corporal_config_result
+
+- name: Ensure Matrix Corporal support files installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/{{ item }}.j2"
+    dest: "{{ matrix_corporal_base_path }}/{{ item }}"
+    mode: '0640'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  with_items:
+    - labels
+  register: matrix_corporal_support_files_result
+
+- name: Ensure Matrix Corporal container network is created
+  when: matrix_corporal_container_network != 'host'
+  community.general.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ matrix_corporal_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+
+- name: Ensure matrix-corporal.service installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/matrix-corporal.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/matrix-corporal.service"
+    mode: '0644'
+  register: matrix_corporal_systemd_service_result
+
+- name: Determine whether matrix-corporal needs a restart
+  ansible.builtin.set_fact:
+    matrix_corporal_restart_necessary: >-
+      {{
+        matrix_corporal_config_result.changed | default(false)
+        or matrix_corporal_support_files_result.changed | default(false)
+        or matrix_corporal_systemd_service_result.changed | default(false)
+        or matrix_corporal_container_image_pull_result.changed | default(false)
+        or matrix_corporal_container_image_build_result.changed | default(false)
+      }}

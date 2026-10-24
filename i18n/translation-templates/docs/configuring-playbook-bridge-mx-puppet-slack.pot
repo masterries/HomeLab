@@ -1,0 +1,37 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2018-2026, Slavi Pantaleev, Aine Etke, MDAD community members
+# This file is distributed under the same license as the matrix-docker-ansible-deploy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: matrix-docker-ansible-deploy \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-02-13 10:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../../docs/configuring-playbook-bridge-mx-puppet-slack.md:17
+msgid "Setting up MX Puppet Slack bridging (optional, removed)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-mx-puppet-slack.md:19
+msgid "🪦 The playbook used to be able to install and configure [mx-puppet-slack](https://gitlab.com/mx-puppet/slack/mx-puppet-slack), but no longer includes this component, as it has been unmaintained for a long time."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-mx-puppet-slack.md:21
+msgid "You may wish to use the [Mautrix Slack bridge](https://github.com/mautrix/slack) instead."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-mx-puppet-slack.md:23
+msgid "Uninstalling the bridge manually"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-mx-puppet-slack.md:25
+msgid "If you still have the MX Puppet Slack bridge installed on your Matrix server, the playbook can no longer help you uninstall it and you will need to do it manually. To uninstall manually, run these commands on the server:"
+msgstr ""

@@ -1,0 +1,41 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2018-2026, Slavi Pantaleev, Aine Etke, MDAD community members
+# This file is distributed under the same license as the matrix-docker-ansible-deploy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: matrix-docker-ansible-deploy \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-02-13 10:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../../docs/configuring-playbook-postgres-backup.md:9
+msgid "Setting up Postgres backup (optional)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-postgres-backup.md:11
+msgid "The playbook can install and configure [docker-postgres-backup-local](https://github.com/prodrigestivill/docker-postgres-backup-local) for you."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-postgres-backup.md:13
+msgid "The [Ansible role for docker-postgres-backup-local](https://github.com/mother-of-all-self-hosting/ansible-role-postgres-backup) is developed and maintained by [the MASH (mother-of-all-self-hosting) project](https://github.com/mother-of-all-self-hosting). For details about configuring docker-postgres-backup-local, you can check them via:"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-postgres-backup.md:14
+msgid "🌐 [the role's documentation at the MASH project](https://github.com/mother-of-all-self-hosting/ansible-role-postgres-backup/blob/main/docs/configuring-postgres-backup.md) online"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-postgres-backup.md:15
+msgid "📁 `roles/galaxy/postgres_backup/docs/configuring-postgres-backup.md` locally, if you have [fetched the Ansible roles](installing.md#update-ansible-roles)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-postgres-backup.md:17
+msgid "**Note**: for a more complete backup solution (one that includes not only Postgres, but also other configuration/data files), you may wish to look into [BorgBackup](configuring-playbook-backup-borg.md) instead."
+msgstr ""
