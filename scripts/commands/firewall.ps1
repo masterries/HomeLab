@@ -41,16 +41,18 @@
          the jump host to SSH of the lab VMs. From then on every connection checks that
          certificate. Then: check the adapter mapping, install the split-horizon DNS drop-in,
          update OPNsense to the latest 26.7.x (the images are only released for 26.7; the
-         Hyper-V fixes came in 26.7.6/26.7.7), reboot if needed, and renew the GUI certificate
-         in place when it is due (Update-GuiCertificate).
+         Hyper-V fixes came in 26.7.6/26.7.7), reboot if needed, and report on the GUI
+         certificate (Show-GuiCertificate). A new firewall's first GUI certificate comes from
+         the offline root (it is built before OpenBao exists); from then on Ansible renews it
+         from OpenBao's intermediate CA (.\lab.ps1 deploy firewall, ansible\playbooks\firewall.yml;
+         lab.ps1 up runs it when it is due).
       8. Checks: version, interfaces, DNS answers seen from your PC.
 
     RE-RUNS
     If the firewall VM already exists (built by this script, recognised by a tag in its Notes),
     nothing is rebuilt: the VM is started if it is off, its SSH setup (host certificate when
     due, sshd drop-in, the SSH CAs user ansible accepts) and the DNS drop-in are re-applied, a
-    pending update or reboot is finished, the GUI certificate is renewed in place when it
-    expires within 30 days or does not come from the lab root CA, and the checks run.
+    pending update or reboot is finished, and the checks run.
     Changes to opnsense\ or to
     config\lab.json (VMs, "published") are only applied by a rebuild. Use -Rebuild to throw
     it away and build it again from the repository (the "cattle, not pets" idea: servers are
@@ -159,6 +161,6 @@ else {
 }
 Install-DnsDropIn
 Update-Firewall
-Update-GuiCertificate
+Show-GuiCertificate
 Test-Firewall
 Write-Host "Firewall ready: https://firewall.$($lab.domain) (user root; password to the clipboard: .\lab.ps1 secret -Pc opnsense/root-password)"

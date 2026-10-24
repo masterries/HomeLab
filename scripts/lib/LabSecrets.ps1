@@ -370,6 +370,20 @@ function Get-LabServedCertificate([string]$HostName, [int]$Port = 443) {
     catch { return $null }
 }
 
+# Which CA key signed a certificate: its "authority key identifier" extension (2.5.29.35), as hex,
+# equals the issuing CA's "subject key identifier". Comparing the two tells which of several CAs
+# with similar names (the root, the current or a rotated intermediate) issued it. '' if none.
+function Get-LabAuthorityKeyId($Certificate) {
+    $extension = $Certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.35' }
+    # DER: SEQUENCE { [0] keyIdentifier ... }; byte 2 is the tag 0x80, byte 3 its length.
+    if (-not $extension -or $extension.RawData[2] -ne 0x80) { return '' }
+    return -join ($extension.RawData[4..(3 + $extension.RawData[3])] | ForEach-Object { $_.ToString('X2') })
+}
+
+function Get-LabSubjectKeyId($Certificate) {
+    return "$(($Certificate.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509SubjectKeyIdentifierExtension] }).SubjectKeyIdentifier)"
+}
+
 # What has to be renewed soon. Certificates expire, and a renewal only happens when the script
 # that does it runs; lab.ps1 up (after every Windows restart) asks this function and
 # runs the right script when something is due. Checked (all public, no login needed):
@@ -379,8 +393,11 @@ function Get-LabServedCertificate([string]$HostName, [int]$Port = 443) {
 #                                    when the published copy differs from the PC's
 #   the intermediate CA              400 days before              lab.ps1 deploy vault
 #   Keycloak's TLS certificate       30 days before               lab.ps1 deploy keycloak
-# Not here: the firewall's GUI certificate (lab.ps1 firewall renews it on every run, which
-# lab.ps1 up starts anyway) and the Matrix certificates (Traefik renews them itself).
+#   the firewall's GUI certificate   30 days before, and when it  lab.ps1 deploy firewall
+#                                    is not from the current
+#                                    intermediate (a new firewall
+#                                    starts with one from the root)
+# Not here: the Matrix certificates (Traefik renews them itself).
 # Returns a list of @{ What; Action }: Action is the lab.ps1 command that renews it (Invoke-LabMaintenance
 # in LabVault.ps1 runs it).
 function Get-LabMaintenanceDue {
@@ -401,8 +418,8 @@ function Get-LabMaintenanceDue {
         }
     }
     # Renewed on the PC, but not published yet? lib\LabPki.ps1 also renews the CRL when it
-    # signs something else (the firewall's GUI certificate), and only lab.ps1 deploy vault copies
-    # it to the vault VM. So the published copy is compared with this PC's (as bytes).
+    # signs something else (the first GUI certificate of a new firewall), and only lab.ps1 deploy
+    # vault copies it to the vault VM. So the published copy is compared with this PC's (as bytes).
     $publishedCrl = Join-Path $script:LabKeysDir 'pki\pub\root-ca.crl'
     if (Test-Path $publishedCrl) {
         try {
@@ -413,6 +430,7 @@ function Get-LabMaintenanceDue {
         }
         catch { }
     }
+    $intermediate = $null
     try {
         $pem = (Invoke-LabBao GET 'pki_int/cert/ca').data.certificate
         $intermediate = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (, [Text.Encoding]::ASCII.GetBytes($pem))
@@ -421,6 +439,15 @@ function Get-LabMaintenanceDue {
         }
     }
     catch { }
+    $firewall = Get-LabServedCertificate "firewall.$($script:LabConfig.domain)" 443
+    if ($firewall -and $intermediate) {
+        if ($firewall.NotAfter -lt $now.AddDays(30)) {
+            $due += @{ What = "the firewall's GUI certificate (valid until $($firewall.NotAfter.ToString('yyyy-MM-dd')))"; Action = @('deploy', 'firewall') }
+        }
+        elseif ((Get-LabAuthorityKeyId $firewall) -ne (Get-LabSubjectKeyId $intermediate)) {
+            $due += @{ What = "the firewall's GUI certificate (issued by $($firewall.Issuer -replace '^CN=', ''), not by the current intermediate)"; Action = @('deploy', 'firewall') }
+        }
+    }
     $keycloak = Get-LabServedCertificate "keycloak.$($script:LabConfig.domain)" 443
     if ($keycloak -and $keycloak.NotAfter -lt $now.AddDays(30)) {
         $due += @{ What = "Keycloak's TLS certificate (valid until $($keycloak.NotAfter.ToString('yyyy-MM-dd')))"; Action = @('deploy', 'keycloak') }

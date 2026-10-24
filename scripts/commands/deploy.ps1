@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | keycloak | matrix | all
+    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | firewall | keycloak | matrix | all
 
 .DESCRIPTION
     Runs on the Windows host, as your own Windows user (no administrator rights needed). The work
@@ -10,6 +10,10 @@
     vault      OpenBao on the VM "vault": the lab's secrets manager, its intermediate CA and its SSH
                CA (lib\LabVault.ps1, Invoke-LabVaultDeploy). First of all services: everything else
                gets its secrets and certificates from it.
+    firewall   The running firewall's configuration (ansible\playbooks\firewall.yml, profile
+               "firewall"): its web GUI certificate, renewed when due with a key made on the
+               firewall and signed by OpenBao's intermediate CA (a new firewall starts with one from
+               the offline root, see lab.ps1 firewall). "lab.ps1 up" runs it when it is due.
     keycloak   Keycloak, the identity provider (ansible\playbooks\keycloak.yml, profile "keycloak"):
                secrets from OpenBao (created there on the very first run), TLS certificate from
                OpenBao's intermediate CA, Docker, Keycloak + PostgreSQL, then the realm "lab", the
@@ -21,7 +25,7 @@
                MDAD inventory, the Matrix secrets in OpenBao), then ansible\bin\deploy-matrix
                (profile "matrix": MDAD's "install-all", its self-check, mas-cli doctor and
                ansible\playbooks\matrix-check.yml). Nothing is downloaded from GitHub.
-    all        vault, keycloak, matrix - in that order, stopping at the first failure.
+    all        vault, firewall, keycloak, matrix - in that order, stopping at the first failure.
 
     A snapshot of OpenBao follows every keycloak and matrix run (also after a failure): secrets
     created by a first deployment exist only in OpenBao.
@@ -30,7 +34,7 @@
     ("published" in config\lab.json). Safe to run repeatedly: every step is idempotent.
 
 .PARAMETER Target
-    vault, keycloak, matrix or all.
+    vault, firewall, keycloak, matrix or all.
 
 .PARAMETER RotateIntermediate
     vault: make a new intermediate CA now (see Invoke-LabVaultDeploy).
@@ -54,7 +58,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('vault', 'keycloak', 'matrix', 'all')]
+    [ValidateSet('vault', 'firewall', 'keycloak', 'matrix', 'all')]
     [string]$Target,
     [switch]$RotateIntermediate,
     [switch]$Setup
@@ -71,6 +75,12 @@ function Invoke-LabDeployRun([string]$RunName, [string]$What) {
     try { Backup-LabOpenBao }
     catch { Write-Warning "OpenBao snapshot failed: $($_.Exception.Message)" }
     if ($code -ne 0) { throw "$What failed on ansible-control (exit code $code)." }
+}
+
+function Deploy-LabFirewall {
+    Write-Host '== Firewall: web GUI certificate from OpenBao''s intermediate CA, when due (firewall.yml) =='
+    Invoke-LabRun 'firewall'
+    if ($LASTEXITCODE -ne 0) { throw "firewall.yml failed on ansible-control (exit code $LASTEXITCODE)." }
 }
 
 function Deploy-LabKeycloak {
@@ -101,10 +111,12 @@ function Deploy-LabMatrix {
 
 switch ($Target) {
     'vault' { Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate }
+    'firewall' { Deploy-LabFirewall }
     'keycloak' { Deploy-LabKeycloak }
     'matrix' { Deploy-LabMatrix }
     'all' {
         Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate
+        Deploy-LabFirewall
         Deploy-LabKeycloak
         Deploy-LabMatrix
     }

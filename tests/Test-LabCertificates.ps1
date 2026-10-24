@@ -6,8 +6,10 @@
 .DESCRIPTION
     Read-only. Needs the lab root CA imported into Windows (.\lab.ps1 trust);
     without it every "trusted" check fails. Expected issuers:
-      firewall.lab.internal, vault.lab.internal:8200   the offline root CA
-      keycloak, matrix, element, lab.internal          the current intermediate CA in OpenBao
+      vault.lab.internal:8200                          the offline root CA
+      firewall, keycloak, matrix, element, lab.internal  the current intermediate CA in OpenBao
+    (A newly built firewall starts with a certificate from the root; lab.ps1 up and
+    lab.ps1 deploy firewall move it to the intermediate.)
     The "current intermediate" is compared by key identifier (authority key identifier of the
     certificate = subject key identifier of OpenBao's issuing CA), as lab.ps1 deploy matrix does.
 
@@ -21,17 +23,11 @@ $domain = $script:LabConfig.domain
 $root = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $script:LabRootCaCert
 $issuingPem = (Invoke-LabBao GET 'pki_int/cert/ca').data.certificate
 $issuing = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (, [Text.Encoding]::ASCII.GetBytes($issuingPem))
-$issuingKeyId = ($issuing.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509SubjectKeyIdentifierExtension] }).SubjectKeyIdentifier
-$rootKeyId = ($root.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509SubjectKeyIdentifierExtension] }).SubjectKeyIdentifier
-
-function Get-AuthorityKeyId($Certificate) {
-    $extension = $Certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.35' }
-    if (-not $extension -or $extension.RawData[2] -ne 0x80) { return '' }
-    return -join ($extension.RawData[4..(3 + $extension.RawData[3])] | ForEach-Object { $_.ToString('X2') })
-}
+$issuingKeyId = Get-LabSubjectKeyId $issuing
+$rootKeyId = Get-LabSubjectKeyId $root
 
 $endpoints = @(
-    @{ Host = "firewall.$domain"; Port = 443; Issuer = 'root' },
+    @{ Host = "firewall.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = "vault.$domain"; Port = 8200; Issuer = 'root' },
     @{ Host = "keycloak.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = "matrix.$domain"; Port = 443; Issuer = 'intermediate' },
@@ -43,7 +39,7 @@ foreach ($e in $endpoints) {
     $cert = Get-LabServedCertificate $e.Host $e.Port
     if (-not $cert) { Assert-LabTest "$($e.Host):$($e.Port) answers" $false; continue }
     $expected = if ($e.Issuer -eq 'root') { $rootKeyId } else { $issuingKeyId }
-    Assert-LabTest "$($e.Host):$($e.Port) issued by the $($e.Issuer) CA" ((Get-AuthorityKeyId $cert) -eq $expected) ($cert.Issuer -replace '^CN=', '')
+    Assert-LabTest "$($e.Host):$($e.Port) issued by the $($e.Issuer) CA" ((Get-LabAuthorityKeyId $cert) -eq $expected) ($cert.Issuer -replace '^CN=', '')
     Assert-LabTest "$($e.Host):$($e.Port) valid for more than 30 days" ($cert.NotAfter -gt (Get-Date).AddDays(30)) "until $($cert.NotAfter.ToString('yyyy-MM-dd'))"
     $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
     $chain.ChainPolicy.RevocationMode = 'Online'

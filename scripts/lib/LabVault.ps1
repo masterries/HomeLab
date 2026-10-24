@@ -257,7 +257,7 @@ function Invoke-LabVaultDeploy {
         #                   (pc-admin: changing how OpenBao works is an administrator's decision)
         $controlIp = ($script:LabConfig.vms | Where-Object { $_.name -eq 'ansible-control' }).ip
         $tokenRoles = [ordered]@{
-            'ansible-run'    = @{ allowed_policies = @('ansible-keycloak', 'ansible-matrix', 'ansible-web'); token_explicit_max_ttl = '2h' }
+            'ansible-run'    = @{ allowed_policies = @('ansible-keycloak', 'ansible-matrix', 'ansible-firewall', 'ansible-web'); token_explicit_max_ttl = '2h' }
             'ansible-config' = @{ allowed_policies = @('openbao-config'); token_explicit_max_ttl = '30m' }
         }
         foreach ($role in $tokenRoles.Keys) {

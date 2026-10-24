@@ -409,8 +409,9 @@
        <ca>: the lab root CA certificate only, never its key: the firewall does not issue
        certificates, it only presents one. <cert>: the GUI certificate for
        firewall.{{DOMAIN}}, signed by the offline root CA on your PC (lab.ps1 firewall with
-       lib\LabPki.ps1), together with its private key. On a running firewall,
-       lab.ps1 firewall renews both in place (opnsense\lab-gui-cert.php). -->
+       lib\LabPki.ps1), together with its private key. On a running firewall, Ansible replaces
+       it with one from OpenBao's intermediate CA, which gets a <ca> entry of its own
+       (lab.ps1 deploy firewall: ansible\playbooks\firewall.yml, opnsense\lab-gui-cert.php). -->
   <ca>
     <refid>{{CA_REFID}}</refid>
     <descr>DeployableServer Lab Root CA 2026</descr>

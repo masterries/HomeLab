@@ -474,8 +474,8 @@ finally {
 # Certificates expire, and they are only renewed when the script that renews them runs. This
 # script runs after every Windows restart anyway, so it checks what is due (Get-LabMaintenanceDue
 # in LabSecrets.ps1: OpenBao's certificate, the root CA's revocation list, the intermediate CA,
-# Keycloak's certificate) and runs the deployment script that renews it. The firewall's GUI
-# certificate was already checked in step 4, Traefik renews the Matrix certificates itself.
+# Keycloak's and the firewall's certificates) and runs the deployment that renews it. Traefik
+# renews the Matrix certificates itself.
 $maintenanceDone = $false
 if (Test-Path (Join-Path $keyDir 'openbao\unseal-a.dpapi')) {
     Write-Host '== 7/7 Maintenance: renewals that are due =='

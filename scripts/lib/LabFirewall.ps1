@@ -343,8 +343,9 @@ function Get-Secrets {
 # 3. GUI certificate for a NEW firewall (its config.xml must contain one): key and request
 #    made here in a temporary folder, signed by the lab's offline root CA (lib\LabPki.ps1;
 #    a copy of the certificate stays in keys\pki\issued). The key is not kept: it goes only into
-#    the rendered config.xml, which is deleted after the import. A RUNNING firewall gets a new
-#    certificate in place instead, with a key made on the firewall (Update-GuiCertificate).
+#    the rendered config.xml, which is deleted after the import. The root signs only this first
+#    certificate (the firewall is built before OpenBao exists); a RUNNING firewall gets new ones
+#    from OpenBao's intermediate CA, with a key made on the firewall (ansible\playbooks\firewall.yml).
 #    Only the domain name goes into the certificate, no IP addresses: the root's name
 #    constraints allow names under the lab domain only.
 function Get-GuiCertificate {
@@ -793,7 +794,8 @@ function Update-Firewall {
 
 # 7d. The GUI certificate of the RUNNING firewall, seen from your PC: valid when its chain ends
 #     at the lab root CA (keys\pki\root-ca.crt, compared by thumbprint), it names
-#     firewall.<domain> and it is valid for more than 30 more days.
+#     firewall.<domain> and it is valid for more than 30 more days. The chain may run through
+#     OpenBao's intermediate CA (Windows fetches it from the address in the certificate, AIA).
 function Test-GuiCertificate {
     $name = "firewall.$($lab.domain)"
     try {
@@ -816,50 +818,18 @@ function Test-GuiCertificate {
     return ($chained -and $served.NotAfter -gt (Get-Date).AddDays(30) -and $served.GetNameInfo('DnsName', $false) -eq $name)
 }
 
-# 7e. Renew the GUI certificate in place when Test-GuiCertificate says so. The usual way to get a
-#     certificate without moving the private key: the firewall makes a new key and a
-#     certificate signing request (CSR) in a private temporary folder; only the CSR comes to the
-#     PC, the offline root CA signs it, and the certificate goes back. opnsense\lab-gui-cert.php
-#     (run as root on the firewall) puts key and certificate into config.xml, then the web server
-#     restarts. The same thing as uploading a certificate under System > Trust in the GUI, as
-#     code. No rebuild needed, for example when the certificate expires (397 days).
-function Update-GuiCertificate {
-    $sshConfig = Get-LabSshConfig
+# 7e. Report on the GUI certificate. It is RENEWED by Ansible, not here: ansible\playbooks\firewall.yml
+#     (.\lab.ps1 deploy firewall) has the firewall make a new key and a signing request, OpenBao's
+#     intermediate CA signs it, and opnsense\lab-gui-cert.php puts both into config.xml - like
+#     uploading a certificate under System > Trust, as code. lab.ps1 up runs it when the
+#     certificate is due or not yet from the intermediate (Get-LabMaintenanceDue in LabSecrets.ps1).
+#     Only a new firewall's first certificate comes from the offline root (Get-GuiCertificate).
+function Show-GuiCertificate {
     $name = "firewall.$($lab.domain)"
-    # The web GUI starts after sshd (after a boot, the script has only waited for port 22). Only
-    # a certificate that is actually served and found wanting is a reason for a new key; a port
-    # that does not answer at all is reported as such.
+    # The web GUI starts after sshd (after a boot, the script has only waited for port 22).
     Wait-TcpPort $lab.firewall.hostIp 443 120
-    if (Test-GuiCertificate) { Write-Host "Certificate: $name valid (lab root CA, more than 30 days left)"; return }
-    Write-Host "Certificate: $name is due; new key on the firewall, signed by the lab root CA ..."
-    # openssl genpkey writes the key in PKCS#8; umask 077 makes the folder and files private.
-    $answer = Invoke-FirewallSsh "umask 077 && d=`$(mktemp -d /tmp/lab-gui.XXXXXX) && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out `$d/gui.key 2>/dev/null && openssl req -new -key `$d/gui.key -subj /CN=$name -out `$d/firewall-gui.csr && echo `$d"
-    $remote = "$(@($answer)[-1])".Trim()
-    if ($remote -notmatch '^/tmp/lab-gui\.[A-Za-z0-9]+$') { throw "Unexpected answer from the firewall: $remote" }
-    $local = Join-Path $secretsDir 'gui-request'
-    try {
-        New-Item -ItemType Directory -Force -Path $local | Out-Null
-        $csr = Join-Path $local 'firewall-gui.csr'
-        & scp -q -F $sshConfig -o LogLevel=ERROR "firewall:$remote/firewall-gui.csr" $csr
-        if ($LASTEXITCODE -ne 0) { throw 'Copying the certificate request from the firewall failed.' }
-        $crt = Join-Path $keysDir 'pki\issued\firewall-gui.crt'
-        Invoke-LabRootCaSign -Csr $csr -Kind Server -DnsName $name -OutFile $crt
-        $php = Join-Path $projectRoot 'opnsense\lab-gui-cert.php'
-        & scp -q -F $sshConfig -o LogLevel=ERROR $crt $script:LabRootCaCert $php "firewall:$remote/"
-        if ($LASTEXITCODE -ne 0) { throw 'Copying the certificate to the firewall failed.' }
-        Invoke-FirewallSsh "sudo /usr/local/bin/php $remote/lab-gui-cert.php $remote/gui.key $remote/firewall-gui.crt $remote/root-ca.crt 2>&1 && sudo /usr/local/etc/rc.restart_webgui 2>&1" | Out-Null
-    }
-    finally {
-        # The key file goes too: from now on it exists only in the firewall's config.xml.
-        Invoke-FirewallSsh "rm -rf $remote" -AllowFailure | Out-Null
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $local
-    }
-    $deadline = (Get-Date).AddSeconds(60)
-    while (-not (Test-GuiCertificate)) {
-        if ((Get-Date) -gt $deadline) { throw "The firewall's web GUI does not serve the new certificate after 60 s." }
-        Start-Sleep -Seconds 3
-    }
-    Write-Host "Certificate: $name renewed in place (key made on the firewall, signed by the lab root CA)"
+    if (Test-GuiCertificate) { Write-Host "Certificate: $name valid (chain to the lab root CA, more than 30 days left)" }
+    else { Write-Warning "The firewall's GUI certificate ($name) is due or not under the lab root CA. Renew it: .\lab.ps1 deploy firewall" }
 }
 
 # 8. Checks from your PC's point of view.

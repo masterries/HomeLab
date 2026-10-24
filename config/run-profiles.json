@@ -25,6 +25,7 @@
     "checks":               { "playbook": "playbooks/checks.yml",         "principals": ["lab-all"] },
     "openbao":              { "playbook": "playbooks/openbao.yml",        "principals": ["host-vault"] },
     "openbao-config":       { "playbook": "playbooks/openbao-config.yml", "principals": [], "policies": ["openbao-config"], "tokenRole": "ansible-config" },
+    "firewall":             { "playbook": "playbooks/firewall.yml",       "principals": ["host-firewall"], "policies": ["ansible-firewall"] },
     "keycloak":             { "playbook": "playbooks/keycloak.yml",       "principals": ["host-keycloak"], "policies": ["ansible-keycloak"] },
     "matrix-prepare":       { "playbook": "playbooks/matrix-prepare.yml", "principals": ["host-matrix"], "policies": ["ansible-matrix"], "syncMdad": true },
     "matrix":               { "command": "bash bin/deploy-matrix install-all", "principals": ["host-matrix"], "policies": ["ansible-matrix"] },

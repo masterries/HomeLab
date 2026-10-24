@@ -1,0 +1,190 @@
+# playbooks/firewall.yml -- the running firewall's web GUI certificate, from OpenBao's
+# intermediate CA
+#
+# Where it runs: on ansible-control (profile "firewall": ".\lab.ps1 deploy firewall", and the
+# maintenance step of ".\lab.ps1 up" when the certificate is due), for the firewall (OPNsense), with
+# an SSH certificate for the firewall only and an OpenBao token of the policy ansible-firewall,
+# which may sign certificates of the PKI role firewall-gui and nothing else.
+#
+# WHY THE INTERMEDIATE, AND WHY HERE
+#   A NEW firewall gets its first GUI certificate from the offline root on the PC, inside the
+#   rendered config.xml (scripts/lib/LabFirewall.ps1, Get-GuiCertificate): it is built before
+#   OpenBao exists, so nothing else could sign it. From then on it is an ordinary server
+#   certificate, like Keycloak's: the key is made on the firewall, only the signing request
+#   travels, and OpenBao's intermediate CA signs it. The offline root then signs only CAs and
+#   OpenBao's own TLS certificate - the fewer signatures, the rarer its key is unlocked.
+#   Enterprise equivalent: an appliance's certificate enrolled from the issuing CA (ACME, SCEP or
+#   an automation job like this one), never from the root.
+#
+# HOW, ON OPNSENSE
+#   OPNsense keeps its configuration in /conf/config.xml and regenerates its files from it, so a
+#   certificate is not just written to a file: opnsense/lab-gui-cert.php puts the key, the
+#   certificate and the intermediate CA into config.xml (what System > Trust in the GUI does), then
+#   the web GUI restarts. The key exists only in a private temporary folder on the firewall until it
+#   is in config.xml.
+#
+# A new certificate is made when the served one expires within 30 days
+# (-e firewall_gui_renew_before=+400d forces one), is not issued by the current intermediate (a new
+# firewall, or a rotated intermediate), or does not name firewall.<domain>. Otherwise nothing
+# changes: changed=0. --check shows whether one is due.
+- name: The firewall's web GUI certificate
+  hosts: firewalls
+  become: true
+  gather_facts: false
+  vars:
+    firewall_gui_name: "firewall.{{ lab_domain }}"
+    firewall_gui_renew_before: +30d
+  tasks:
+    # Read from ansible-control, the way a client sees it. Reads run under --check too (they would
+    # be skipped, and the decision below needs them).
+    - name: The certificate the web GUI serves
+      community.crypto.get_certificate:
+        host: "{{ firewall_gui_name }}"
+        port: 443
+      delegate_to: ansible-control
+      become: false
+      register: firewall_gui_served
+      check_mode: false
+
+    - name: Its details
+      community.crypto.x509_certificate_info:
+        content: "{{ firewall_gui_served.cert }}"
+        valid_at:
+          renewal: "{{ firewall_gui_renew_before }}"
+      delegate_to: ansible-control
+      become: false
+      register: firewall_gui_current
+      check_mode: false
+
+    # The CA certificate is public: OpenBao serves it without a token.
+    - name: OpenBao's issuing CA certificate
+      ansible.builtin.uri:
+        url: "{{ lab_vault_url }}/v1/pki_int/ca/pem"
+        ca_path: "{{ lab_pki_dir }}/root-ca.crt"
+        return_content: true
+      delegate_to: ansible-control
+      become: false
+      register: firewall_gui_issuing_ca
+      check_mode: false
+
+    - name: Its subject key identifier
+      community.crypto.x509_certificate_info:
+        content: "{{ firewall_gui_issuing_ca.content }}"
+      delegate_to: ansible-control
+      become: false
+      register: firewall_gui_issuing_ca_info
+      check_mode: false
+
+    - name: Is a new certificate needed?
+      ansible.builtin.set_fact:
+        firewall_gui_reasons: >-
+          {{ ([] if firewall_gui_current.valid_at.renewal
+                else ['expires on ' ~ (firewall_gui_current.not_after | to_datetime('%Y%m%d%H%M%SZ')).strftime('%Y-%m-%d')])
+             + ([] if firewall_gui_current.authority_key_identifier | default('') == firewall_gui_issuing_ca_info.subject_key_identifier
+                else ['issued by ' ~ firewall_gui_current.issuer.commonName | default('?') ~ ', not by the current intermediate'])
+             + ([] if ('DNS:' ~ firewall_gui_name) in firewall_gui_current.subject_alt_name | default([])
+                else ['does not name ' ~ firewall_gui_name]) }}
+
+    - name: Why
+      ansible.builtin.debug:
+        msg: "New certificate for {{ firewall_gui_name }}: the served one {{ firewall_gui_reasons | join('; ') }}"
+      when: firewall_gui_reasons | length > 0
+      changed_when: ansible_check_mode
+
+    - name: New certificate from OpenBao's intermediate CA
+      when: firewall_gui_reasons | length > 0 and not ansible_check_mode
+      block:
+        - name: A private folder on the firewall
+          ansible.builtin.command: mktemp -d /tmp/lab-gui.XXXXXX
+          register: firewall_gui_tmp
+          changed_when: false
+
+        # FreeBSD's openssl; genpkey writes the key in PKCS#8. umask 077: only root can read it.
+        - name: New key and signing request, made on the firewall
+          ansible.builtin.shell: >-
+            umask 077
+            && openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out {{ firewall_gui_tmp.stdout }}/gui.key
+            && openssl req -new -key {{ firewall_gui_tmp.stdout }}/gui.key -subj /CN={{ firewall_gui_name }} -out {{ firewall_gui_tmp.stdout }}/gui.csr
+          changed_when: false
+
+        - name: The signing request (public)
+          ansible.builtin.slurp:
+            src: "{{ firewall_gui_tmp.stdout }}/gui.csr"
+          register: firewall_gui_csr
+
+        # From ansible-control, which holds the run token (no_log: the token is in the headers).
+        - name: OpenBao signs the request
+          ansible.builtin.uri:
+            url: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}/v1/pki_int/sign/firewall-gui"
+            method: POST
+            headers:
+              X-Vault-Token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+            ca_path: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+            body_format: json
+            body:
+              csr: "{{ firewall_gui_csr.content | b64decode }}"
+              common_name: "{{ firewall_gui_name }}"
+              format: pem
+          delegate_to: ansible-control
+          become: false
+          register: firewall_gui_signed
+          failed_when: false
+          no_log: true
+
+        - name: OpenBao issued the certificate
+          ansible.builtin.assert:
+            that: firewall_gui_signed.status == 200
+            fail_msg: >-
+              OpenBao did not sign the certificate for {{ firewall_gui_name }} (role firewall-gui,
+              HTTP {{ firewall_gui_signed.status }}): {{ firewall_gui_signed.json.errors | default([]) | join(' ') }}
+              {{ 'No run token, or OpenBao predates the role? Run .\lab.ps1 deploy vault, then .\lab.ps1 deploy firewall.' if firewall_gui_signed.status in [400, 403] else '' }}
+            quiet: true
+
+        - name: Certificate and intermediate CA to the firewall
+          ansible.builtin.copy:
+            content: "{{ item.content }}\n"
+            dest: "{{ firewall_gui_tmp.stdout }}/{{ item.file }}"
+            mode: "0600"
+          loop:
+            - { file: gui.crt, content: "{{ firewall_gui_signed.json.data.certificate }}" }
+            - { file: ca.crt, content: "{{ firewall_gui_signed.json.data.issuing_ca }}" }
+          loop_control:
+            label: "{{ item.file }}"
+
+        - name: The helper that writes them into config.xml
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../opnsense/lab-gui-cert.php"
+            dest: "{{ firewall_gui_tmp.stdout }}/lab-gui-cert.php"
+            mode: "0600"
+
+        - name: Into OPNsense's configuration (System > Trust)
+          ansible.builtin.command: >-
+            /usr/local/bin/php {{ firewall_gui_tmp.stdout }}/lab-gui-cert.php
+            {{ firewall_gui_tmp.stdout }}/gui.key {{ firewall_gui_tmp.stdout }}/gui.crt {{ firewall_gui_tmp.stdout }}/ca.crt
+          changed_when: true
+
+        - name: Restart the web GUI with it
+          ansible.builtin.command: /usr/local/etc/rc.restart_webgui
+          changed_when: true
+
+      always:
+        - name: Remove the private folder (the key now lives only in config.xml)
+          ansible.builtin.file:
+            path: "{{ firewall_gui_tmp.stdout }}"
+            state: absent
+          when: firewall_gui_tmp.stdout is defined and firewall_gui_tmp.stdout is match('^/tmp/lab-gui\\.')
+
+    - name: The web GUI serves the new certificate
+      community.crypto.get_certificate:
+        host: "{{ firewall_gui_name }}"
+        port: 443
+      delegate_to: ansible-control
+      become: false
+      register: firewall_gui_new
+      until: >-
+        firewall_gui_new.cert is defined and
+        (firewall_gui_new.cert | community.crypto.x509_certificate_info).authority_key_identifier | default('')
+        == firewall_gui_issuing_ca_info.subject_key_identifier
+      retries: 20
+      delay: 3
+      when: firewall_gui_reasons | length > 0 and not ansible_check_mode
