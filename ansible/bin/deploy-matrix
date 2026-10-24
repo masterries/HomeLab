@@ -30,6 +30,14 @@ case "$recipe" in
   install-all|setup-all) ;;
   *) echo "deploy-matrix: unknown recipe $recipe" >&2; exit 2 ;;
 esac
+# Extra arguments (".\lab.ps1 run matrix --check", say) are refused rather than dropped: the four
+# runs below would otherwise go ahead for real, and MDAD's install cannot run in check mode
+# anyway. For one MDAD tag with your own options, use the profile "mdad"
+# (".\lab.ps1 run mdad --tags=self-check").
+if [[ $# -gt 1 ]]; then
+  echo "deploy-matrix: no further arguments (${*:2}): MDAD's $recipe cannot be a dry run. Use the profile mdad for single tags." >&2
+  exit 2
+fi
 
 cd "$HOME/mdad"
 echo "== MDAD: the tags of just $recipe, through lab-setup.yml (the first run downloads Docker and the images; this takes a while) =="
