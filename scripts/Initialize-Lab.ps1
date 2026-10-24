@@ -161,7 +161,6 @@ $dotVagrant = Join-Path $vagrantDir '.vagrant'
 $machineStore = Join-Path $StorageRoot "machines\$(Split-Path -Leaf $projectRoot)\vagrant"
 $keyDir = Join-Path $projectRoot 'keys'
 $sshConfig = Join-Path $keyDir 'ssh_config'
-$legacyKnownHosts = Join-Path $keyDir 'known_hosts'
 # Addresses and the domain come from config\lab.json, the lab's main source for this data
 # (also read by the Vagrantfile and New-LabFirewall.ps1). The switch names must match
 # vagrant\Vagrantfile, New-LabFirewall.ps1 and Install-LabHostNetwork.ps1 (which also creates
@@ -341,9 +340,6 @@ try {
     # (LabSsh.ps1).
     Write-LabSshConfig
     Write-Host "Written: $sshConfig"
-    # Earlier versions learned host keys on first use into keys\known_hosts; the certificates
-    # replace that file.
-    Remove-Item -Force -ErrorAction SilentlyContinue $legacyKnownHosts
     # The Linux VM names come from the Vagrantfile (all of them are lab VMs behind the
     # firewall; the filter only matters if the Vagrantfile ever defines a VM called "firewall").
     $states = Get-VagrantMachineStates

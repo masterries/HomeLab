@@ -20,7 +20,8 @@
       - an Ansible run's certificate opens only its hosts, and a PC certificate does not work
         from ansible-control (source-address);
       - a host key in the revocation list is refused even with its certificate;
-      - sshd on every machine runs with the lab's settings.
+      - sshd on every machine runs with the lab's settings, and no plain key logs in as ansible
+        anywhere (no authorized_keys on the VMs, only CA lines on the firewall).
 
 .EXAMPLE
     .\tests\Test-LabSshCertificates.ps1
@@ -52,7 +53,7 @@ function New-TestKey([string]$Path) {
 # firewall keeps the PC's own certificate (IdentityFile lines add up in ssh_config, and the
 # firewall's block comes first), so the TARGET's decision is what is tested.
 function New-TestConfig([string]$Folder, [string]$IdentityFile, [switch]$KeepPcIdentityForJump) {
-    $text = Get-LabSshConfigText -IdentityFile $IdentityFile -NoLegacyKey
+    $text = Get-LabSshConfigText -IdentityFile $IdentityFile
     if ($KeepPcIdentityForJump) {
         $pcKey = $script:LabSshPcKey -replace '\\', '/'
         $text = $text.Replace("    HostKeyAlias firewall.$domain", "    HostKeyAlias firewall.$domain`n    IdentityFile `"$pcKey`"`n    CertificateFile `"$pcKey-cert.pub`"")
@@ -149,14 +150,13 @@ try {
     $permitOpen = "$($settings | Where-Object { $_ -like 'permitopen *' })"
     Assert-LabTest 'firewall: sshd limited to the jump host job' ($missing.Count -eq 0 -and $permitOpen -match ':22' -and $permitOpen -notmatch 'any') $(if ($missing) { "missing: $($missing -join '; ')" } else { $permitOpen })
 
-    # --- The old lab key -------------------------------------------------------------------------------
-    if (-not (Test-Path $script:LabSshLegacyKey)) {
-        foreach ($machine in $machines) {
-            $count = "$(Invoke-LabSsh $machine 'grep -c ansible@deployableserver-lab ~/.ssh/authorized_keys 2>/dev/null || true' -ConfigFile $sshConfig)".Trim()
-            Assert-LabTest "$machine`: the old lab key is not accepted any more" (-not $count -or $count -eq '0')
-        }
+    # --- No plain keys --------------------------------------------------------------------------------
+    foreach ($vm in $vms) {
+        $state = "$(Invoke-LabSsh $vm 'test -e ~/.ssh/authorized_keys && echo present || echo absent' -ConfigFile $sshConfig)".Trim()
+        Assert-LabTest "$vm`: no authorized_keys for ansible (certificates only)" ($state -eq 'absent')
     }
-    else { Write-Host '  (old lab key keys\ansible_ed25519 still there: retire it with .\scripts\Complete-LabSshMigration.ps1)' }
+    $firewallKeys = @(Invoke-LabSsh 'firewall' 'cat ~/.ssh/authorized_keys' -ConfigFile $sshConfig | Where-Object { "$_".Trim() })
+    Assert-LabTest 'firewall: authorized_keys of ansible holds only cert-authority lines' ($firewallKeys.Count -ge 1 -and @($firewallKeys | Where-Object { "$_" -notlike 'cert-authority,*' }).Count -eq 0) "$($firewallKeys.Count) line(s)"
 
     # --- Hyper-V: KVP and Vagrant ------------------------------------------------------------------------
     if ($elevated) {

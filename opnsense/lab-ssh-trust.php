@@ -43,11 +43,8 @@ if (count($lines) === 0) {
     exit(1);
 }
 foreach ($lines as $line) {
-    // Only CA lines with principals and source addresses. TRANSITION: the old shared lab key
-    // (comment ansible@deployableserver-lab) until scripts/Complete-LabSshMigration.ps1 retires it.
-    $isCa = preg_match('/^cert-authority,principals="[a-z0-9,.-]+",from="[0-9.,\/]+" ssh-ed25519 [A-Za-z0-9+\/]+=* [a-z0-9-]+$/', $line);
-    $isOldLabKey = preg_match('/^ssh-ed25519 [A-Za-z0-9+\/]+=* ansible@deployableserver-lab$/', $line);
-    if (!$isCa && !$isOldLabKey) {
+    // Only CA lines with principals and source addresses: no plain key ever logs in as ansible.
+    if (!preg_match('/^cert-authority,principals="[a-z0-9,.-]+",from="[0-9.,\/]+" ssh-ed25519 [A-Za-z0-9+\/]+=* [a-z0-9-]+$/', $line)) {
         fwrite(STDERR, "refusing an unexpected line: {$line}\n");
         exit(1);
     }

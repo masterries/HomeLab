@@ -63,7 +63,7 @@ try {
     $caLines = @($authorized | Where-Object { $_ -like 'cert-authority,principals="lab-all,host-firewall",from="*" ssh-ed25519 *' })
     $offlineCa = (([IO.File]::ReadAllText("$($script:LabSshOfflineCa).pub").Trim() -split '\s+')[1])
     Assert-LabTest 'ansible accepts the lab SSH CAs (cert-authority, principals, from)' ($caLines.Count -ge 1 -and ($caLines -join "`n").Contains($offlineCa)) "$($caLines.Count) CA line(s)"
-    Assert-LabTest 'no other key lines than the CAs (and the old lab key while it exists)' (@($authorized | Where-Object { $caLines -notcontains $_ -and $_ -notlike '* ansible@deployableserver-lab' }).Count -eq 0)
+    Assert-LabTest 'no other key lines than the CAs' (@($authorized | Where-Object { $caLines -notcontains $_ }).Count -eq 0)
     $nonDpapi = @(Get-ChildItem (Join-Path $script:LabKeysDir 'opnsense') -File | Where-Object { $_.Extension -ne '.dpapi' })
     Assert-LabTest 'keys\opnsense holds only DPAPI files' ($nonDpapi.Count -eq 0) (($nonDpapi | ForEach-Object Name) -join ', ')
 }

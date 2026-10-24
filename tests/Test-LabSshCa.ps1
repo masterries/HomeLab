@@ -92,9 +92,7 @@ try {
     $controlIp = ($script:LabConfig.vms | Where-Object { $_.name -eq 'ansible-control' }).ip
     $firewallLines = @(Get-Content $script:LabSshFirewallKeys | Where-Object { $_ })
     $caLines = @($firewallLines | Where-Object { $_ -like "cert-authority,principals=`"lab-all,host-firewall`",from=`"$($script:LabConfig.firewall.pcIp),$controlIp`" ssh-ed25519 *" })
-    $legacy = @($firewallLines | Where-Object { $_ -like '* ansible@deployableserver-lab' })
-    Assert-LabTest 'firewall authorized_keys: CA lines with principals and from=' ($caLines.Count -ge 1 -and ($caLines.Count + $legacy.Count) -eq $firewallLines.Count) "$($caLines.Count) CA line(s), $($legacy.Count) old lab key line(s)"
-    Assert-LabTest 'firewall authorized_keys: the old lab key only while keys\ansible_ed25519.pub exists' (($legacy.Count -eq 0) -eq (-not (Test-Path "$($script:LabSshLegacyKey).pub")))
+    Assert-LabTest 'firewall authorized_keys: only CA lines with principals and from=' ($caLines.Count -ge 1 -and $caLines.Count -eq $firewallLines.Count) "$($caLines.Count) CA line(s)"
     $config = Get-Content -Raw $script:LabSshConfigFile
     Assert-LabTest 'ssh_config: host keys only with a certificate, strictly checked' ($config -match 'HostKeyAlgorithms ssh-ed25519-cert-v01@openssh\.com' -and $config -match 'StrictHostKeyChecking yes' -and $config -notmatch 'accept-new')
     Assert-LabTest 'ssh_config: firewall checked under its name (HostKeyAlias)' ($config -match "HostKeyAlias firewall\.$([regex]::Escape($script:LabConfig.domain))")

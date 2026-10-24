@@ -87,9 +87,6 @@ require "json"
 #   known_hosts         the CAs a host certificate must come from (for ansible-control)
 #   revoked_host_keys   host keys of rebuilt machines that must not be accepted any more
 SSH_DIR = File.expand_path("../keys/ssh", __dir__)
-# TRANSITION: the old shared lab key. While keys/ansible_ed25519.pub exists, it is still uploaded
-# and accepted; scripts/Complete-LabSshMigration.ps1 retires it.
-LAB_KEY = File.expand_path("../keys/ansible_ed25519", __dir__)
 # Written by Initialize-Lab.ps1; contains the jump host "firewall" (used by proxy_command below).
 # It is used without quotes in the proxy command below, so the path must not contain spaces.
 SSH_CONFIG = File.expand_path("../keys/ssh_config", __dir__)
@@ -122,10 +119,9 @@ if %w[up provision reload ssh ssh-config halt resume].include?(ARGV.first)
 end
 # Provisioning scripts shared by all lab VMs
 PROVISION_DIR = File.expand_path("../provision", __dir__)
-# Upload folders inside the VMs. The file provisioner copies files as the SSH user "vagrant",
+# Upload folder inside the VMs. The file provisioner copies files as the SSH user "vagrant",
 # which cannot write to other users' home directories or /etc. The shell scripts (running as
 # root) install the files from there to their final place and delete the uploaded copies.
-KEY_STAGING = "/home/vagrant/ansible-keys"
 SSH_STAGING = "/home/vagrant/lab-ssh"
 
 # The lab VMs from config/lab.json, e.g.
@@ -200,11 +196,6 @@ Vagrant.configure("2") do |config|
   #
   # All VMs: user "ansible", which logs in with SSH certificates. Ansible connects to every VM
   # as this user; "vagrant" stays Vagrant's own account (with Vagrant's per-VM key).
-  # TRANSITION: the old lab key's public half, only while it exists (see LAB_KEY).
-  if File.exist?("#{LAB_KEY}.pub")
-    config.vm.provision "lab-key-pub", type: "file",
-      source: "#{LAB_KEY}.pub", destination: "#{KEY_STAGING}/ansible_ed25519.pub"
-  end
   # The CAs a login certificate must come from. If keys/ssh does not exist yet, the upload is
   # skipped and harden-ssh.sh aborts with a hint; other vagrant commands still work.
   if File.exist?(File.join(SSH_DIR, "lab_user_ca.pub"))
@@ -212,8 +203,7 @@ Vagrant.configure("2") do |config|
       source: File.join(SSH_DIR, "lab_user_ca.pub"), destination: "#{SSH_STAGING}/lab_user_ca.pub"
   end
   config.vm.provision "ansible-user", type: "shell",
-    path: File.join(PROVISION_DIR, "bootstrap-ansible-user.sh"),
-    args: [File.exist?("#{LAB_KEY}.pub") ? "keep-lab-key" : "retire-lab-key"]
+    path: File.join(PROVISION_DIR, "bootstrap-ansible-user.sh")
   # Own SSH host keys per VM (the box ships the same keys for every VM), published to the PC
   # through Hyper-V KVP; trust in the lab's SSH CAs; certificate logins only, from the jump host
   # and ansible-control only (the addresses come from config/lab.json).

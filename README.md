@@ -753,8 +753,8 @@ back in when it breaks.
   OpenSSH clients of their own, and the lab is tested with Windows' one.
 - **An elevated PowerShell** ("Run as administrator") for everything that
   manages Hyper-V or Windows networking: `Install-LabHostNetwork.ps1`,
-  `Initialize-Lab.ps1`, `New-LabFirewall.ps1`, `Remove-Lab.ps1`,
-  `Complete-LabSshMigration.ps1` and `vagrant` itself. (`Initialize-Lab.ps1` on
+  `Initialize-Lab.ps1`, `New-LabFirewall.ps1`, `Remove-Lab.ps1` and `vagrant`
+  itself. (`Initialize-Lab.ps1` on
   its own would also accept membership in the local group "Hyper-V
   Administrators", but the firewall build it calls needs a real elevated shell,
   because of Hyper-V and the VM's serial console pipe; reading the VMs' SSH host
@@ -1910,8 +1910,8 @@ tests work with throwaway keys and short-lived certificates (listed in
 `keys\ssh\issued.log` like every certificate), and `Test-LabTlsPin` makes one
 HTTPS request to `www.microsoft.com` as an example of a foreign certificate
 chain.
-The script exits with 1 if a test failed. The first seven passed on
-2026-10-24, before the two SSH tests were added.
+The script exits with 1 if a test failed. All nine passed on 2026-10-24 (the
+two SSH tests right after the move to SSH certificates).
 
 One test **changes state** and runs only when you ask for it:
 `Test-LabRecoveryLogin.ps1` checks the break-glass login (AppRole `recovery`)
@@ -2299,8 +2299,9 @@ certificate, renewed in place if it is due. Then it starts whatever else is not
 running, re-applies the provisioning of the Ubuntu VMs, checks their host
 certificates, unseals OpenBao if it is still sealed (if OpenBao's TLS
 certificate is due or expired, it runs `Deploy-LabVault.ps1` instead, which
-renews the certificate first and then unseals; until then the offline SSH CA
-signs, because renewing that certificate needs SSH to the vault VM) and tests
+renews the certificate first and then unseals; if the certificate has already
+expired, the offline SSH CA signs until then, because renewing it needs SSH to
+the vault VM and the pinned TLS check refuses an expired certificate) and tests
 everything. If OpenBao does not come up at all, the script stops at the first
 SSH login with the reason; `-BreakGlass` lets the offline SSH CA sign instead
 ([P53](#p53-ssh-host-key-verification-failed-or-permission-denied-publickey)).
@@ -2468,10 +2469,7 @@ re-run a single step, for example `vagrant provision matrix --provision-with zsh
 The names are `lab-ssh-ca`, `ansible-user`, `ssh-hardening`,
 `console-autologin` and `zsh` (all VMs; on vault, `console-autologin` removes
 the autologin again); `lab-ssh-known-hosts`, `lab-ssh-revoked-host-keys` and
-`ansible-control` (ansible-control). On a lab that still has the old shared key
-`keys\ansible_ed25519`, `lab-key-pub` uploads its public half until
-`Complete-LabSshMigration.ps1` retires it
-([SSH certificates](#ssh-certificates-user-and-host-cas)).
+`ansible-control` (ansible-control).
 
 Vagrant logs in through the firewall with the PC's SSH certificate. Before
 `vagrant up`, `provision`, `reload`, `ssh`, `ssh-config`, `halt` and `resume`,
@@ -3166,8 +3164,11 @@ copy of their secrets, so try to bring it up first (`.\scripts\Initialize-Lab.ps
 Only when you are sure that it is lost, delete the VM yourself (in the `vagrant`
 folder, elevated: `vagrant destroy -f vault`; then remove its leftover Hyper-V
 folder, see [P14](#p14-a-removed-vm-leaves-its-hyper-v-folder-behind)) and run
-`.\scripts\Remove-Lab.ps1 vault`: with the VM gone, it only moves
-`keys\openbao` aside.
+`.\scripts\Remove-Lab.ps1 vault`: with the VM gone, it takes no snapshot; it
+revokes vault's old host key (and sends the new revocation list to
+ansible-control if it runs) and moves `keys\openbao` aside, together with
+OpenBao's SSH CA files `keys\ssh\openbao-ca.pub` and `openbao-ca.trusted` (into
+its `ssh` subfolder), so the offline SSH CA signs again.
 
 The idea: the restore is an API call, so it needs a running, unsealed OpenBao
 and an administrator token. So a new, temporary OpenBao is set up first, and
@@ -3209,8 +3210,9 @@ temporary installation's shares and logins are worthless.
 
    The restored OpenBao has the SSH CA of the snapshot's time (or none, for a
    snapshot from before OpenBao signed SSH certificates), not the one step 1
-   made every machine trust, and the scripts stop as long as the two differ
-   ("OpenBao serves another SSH CA than the one the machines trust"). Without
+   made every machine trust, and the scripts stop as long as that is so
+   ("OpenBao serves another SSH CA than the one the machines trust", or, without
+   an SSH CA, "OpenBao GET ssh/public_key failed"). Without
    these two files the offline SSH CA signs again, so SSH keeps working, and
    step 5 makes the restored SSH CA trusted everywhere.
 
@@ -3260,10 +3262,10 @@ it.
 
 To roll the **same** installation back to an earlier state (same shares), the
 call in step 2 goes to `sys/storage/raft/snapshot` instead, and steps 1 and 3
-are not needed. (Only if the snapshot is older than OpenBao's SSH CA, the
-scripts report that OpenBao serves another SSH CA: then move the two
-`keys\ssh\openbao-ca.*` files aside as in step 3 and run `Initialize-Lab.ps1`
-before `Deploy-LabVault.ps1`.)
+are not needed. (Only if the snapshot is older than OpenBao's SSH CA: it has no SSH CA, and the
+scripts stop with "OpenBao GET ssh/public_key failed (HTTP ...)". Then move the
+two `keys\ssh\openbao-ca.*` files aside as in step 3 and run `Initialize-Lab.ps1`
+before `Deploy-LabVault.ps1`, which creates a new SSH CA and makes it trusted.)
 
 Enterprise equivalent: a written and rehearsed restore procedure, snapshots
 off-site, the key shares (or recovery keys) held by several custodians who
@@ -4050,6 +4052,9 @@ names that are not in `config/lab.json`.
   file, their own `HostCertificate`, `AllowUsers` (`ansible` from the
   firewall's LAN address and from ansible-control, `vagrant` from the firewall's
   LAN address only), no passwords, no root login, no forwarding of any kind.
+  `ansible` has no `authorized_keys` at all
+  ([provision/bootstrap-ansible-user.sh](provision/bootstrap-ansible-user.sh)
+  removes it), so no plain key logs in as `ansible`.
 - **The firewall**: the authorized keys of `ansible` are one line per CA,
   `cert-authority,principals="lab-all,host-firewall",from="<PC>,<ansible-control>" ssh-ed25519 AAAA...`.
   A new firewall gets them in its `config.xml`; a running one through
@@ -4156,21 +4161,14 @@ ssh-keygen -L -f keys\ssh\pc_ed25519-cert.pub            # all of it: principals
   SSH CA in it can sign a certificate for every machine (usable from the PC's
   addresses). Guard it like the break-glass login it already held.
 
-**Moving an existing lab over** happens once and in steps, so that it can never
-lock itself out (TRANSITION in the code): while the old key
-`keys\ansible_ed25519` exists, ssh still offers it and every machine still
-accepts it. `Initialize-Lab.ps1` installs the CAs and the host certificates,
-`Deploy-LabVault.ps1` hands signing to OpenBao, and
-[scripts/Complete-LabSshMigration.ps1](scripts/Complete-LabSshMigration.ps1)
-retires the old key: first it proves that the PC's certificate alone logs in
-everywhere and that `ping.yml` works from ansible-control (nothing is changed if
-not), then, after you confirm, it deletes the Hyper-V checkpoints of the lab VMs
-(they still contain the old key), moves the key files to
-`keys\lab-key-retired-<date-time>` (moved, not deleted: once the script is done
-the key opens nothing, and you delete that folder yourself), removes the key's
-public half from the firewall and every VM, and checks that no machine lists it
-any more. It can be run again if it stops half-way. The
-commands are in the [roadmap](#11-roadmap).
+**How the running lab moved over** (2026-10-24, commit `130f75c`): that commit
+kept the old key accepted while `keys\ansible_ed25519` existed, so its first run
+could not lock itself out. `Initialize-Lab.ps1` installed the CAs and host
+certificates, `Deploy-LabVault.ps1` handed signing to OpenBao, and the one-time
+`Complete-LabSshMigration.ps1` proved that certificates alone log in
+everywhere, then removed the key from every machine and moved its files aside.
+The next commit removed that transition code; a lab still on the old key would
+check out `130f75c` for the move.
 
 Enterprise equivalent: the same split exists everywhere, an offline or
 HSM-held root of trust plus an online issuer (HashiCorp Vault's or OpenBao's
@@ -4190,7 +4188,6 @@ Files: [scripts/LabSsh.ps1](scripts/LabSsh.ps1) (read its header first),
 [opnsense/lab-ssh-trust.php](opnsense/lab-ssh-trust.php),
 [opnsense/lab-sshd-files.sh](opnsense/lab-sshd-files.sh),
 [opnsense/sshd_config.d/20-lab-ssh.conf](opnsense/sshd_config.d/20-lab-ssh.conf),
-[scripts/Complete-LabSshMigration.ps1](scripts/Complete-LabSshMigration.ps1),
 [tests/Test-LabSshCa.ps1](tests/Test-LabSshCa.ps1),
 [tests/Test-LabSshCertificates.ps1](tests/Test-LabSshCertificates.ps1).
 
@@ -5328,8 +5325,7 @@ Files: [scripts/Initialize-Lab.ps1](scripts/Initialize-Lab.ps1),
 ```
 DeployableServer/
 |-- README.md                         this file
-|-- .gitignore                        keeps keys/, keys-old-*/, .vagrant/ and the upgrade leftovers
-|                                     vendor/*.previous/, vendor/*.new/ out of version control
+|-- .gitignore                        keeps keys/, keys-old-*/ and .vagrant/ out of version control
 |-- .gitattributes                    LF line endings for every text file
 |-- config/
 |   `-- lab.json                      the lab's data: domain, networks, firewall addresses, lab VMs
@@ -5355,8 +5351,8 @@ DeployableServer/
 |   |                                 checkpoints, provisioners
 |   `-- .vagrant                      junction to G:\Vagrant\machines\... (VM disks, Vagrant state)
 |-- provision/                        shell provisioners run by Vagrant as root on the Ubuntu VMs (all idempotent)
-|   |-- bootstrap-ansible-user.sh     user "ansible", passwordless sudo (it logs in with SSH
-|   |                                 certificates; removes the old lab key once it is retired)
+|   |-- bootstrap-ansible-user.sh     user "ansible", passwordless sudo, no authorized_keys (it logs
+|   |                                 in with SSH certificates only; the script deletes the file)
 |   |-- harden-ssh.sh                 own SSH host keys per VM, published to the PC through Hyper-V
 |   |                                 KVP; trust in the lab's SSH CAs, principals, AllowUsers;
 |   |                                 certificate logins only, no forwarding, no root login
@@ -5482,9 +5478,7 @@ DeployableServer/
 |   |                                 SSH key and the empty revocation list in keys\ssh; locks down
 |   |                                 keys\ and the keys (icacls)
 |   |-- Update-LabSshCertificate.ps1  this PC's SSH certificate: renew it when due and show signer and
-|   |                                 validity (-Force: now; -BreakGlass: the offline CA signs)
-|   |-- Complete-LabSshMigration.ps1  one-time (TRANSITION): retires the old shared lab key
-|   |                                 keys\ansible_ed25519 once SSH certificates work everywhere
+|   |                                 validity (-Force: now; -BreakGlass: offline CA if OpenBao fails)
 |   |-- Import-LabSecrets.ps1         one-time migration of the old secrets.yml files into OpenBao
 |   |                                 (-RemovePlaintext)
 |   |-- LabSecrets.ps1                shared helpers, dot-sourced by the others: DPAPI, OpenBao API
@@ -5556,8 +5550,6 @@ DeployableServer/
     |   |-- issued.log                one line per certificate signed: time, signer, role, key ID,
     |   |                             serial, principals, expiry (no secrets)
     |   `-- tmp/                      short-lived work folders (public material only)
-    |-- ansible_ed25519(.pub)         only on a lab built before SSH certificates: the old shared
-    |                                 key, until Complete-LabSshMigration.ps1 retires it
     |-- pki/                          the offline root CA (New-LabRootCA.ps1)
     |   |-- root-ca.crt               "DeployableServer Lab Root CA 2026" (PEM)
     |   |-- root-ca.key               its private key, PKCS#8, AES-256 encrypted
@@ -6328,7 +6320,9 @@ path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
   sharing). The lab has no auto-unseal ([section 10](#10-security-notes)).
 - **What the project does**: `Initialize-Lab.ps1` unseals OpenBao right after
   it has started the firewall and the vault VM, before any SSH, because OpenBao
-  signs the SSH certificates (once `Deploy-LabVault.ps1` has initialised it),
+  signs the SSH certificates (once step 8 of `Deploy-LabVault.ps1` has made every
+  machine trust its SSH CA; until then it unseals an initialised OpenBao only after
+  the VMs are up),
   `Invoke-LabPlaybook.ps1` before
   every playbook that needs OpenBao, the renewal of the PC's SSH certificate
   when it finds OpenBao sealed, and `Deploy-LabVault.ps1` in its step 5.
@@ -6395,18 +6389,29 @@ path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
   shares of an earlier OpenBao. They are not overwritten ..."; before that,
   `Initialize-Lab.ps1` may already stop after three minutes with "OpenBao
   (https://vault.lab.internal:8200) does not answer after 180 s." (it tries to
-  unseal because it finds the old key shares).
+  unseal because it finds the old key shares). Once OpenBao signed the SSH
+  certificates, the scripts stop even earlier, at the first SSH certificate they
+  need ("OpenBao (10.10.99.5:8200) does not answer ..."): the PC still expects the
+  deleted OpenBao to sign.
 - **Cause**: the vault VM was rebuilt, so OpenBao is new and uninitialised, but
   `keys\openbao` still holds the key shares, logins and snapshots of the old
   installation. Those shares fit only the old one, and they are the only way to
   restore its snapshots, so the script never overwrites them.
   `Remove-Lab.ps1` takes a last snapshot and moves the folder aside when it
-  deletes the vault VM; a VM deleted another way (`vagrant destroy vault`,
-  Hyper-V Manager) leaves it in place.
-- **What to do**: move the folder aside yourself, then run the script again:
+  deletes the vault VM, together with the old OpenBao's SSH CA
+  (`keys\ssh\openbao-ca.pub` and `openbao-ca.trusted`); a VM deleted another way
+  (`vagrant destroy vault`, Hyper-V Manager) leaves them in place.
+- **What to do**: move them aside yourself (without the SSH CA files the offline
+  SSH CA signs again until step 8 of `Deploy-LabVault.ps1` makes the new OpenBao's
+  CA trusted), let `Initialize-Lab.ps1` certify the rebuilt VM, then run the
+  script again:
 
   ```powershell
-  Move-Item keys\openbao "keys\openbao-retired-$(Get-Date -Format yyyyMMdd-HHmmss)"
+  $retired = "keys\openbao-retired-$(Get-Date -Format yyyyMMdd-HHmmss)"
+  Move-Item keys\openbao $retired
+  New-Item -ItemType Directory "$retired\ssh" | Out-Null
+  Move-Item keys\ssh\openbao-ca.pub, keys\ssh\openbao-ca.trusted "$retired\ssh\" -ErrorAction SilentlyContinue
+  .\scripts\Initialize-Lab.ps1
   .\scripts\Deploy-LabVault.ps1
   ```
 
@@ -6732,7 +6737,7 @@ path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
 - **Symptom**: a program that copies, packs or unpacks the project reports
   that a path is too long or cannot be found, for a file deep in
   `vendor\mdad\roles\...`: Explorer, a ZIP tool or a Git checkout, or `tar` in
-  `Update-LabMdad.ps1` ("Unpacking failed") or in step 2 of
+  `Update-LabMdad.ps1` ("Unpacking the roles failed") or in step 2 of
   `Deploy-LabMatrix.ps1` ("tar failed").
 - **Cause**: many Windows programs still accept paths of at most 260
   characters (`MAX_PATH`), drive letter, folders and file name together. The
@@ -6819,9 +6824,7 @@ path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
     not listed for in `$sshPrincipals` in `Invoke-LabPlaybook.ps1`), or SSH comes
     from an address the certificate and the server do not allow (a VM-to-VM
     login other than from ansible-control, or the PC's certificate used from
-    ansible-control). On a lab moved over from the old shared key,
-    `ansible-control still uses the old lab key` means its provisioning has not
-    run since: `.\scripts\Initialize-Lab.ps1`.
+    ansible-control).
 - **What the project does**: it fails closed and says why. Every script renews
   the PC's certificate when fewer than 4 hours are left, so a certificate never
   expires in the middle of a run, and an OpenBao that is down, sealed or not
@@ -7171,24 +7174,10 @@ of the firewall's `ansible` password and API key), so it could unseal OpenBao
 but not give the PC its access back
 ([P46](#p46-after-losing-the-pcs-dpapi-keys-nothing-logs-in-to-openbao)).
 
-A lab built with the shared SSH key `keys\ansible_ed25519` moves to SSH
-certificates once, in this order (why it is safe:
-[SSH certificates](#ssh-certificates-user-and-host-cas), "Moving an existing
-lab over"), in an elevated PowerShell:
-
-```powershell
-.\scripts\Initialize-Lab.ps1              # offline SSH CA, this PC's key, host certificates; the old key still works meanwhile
-.\scripts\Deploy-LabVault.ps1             # OpenBao's SSH CA trusted everywhere (step 8): OpenBao takes over signing
-.\scripts\Complete-LabSshMigration.ps1    # proof first, then it retires keys\ansible_ed25519 (asks before it deletes checkpoints and moves the key aside)
-```
-
-Then, in your own PowerShell window, `.\scripts\New-LabRecoveryKit.ps1 -Renew`:
-it adds the new offline SSH CA to your recovery file (the scripts remind you
-with a `PENDING` line until it does). For an existing firewall,
-`New-LabFirewall.ps1` (step 4 of `Initialize-Lab.ps1`) takes the fingerprint of
-its host key from the serial console log of its first boot
-(`G:\Vagrant\hyperv\firewall\logs\serial-console.log`); if that log is gone,
-it stops and asks for `.\scripts\New-LabFirewall.ps1 -Rebuild`.
+After the move to SSH certificates, run `.\scripts\New-LabRecoveryKit.ps1 -Renew`
+in your own PowerShell window: it adds the offline SSH CA to your recovery file
+(the scripts remind you with a `PENDING` line until it does). The folder
+`keys\lab-key-retired-<date-time>` with the old, now useless key can be deleted.
 
 Done since the first version of this roadmap:
 
@@ -7222,8 +7211,8 @@ Done since the first version of this roadmap:
 - **Everything that runs is in the repository**: MDAD and its roles vendored
   in `vendor\mdad` (upgraded with `Update-LabMdad.ps1`, never downloaded by a
   deployment), Ansible pinned to a version, and the checks used to verify the
-  lab kept as scripts in `tests\` (`Invoke-LabTests.ps1`; the seven tests that
-  changed nothing at the time passed on 2026-10-24).
+  lab kept as scripts in `tests\` (`Invoke-LabTests.ps1`; the nine tests that
+  change nothing passed on 2026-10-24).
 
 Natural next steps, each a topic of its own:
 
