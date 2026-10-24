@@ -119,20 +119,27 @@ function Initialize-LabTls {
     }
     # A type added with Add-Type stays loaded for the whole PowerShell session and cannot be
     # replaced, hence the version in its name.
-    if (-not ('LabTlsPin2' -as [type])) {
+    if (-not ('LabTlsPin3' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.Net;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
-public static class LabTlsPin2 {
+public static class LabTlsPin3 {
     public static X509Certificate2 Root;
     public static string PinnedHost;
     public static readonly RemoteCertificateValidationCallback Callback = Validate;
     // The callback applies to every HTTPS request of this PowerShell process (it is set on
-    // ServicePointManager). For OpenBao's host name: accept a server certificate only if its
-    // chain ends exactly at the lab root (by thumbprint), whatever Windows trusts; wrong host
-    // names are always rejected. For any other host: Windows' normal validation.
+    // ServicePointManager). For OpenBao's host name: accept a server certificate only if the lab
+    // root signed it DIRECTLY - a chain of exactly two, the certificate and the root (compared by
+    // thumbprint) - whatever Windows trusts; wrong host names are always rejected. For any other
+    // host: Windows' normal validation.
+    // Why "directly": OpenBao's TLS certificate is the one certificate the offline root signs for a
+    // server (lab.ps1 deploy vault). A certificate for vault.<domain> from OpenBao's own
+    // intermediate CA must never be accepted, or whoever could get one issued (a PKI role changed
+    // to allow that name, say) could pose as OpenBao to this PC and read the unseal key shares and
+    // the AppRole logins it sends. The root's name constraints already forbid the name for
+    // intermediates made since (lib\LabPki.ps1); this holds for older ones too.
     static bool Validate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
         HttpWebRequest request = sender as HttpWebRequest;
         bool pinned = request != null && string.Equals(request.RequestUri.Host, PinnedHost, StringComparison.OrdinalIgnoreCase);
@@ -144,17 +151,17 @@ public static class LabTlsPin2 {
             c.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
             c.ChainPolicy.ExtraStore.Add(Root);
             if (!c.Build(new X509Certificate2(certificate))) return false;
-            X509Certificate2 top = c.ChainElements[c.ChainElements.Count - 1].Certificate;
-            return top.Thumbprint == Root.Thumbprint;
+            if (c.ChainElements.Count != 2) return false;
+            return c.ChainElements[1].Certificate.Thumbprint == Root.Thumbprint;
         }
     }
 }
 '@
     }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    [LabTlsPin2]::Root = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $script:LabRootCaCert
-    [LabTlsPin2]::PinnedHost = ([Uri]$script:LabVaultUrl).Host
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = [LabTlsPin2]::Callback
+    [LabTlsPin3]::Root = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $script:LabRootCaCert
+    [LabTlsPin3]::PinnedHost = ([Uri]$script:LabVaultUrl).Host
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = [LabTlsPin3]::Callback
 }
 
 # One call to the OpenBao API (https://vault.lab.internal:8200/v1/<Path>). The body is sent as
