@@ -1,0 +1,33 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2018-2026, Slavi Pantaleev, Aine Etke, MDAD community members
+# This file is distributed under the same license as the matrix-docker-ansible-deploy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: matrix-docker-ansible-deploy \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-29 17:11+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../../docs/configuring-playbook-matrix-ldap-registration-proxy.md:20
+msgid "Setting up matrix-ldap-registration-proxy (optional, removed)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-matrix-ldap-registration-proxy.md:22
+msgid "🪦 The playbook used to be able to install and configure [matrix-ldap-registration-proxy](https://gitlab.com/activism.international/matrix_ldap_registration_proxy), but no longer includes this component, as it has become unavailable."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-matrix-ldap-registration-proxy.md:24
+msgid "Uninstalling the component manually"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-matrix-ldap-registration-proxy.md:26
+msgid "If you still have matrix-ldap-registration-proxy installed on your Matrix server, the playbook can no longer help you uninstall it and you will need to do it manually. To uninstall manually, run these commands on the server:"
+msgstr ""

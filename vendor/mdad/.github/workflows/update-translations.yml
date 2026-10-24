@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2024 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+name: Update translations
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    if: github.repository == 'spantaleev/matrix-docker-ansible-deploy'
+    name: Update translations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.15'
+
+      # Setting up recommended prerequisites
+      # See: i18n/README.md
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      # TODO: optimize when we start publishing translations and integrate a Weblate instance
+      - name: Update translation catalog templates (POT) files
+        run: just --justfile i18n/justfile extract-translation-templates
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>  # Same as committer
+          body: This is an automatic pull request to update translation files.
+          branch: create-pull-request/i18n
+          commit-message: Automatic translations update
+          delete-branch: true
+          labels: docs
+          sign-commits: true
+          title: Automatic translations update

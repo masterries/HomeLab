@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2022 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2022 MDAD project contributors
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- tags:
+    # Resetting the crypto store is destructive and is only ever meant to happen
+    # when explicitly asked for. Without `never`, a playbook run that does not
+    # select tags at all runs this block along with everything else - which fails
+    # on a host where the service does not exist yet, and silently resets the
+    # crypto store on one where it does.
+    - never
+    - reset-hookshot-encryption
+  block:
+    - when: matrix_bridge_hookshot_enabled | bool
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/reset_encryption.yml"
+
+- tags:
+    - setup-all
+    - setup-hookshot
+    - setup-bridge-hookshot
+    - install-all
+    - install-hookshot
+    - install-bridge-hookshot
+  block:
+    - when: matrix_bridge_hookshot_enabled | bool
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/validate_config.yml"
+
+    - when: matrix_bridge_hookshot_enabled | bool
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/setup_install.yml"
+
+- tags:
+    - setup-all
+    - setup-hookshot
+    - setup-bridge-hookshot
+  block:
+    - when: not matrix_bridge_hookshot_enabled | bool
+      ansible.builtin.include_tasks: "{{ role_path }}/tasks/setup_uninstall.yml"

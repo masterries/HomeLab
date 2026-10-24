@@ -1,0 +1,56 @@
+<!--
+SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+# Guidance for AI agents
+
+This file gives AI coding agents the minimum context for working on this repository. Human contributors may find it a useful summary too.
+
+## What this is
+
+An Ansible playbook that installs and manages a Matrix homeserver and dozens of related services, each running as a Docker container wrapped in a systemd service.
+
+## Layout
+
+- `setup.yml`: the main playbook, listing all roles.
+- `roles/custom/`: roles maintained in this repository.
+- `roles/galaxy/`: external roles, downloaded according to `requirements.yml` via [agru](https://github.com/etkecc/agru) (preferred) or `ansible-galaxy`. Run `just roles` to install them (or `just update` to also pull the playbook itself). Editing these roles locally is fine while preparing or testing a fix, but the changes get wiped on the next roles update, so they must be synced back to the role's upstream repository, followed by a version pin update in `requirements.yml`.
+- `group_vars/matrix_servers`: the main playbook wiring between roles.
+  Check affected mappings on role bumps.
+  Values a role can construct by itself belong in the role's `defaults/main.yml`, not here.
+- `docs/`: current configuration and lasting procedures, one page per component.
+  Do not use component pages as another changelog for role releases; correct stale examples instead.
+- `molecule-shared/`: files shared by the roles' Molecule scenarios (Python and Ansible dependencies, pinned helper container images).
+- `i18n/`: translation infrastructure. Do not edit locale files by hand; they are managed by automation.
+- `CHANGELOG.md`: user-facing announcements, newest first.
+  Announce new or removed components, shared playbook behavior changes, and upgrades requiring
+  concrete action by the system administrator running this playbook. Examples include a manual
+  backup, data migration or inventory change that the role does not handle.
+  Upstream application behavior alone does not warrant a playbook entry, even when disruptive
+  or absent from role validation. Missing validation alone is not a reason for an entry.
+  Explain narrower upstream risks and link release notes in the pull request instead.
+  The affected role's `tasks/validate_config.yml` should report routine variable renames or removals.
+  Skip the changelog entry if that validation gives an actionable error.
+  Correct any stale docs or examples instead.
+  When adding an entry, explain in the pull request why it is needed and what affected users must do.
+  For a Backward Compatibility entry, explain why validation alone cannot cover the change
+  and how the migration gate handles it.
+
+## Conventions
+
+Follow the [style guide for playbook developers](docs/style-guide.md). In particular:
+
+- Variable prefixes match the role directory name.
+- Playbook-extensible list variables use the `_auto` + `_custom` split; `_custom` is reserved for users.
+- Renamed or removed variables get a validation entry, so stale user configuration produces an error instead of being silently ignored. Each role deprecates its own variables in its `validate_config.yml`; the `matrix_playbook_migration` role covers eliminated roles and very-early validation, and also gates breaking changes via `matrix_playbook_migration_expected_version` (see the style guide).
+- Every file carries SPDX license headers ([REUSE](https://reuse.software/) specification).
+- Roles may carry a Molecule scenario, proving the component starts and does not choke on the configuration the role rendered. Run one with `just molecule <role>` (no argument lists the roles that have one); CI runs only the scenarios of roles a push touched. See [Molecule testing for roles](docs/molecule-testing.md) before writing one - roles here need context a standalone role does not.
+- New components must be registered in `setup.yml`, `group_vars/matrix_servers`, `docs/README.md`, `README.md`, `docs/container-images.md`, and get a `CHANGELOG.md` entry.
+
+## Other notes
+
+- Documentation examples use `example.com`, `@alice:example.com`, and the other placeholder values listed in the style guide.
+- Write role tasks concurrency-safe: use `ansible.builtin.tempfile` for temporary files (removed in an `always` block), never fixed shared paths.
+- One logical change per commit.

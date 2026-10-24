@@ -1,0 +1,12 @@
+/inventory
+/roles/**/files/scratchpad
+.DS_Store
+.python-version
+.idea/
+.direnv/
+.envrc.local
+/var/
+
+# ignore roles pulled by ansible-galaxy
+/roles/galaxy/*
+!/roles/galaxy/.gitkeep

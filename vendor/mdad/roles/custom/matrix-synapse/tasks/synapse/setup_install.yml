@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: 2018 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2019 Dan Arnfield
+# SPDX-FileCopyrightText: 2019 Jan Christian Grünhage
+# SPDX-FileCopyrightText: 2019 Lyubomir Popov
+# SPDX-FileCopyrightText: 2020 - 2024 MDAD project contributors
+# SPDX-FileCopyrightText: 2020 Chris van Dijk
+# SPDX-FileCopyrightText: 2020 Horvath Gergely
+# SPDX-FileCopyrightText: 2022 Jim Myhrberg
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2022 Nikita Chernyi
+# SPDX-FileCopyrightText: 2022 Sebastian Gumprich
+# SPDX-FileCopyrightText: 2024 David Mehren
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+# This will throw a Permission Denied error if already mounted using fuse
+- name: Check Synapse media store path
+  ansible.builtin.stat:
+    path: "{{ matrix_synapse_media_store_path }}"
+  register: local_path_media_store_stat
+  ignore_errors: true
+
+# This is separate and conditional, to ensure we don't execute it
+# if the path already exists or we failed to check, because it's mounted using fuse.
+- name: Ensure Synapse media store path exists
+  ansible.builtin.file:
+    path: "{{ matrix_synapse_media_store_path }}"
+    state: directory
+    mode: '0750'
+    owner: "{{ matrix_synapse_uid }}"
+    group: "{{ matrix_synapse_gid }}"
+  when: "not local_path_media_store_stat.failed and not local_path_media_store_stat.stat.exists"
+
+- when: "matrix_synapse_container_image_self_build | bool"
+  block:
+    # A checkout owned by a different user (a uid change, an earlier clone by another user, etc.) would make the git task below fail on ownership or permissions.
+    - name: Ensure Synapse repository ownership is correct on self-build
+      ansible.builtin.file:
+        path: "{{ matrix_synapse_container_src_files_path }}"
+        state: directory
+        owner: "{{ matrix_synapse_uid }}"
+        group: "{{ matrix_synapse_gid }}"
+        recurse: true
+
+    - name: Ensure Synapse repository is present on self-build
+      ansible.builtin.git:
+        repo: "{{ matrix_synapse_container_image_self_build_repo }}"
+        dest: "{{ matrix_synapse_container_src_files_path }}"
+        version: "{{ matrix_synapse_container_image.split(':')[1] }}"
+        force: "yes"
+      become: true
+      become_user: "{{ matrix_synapse_username }}"
+      # Keep this even though the task above normalizes ownership. Git may still see an ownership mismatch when Ansible becomes an unprivileged user (see #5065).
+      environment:
+        GIT_CONFIG_COUNT: "1"
+        GIT_CONFIG_KEY_0: safe.directory
+        GIT_CONFIG_VALUE_0: "{{ matrix_synapse_container_src_files_path }}"
+      register: matrix_synapse_git_pull_results
+
+    - name: Check if Synapse Docker image exists
+      ansible.builtin.command: "{{ devture_systemd_docker_base_host_command_docker }} images --quiet --filter 'reference={{ matrix_synapse_container_image }}'"
+      register: matrix_synapse_container_image_check_result
+      changed_when: false
+
+    # Invoking the `docker build` command here, instead of calling the `docker_image` Ansible module,
+    # because the latter does not support BuildKit.
+    # See: https://github.com/ansible-collections/community.general/issues/514
+    - name: Ensure Synapse Docker image is built
+      ansible.builtin.shell:
+        chdir: "{{ matrix_synapse_container_src_files_path }}"
+        cmd: |
+          {{ devture_systemd_docker_base_host_command_docker }} build \
+          -t "{{ matrix_synapse_container_image }}" \
+          -f docker/Dockerfile \
+          .
+      environment:
+        DOCKER_BUILDKIT: 1
+      changed_when: true
+      when: "matrix_synapse_git_pull_results.changed | bool or matrix_synapse_container_image_check_result.stdout == ''"
+      register: matrix_synapse_container_image_build_result
+
+- name: Ensure Synapse Docker image is pulled
+  community.docker.docker_image_pull:
+    name: "{{ matrix_synapse_container_image }}"
+    pull: always
+  when: "not matrix_synapse_container_image_self_build"
+  register: matrix_synapse_container_image_pull_result
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: matrix_synapse_container_image_pull_result is not failed
+
+- when: "matrix_synapse_container_image_customizations_enabled | bool"
+  block:
+    - name: Ensure customizations Dockerfile is created
+      ansible.builtin.template:
+        src: "{{ role_path }}/templates/synapse/customizations/Dockerfile.j2"
+        dest: "{{ matrix_synapse_customized_container_src_files_path }}/Dockerfile"
+        owner: "{{ matrix_synapse_uid }}"
+        group: "{{ matrix_synapse_gid }}"
+        mode: '0640'
+      register: matrix_synapse_container_image_customizations_dockerfile_result
+
+    - name: Ensure customized Docker image for Synapse is built
+      community.docker.docker_image_build:
+        name: "{{ matrix_synapse_container_image_customized }}"
+        dockerfile: Dockerfile
+        path: "{{ matrix_synapse_customized_container_src_files_path }}"
+        pull: false
+        nocache: "{{ matrix_synapse_container_image_customized_build_nocache }}"
+        rebuild: "{{ 'always' if (matrix_synapse_container_image_customizations_dockerfile_result.changed | bool or matrix_synapse_container_image_customized_force_source | bool) else 'never' }}"
+      register: matrix_synapse_container_image_customized_build_result
+
+# We do this so that the signing key would get generated.
+#
+# This will also generate a default homeserver.yaml configuration file and a log configuration file.
+# We don't care about those configuration files, as we replace them with our own anyway (see below).
+#
+# We don't use the `docker_container` module, because using it with `cap_drop` requires
+# a very recent docker-py version, which is not available for a lot of people yet.
+- name: Generate initial Synapse config and signing key
+  ansible.builtin.command:
+    cmd: |
+      {{ devture_systemd_docker_base_host_command_docker }} run
+      --rm
+      --name=matrix-config
+      --user={{ matrix_synapse_uid }}:{{ matrix_synapse_gid }}
+      --cap-drop=ALL
+      --mount type=bind,src={{ matrix_synapse_config_dir_path }},dst=/data
+      -e SYNAPSE_CONFIG_PATH=/data/homeserver.yaml
+      -e SYNAPSE_SERVER_NAME={{ matrix_server_fqn_matrix }}
+      -e SYNAPSE_REPORT_STATS=no
+      {{ matrix_synapse_container_image }}
+      generate
+    creates: "{{ matrix_synapse_config_dir_path }}/{{ matrix_server_fqn_matrix }}.signing.key"
+  register: matrix_synapse_initial_config_result
+
+- name: Ensure Synapse homeserver config installed
+  ansible.builtin.copy:
+    content: "{{ matrix_synapse_configuration | to_nice_yaml(indent=2, width=999999) }}"
+    dest: "{{ matrix_synapse_config_dir_path }}/homeserver.yaml"
+    mode: '0644'
+    owner: "{{ matrix_synapse_uid }}"
+    group: "{{ matrix_synapse_gid }}"
+  register: matrix_synapse_config_result
+
+- name: Ensure Synapse container network is created
+  when: matrix_synapse_container_network != 'host'
+  community.general.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ matrix_synapse_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+
+- name: Ensure Synapse support files installed
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  with_items:
+    - src: "{{ matrix_synapse_template_synapse_log }}"
+      dest: "{{ matrix_synapse_config_dir_path }}/{{ matrix_server_fqn_matrix }}.log.config"
+      mode: '0644'
+    - src: "{{ role_path }}/templates/synapse/bin/register-user.j2"
+      dest: "{{ matrix_synapse_bin_path }}/register-user"
+      mode: '0755'
+    - src: "{{ role_path }}/templates/synapse/labels.j2"
+      dest: "{{ matrix_synapse_base_path }}/labels"
+      mode: '0644'
+    - src: "{{ role_path }}/templates/synapse/systemd/matrix-synapse.service.j2"
+      dest: "{{ devture_systemd_docker_base_systemd_path }}/matrix-synapse.service"
+      mode: '0644'
+  register: matrix_synapse_support_files_result
+
+- name: Generate sample prometheus.yml for external scraping
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/synapse/prometheus/external_prometheus.yml.example.j2"
+    dest: "{{ matrix_synapse_base_path }}/external_prometheus.yml.example"
+    owner: "{{ matrix_synapse_uid }}"
+    group: "{{ matrix_synapse_gid }}"
+    mode: '0644'
+  when: matrix_synapse_metrics_proxying_enabled | bool
+
+- name: Determine whether Synapse needs a restart
+  ansible.builtin.set_fact:
+    matrix_synapse_restart_necessary: >-
+      {{
+        matrix_synapse_config_result.changed | default(false)
+        or matrix_synapse_initial_config_result.changed | default(false)
+        or matrix_synapse_support_files_result.changed | default(false)
+        or matrix_synapse_container_image_pull_result.changed | default(false)
+        or matrix_synapse_container_image_build_result.changed | default(false)
+        or matrix_synapse_container_image_customized_build_result.changed | default(false)
+        or matrix_synapse_workers_files_changed | default(false) | bool
+        or matrix_synapse_ext_encryption_disabler_download_result.changed | default(false)
+        or matrix_synapse_ext_password_provider_rest_auth_download_result.changed | default(false)
+        or matrix_synapse_ext_password_provider_shared_secret_auth_download_result.changed | default(false)
+        or matrix_synapse_ext_spam_checker_mjolnir_antispam_git_result.changed | default(false)
+        or matrix_synapse_ext_spam_checker_synapse_simple_antispam_git_result.changed | default(false)
+        or matrix_synapse_ext_synapse_http_antispam_git_result.changed | default(false)
+      }}

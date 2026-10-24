@@ -1,0 +1,37 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2018-2026, Slavi Pantaleev, Aine Etke, MDAD community members
+# This file is distributed under the same license as the matrix-docker-ansible-deploy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: matrix-docker-ansible-deploy \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-02-06 16:30+0900\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../../docs/configuring-playbook-ma1sd.md:21
+msgid "Setting up ma1sd Identity Server (optional, removed)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-ma1sd.md:23
+msgid "🪦 The playbook used to be able to install and configure the [ma1sd](https://github.com/ma1uta/ma1sd) Identity Server, but no longer includes this component, as it has been unmaintained for a long time."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-ma1sd.md:25
+msgid "Please note that some of the functions can be achieved with other components. For example, if you wish to implement LDAP integration, you might as well check out [the LDAP provider module for Synapse](./configuring-playbook-ldap-auth.md) instead."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-ma1sd.md:27
+msgid "Uninstalling the component manually"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-ma1sd.md:29
+msgid "If you still have the ma1sd Identity Server installed on your Matrix server, the playbook can no longer help you uninstall it and you will need to do it manually. To uninstall manually, run these commands on the server:"
+msgstr ""

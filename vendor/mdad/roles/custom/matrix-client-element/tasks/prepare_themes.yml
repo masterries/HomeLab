@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: 2020 - 2023 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2024 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+#
+# Tasks related to setting up Element Web themes
+#
+
+- when: matrix_client_element_themes_enabled | bool
+  run_once: true
+  delegate_to: 127.0.0.1
+  become: false
+  block:
+    # This checkout lives on the Ansible controller, so we cannot correct its ownership like we do for checkouts on the server.
+    # Marking it as a safe directory keeps git's dubious-ownership protection from failing the task when the playbook directory belongs to another user.
+    - name: Ensure Element Web themes repository is pulled
+      ansible.builtin.git:
+        repo: "{{ matrix_client_element_themes_repository_url }}"
+        version: "{{ matrix_client_element_themes_repository_version }}"
+        dest: "{{ role_path }}/files/scratchpad/themes"
+      environment:
+        GIT_CONFIG_COUNT: "1"
+        GIT_CONFIG_KEY_0: safe.directory
+        GIT_CONFIG_VALUE_0: "{{ role_path }}/files/scratchpad/themes"
+
+    - name: Find all Element Web theme files
+      ansible.builtin.find:
+        paths: "{{ role_path }}/files/scratchpad/themes"
+        patterns: "*.json"
+        recurse: true
+      register: matrix_client_element_theme_file_list
+
+    - name: Read Element Web theme
+      ansible.builtin.slurp:
+        path: "{{ item.path }}"
+      register: "matrix_client_element_theme_file_contents"
+      # `find` lists files in filesystem order, which can differ between checkouts. Sorting keeps the generated `config.json` the same, so the service is not restarted needlessly.
+      with_items: "{{ matrix_client_element_theme_file_list.files | sort(attribute='path', case_sensitive=true) }}"
+
+    - name: Load Element Web theme
+      ansible.builtin.set_fact:
+        matrix_client_element_setting_defaults_custom_themes: "{{ matrix_client_element_setting_defaults_custom_themes + [item['content'] | b64decode | from_json] }}"  # noqa var-naming
+      with_items: "{{ matrix_client_element_theme_file_contents.results }}"
+
+#
+# Tasks related to getting rid of Element Web themes (if it was previously enabled)
+#
+
+- name: Ensure Element Web themes repository is removed
+  ansible.builtin.file:
+    path: "{{ role_path }}/files/scratchpad/themes"
+    state: absent
+  run_once: true
+  delegate_to: 127.0.0.1
+  become: false
+  when: "not matrix_client_element_themes_enabled | bool"

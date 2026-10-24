@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: 2024 David Mehren
+# SPDX-FileCopyrightText: 2024 MDAD project contributors
+# SPDX-FileCopyrightText: 2024 - 2026 Catalan Lover <catalanlover@protonmail.com>
+# SPDX-FileCopyrightText: 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2024 Suguru Hirahara
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- ansible.builtin.set_fact:
+    matrix_appservice_draupnir_for_all_migration_requires_restart: false
+
+- name: Ensure matrix-appservice-draupnir-for-all paths exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: '0750'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  with_items:
+    - {path: "{{ matrix_appservice_draupnir_for_all_base_path }}", when: true}
+    - {path: "{{ matrix_appservice_draupnir_for_all_config_path }}", when: true}
+    - {path: "{{ matrix_appservice_draupnir_for_all_data_path }}", when: true}
+    - {path: "{{ matrix_appservice_draupnir_for_all_container_src_files_path }}", when: "{{ matrix_appservice_draupnir_for_all_container_image_self_build }}"}
+  when: "item.when | bool"
+
+- name: Ensure Draupnir Docker image is pulled
+  community.docker.docker_image_pull:
+    name: "{{ matrix_appservice_draupnir_for_all_container_image }}"
+    pull: always
+  when: "not matrix_appservice_draupnir_for_all_container_image_self_build | bool"
+  register: matrix_appservice_draupnir_for_all_container_image_pull_result
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: matrix_appservice_draupnir_for_all_container_image_pull_result is not failed
+
+# A checkout owned by a different user (a uid change, an earlier clone by another user, etc.) would make the git task below fail on ownership or permissions.
+- name: Ensure Draupnir repository ownership is correct on self-build
+  ansible.builtin.file:
+    path: "{{ matrix_appservice_draupnir_for_all_container_src_files_path }}"
+    state: directory
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+    recurse: true
+  when: "matrix_appservice_draupnir_for_all_container_image_self_build | bool"
+
+- name: Ensure Draupnir repository is present on self-build
+  ansible.builtin.git:
+    repo: "{{ matrix_appservice_draupnir_for_all_container_image_self_build_repo }}"
+    dest: "{{ matrix_appservice_draupnir_for_all_container_src_files_path }}"
+    version: "{{ matrix_appservice_draupnir_for_all_container_image.split(':')[1] }}"
+    force: "yes"
+  become: true
+  become_user: "{{ matrix_user_name }}"
+  # Keep this even though the task above normalizes ownership. Git may still see an ownership mismatch when Ansible becomes an unprivileged user (see #5065).
+  environment:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: safe.directory
+    GIT_CONFIG_VALUE_0: "{{ matrix_appservice_draupnir_for_all_container_src_files_path }}"
+  register: matrix_appservice_draupnir_for_all_git_pull_results
+  when: "matrix_appservice_draupnir_for_all_container_image_self_build | bool"
+
+- name: Ensure Draupnir Docker image is built
+  # Using docker_image_build with BuildKit for modern, efficient builds.
+  # Rebuild when the git checkout advanced to a new commit; otherwise keep the build idempotent.
+  # Technically the idempotency of rebuilds is more that if a build has already been executed for that name:tag
+  # then we won't rebuild while in idempotent mode even if git moved. That's what the force rebuild logic is for.
+  community.docker.docker_image_build:
+    name: "{{ matrix_appservice_draupnir_for_all_container_image }}"
+    dockerfile: Dockerfile
+    path: "{{ matrix_appservice_draupnir_for_all_container_src_files_path }}"
+    pull: true
+    rebuild: "{{ 'always' if matrix_appservice_draupnir_for_all_git_pull_results.changed | bool else 'never' }}"
+  when: "matrix_appservice_draupnir_for_all_container_image_self_build | bool"
+  register: matrix_appservice_draupnir_for_all_container_image_build_result
+
+- name: Ensure matrix-appservice-draupnir-for-all appservice config installed
+  ansible.builtin.copy:
+    content: "{{ matrix_appservice_draupnir_for_all_configuration_appservice | to_nice_yaml(indent=2, width=999999) }}"
+    dest: "{{ matrix_appservice_draupnir_for_all_config_path }}/production-appservice.yaml"
+    mode: '0644'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  register: matrix_appservice_draupnir_for_all_appservice_config_result
+
+- name: Ensure matrix-appservice-draupnir-for-all bot config installed
+  ansible.builtin.copy:
+    content: "{{ matrix_appservice_draupnir_for_all_configuration | to_nice_yaml(indent=2, width=999999) }}"
+    dest: "{{ matrix_appservice_draupnir_for_all_config_path }}/production-bots.yaml"
+    mode: '0644'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  register: matrix_appservice_draupnir_for_all_bot_config_result
+
+- name: Ensure matrix-appservice-draupnir-for-all registration.yaml installed
+  ansible.builtin.copy:
+    content: "{{ matrix_appservice_draupnir_for_all_registration | to_nice_yaml(indent=2, width=999999) }}"
+    dest: "{{ matrix_appservice_draupnir_for_all_config_path }}/draupnir-for-all-registration.yaml"
+    mode: '0644'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  register: matrix_appservice_draupnir_for_all_registration_config_result
+
+- name: Ensure matrix-appservice-draupnir-for-all container network is created
+  when: matrix_appservice_draupnir_for_all_container_network != 'host'
+  community.general.docker_network:
+    enable_ipv6: "{{ devture_systemd_docker_base_ipv6_enabled }}"
+    name: "{{ matrix_appservice_draupnir_for_all_container_network }}"
+    driver: bridge
+    driver_options: "{{ devture_systemd_docker_base_container_networks_driver_options }}"
+
+- name: Ensure matrix-appservice-draupnir-for-all.service installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/matrix-appservice-draupnir-for-all.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/matrix-appservice-draupnir-for-all.service"
+    mode: '0644'
+  register: matrix_appservice_draupnir_for_all_systemd_service_result
+
+# matrix-appservice-draupnir-for-all and matrix-bot-draupnir share the
+# same upstream container image. When both are enabled and force-pull is
+# on, the second role to run sees the image as already up-to-date (the
+# first role just pulled it), so its pull_result.changed is false and
+# conditional restart would skip it. To avoid that, we also treat
+# force-pull itself as a restart trigger for this role. The downside is
+# that both Draupnir services restart on every run when force-pull is
+# enabled (e.g. with rolling tags like `latest` or `main`), even when the
+# upstream image has not moved. That is wasteful but acceptable.
+# See: https://github.com/spantaleev/matrix-docker-ansible-deploy/issues/5186
+- name: Determine whether Draupnir for All needs a restart
+  ansible.builtin.set_fact:
+    matrix_appservice_draupnir_for_all_restart_necessary: >-
+      {{
+        matrix_appservice_draupnir_for_all_migration_requires_restart | default(false)
+        or matrix_appservice_draupnir_for_all_appservice_config_result.changed | default(false)
+        or matrix_appservice_draupnir_for_all_bot_config_result.changed | default(false)
+        or matrix_appservice_draupnir_for_all_registration_config_result.changed | default(false)
+        or matrix_appservice_draupnir_for_all_systemd_service_result.changed | default(false)
+        or matrix_appservice_draupnir_for_all_container_image_pull_result.changed | default(false)
+        or matrix_appservice_draupnir_for_all_container_image_build_result.changed | default(false)
+        or matrix_appservice_draupnir_for_all_force_restart | bool
+      }}
+
+- name: Ensure matrix-appservice-draupnir-for-all.service restarted, if necessary
+  ansible.builtin.service:
+    name: "matrix-appservice-draupnir-for-all.service"
+    state: restarted
+    daemon_reload: true
+  when: "matrix_appservice_draupnir_for_all_migration_requires_restart | bool"

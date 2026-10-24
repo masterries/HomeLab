@@ -1,0 +1,37 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2018-2026, Slavi Pantaleev, Aine Etke, MDAD community members
+# This file is distributed under the same license as the matrix-docker-ansible-deploy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: matrix-docker-ansible-deploy \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-02-13 10:32+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../../docs/configuring-playbook-bridge-appservice-webhooks.md:16
+msgid "Setting up Appservice Webhooks bridging (optional, removed)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-webhooks.md:18
+msgid "🪦 The playbook used to be able to install and configure [matrix-appservice-webhooks](https://github.com/turt2live/matrix-appservice-webhooks), but no longer includes this component, as it has been deprecated since more than several years."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-webhooks.md:20
+msgid "You may wish to use [matrix-hookshot](https://github.com/matrix-org/matrix-hookshot) instead."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-webhooks.md:22
+msgid "Uninstalling the bridge manually"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-webhooks.md:24
+msgid "If you still have matrix-appservice-webhooks installed on your Matrix server, the playbook can no longer help you uninstall it and you will need to do it manually. To uninstall manually, run these commands on the server:"
+msgstr ""

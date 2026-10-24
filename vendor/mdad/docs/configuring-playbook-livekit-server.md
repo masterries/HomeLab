@@ -1,0 +1,85 @@
+<!--
+SPDX-FileCopyrightText: 2024 wjbeckett
+SPDX-FileCopyrightText: 2024 - 2025 Slavi Pantaleev
+
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+# Setting up LiveKit Server (optional)
+
+The playbook can install and configure [LiveKit Server](https://github.com/livekit/livekit) for you.
+
+LiveKit Server is an open source project that provides scalable, multi-user conferencing based on WebRTC. It's designed to provide everything you need to build real-time video audio data capabilities in your applications.
+
+💡 LiveKit Server is automatically installed and configured when either [Element Call](configuring-playbook-element-call.md) or the [Matrix RTC stack](configuring-playbook-matrix-rtc.md) is enabled, so you don't need to do anything extra.
+
+The [Ansible role for LiveKit Server](https://github.com/mother-of-all-self-hosting/ansible-role-livekit-server) is developed and maintained by [the MASH (mother-of-all-self-hosting) project](https://github.com/mother-of-all-self-hosting). For details about configuring LiveKit Server, you can check them via:
+- 🌐 [the role's documentation at the MASH project](https://github.com/mother-of-all-self-hosting/ansible-role-livekit-server/blob/main/docs/configuring-livekit-server.md) online
+- 📁 `roles/galaxy/livekit_server/docs/configuring-livekit-server.md` locally, if you have [fetched the Ansible roles](installing.md#update-ansible-roles)
+
+## Adjusting firewall rules
+
+To ensure LiveKit Server functions correctly, the following firewall rules and port forwarding settings are required:
+
+- `7881/tcp`: ICE/TCP
+
+- `7882/udp`: ICE/UDP Mux
+
+- `3479/udp`: TURN/UDP. Also see the [Limitations](#limitations) section below.
+
+- `5350/tcp`: TURN/TCP. Also see the [Limitations](#limitations) section below.
+
+- `30000-30020/udp`: TURN relay range used by LiveKit's embedded TURN server.
+
+💡 The suggestions above are inspired by the upstream [Ports and Firewall](https://docs.livekit.io/home/self-hosting/ports-firewall/) documentation based on how LiveKit is configured in the playbook. If you're using custom configuration for the LiveKit Server role, you may need to adjust firewall rules accordingly.
+
+## TURN TLS handling
+
+When `matrix_playbook_reverse_proxy_type` is `playbook-managed-traefik` (which is the default for this playbook), TURN over TCP is terminated by Traefik and forwarded to LiveKit with `turn.external_tls = true`. In this playbook default, this mode is enabled automatically when SSL is enabled and TURN is enabled.
+
+- The playbook installs a dedicated Traefik TCP entrypoint for TURN (`matrix-livekit-turn`) by default and binds it to `tcp/5350`.
+- `livekit_server_config_turn_external_tls` is automatically enabled for this setup.
+- Because Traefik handles TLS, LiveKit no longer needs certificate-file paths for TURN in this mode.
+
+To opt out and keep TURN TLS termination in LiveKit itself, set:
+
+```yml
+livekit_server_config_turn_external_tls: false
+```
+
+In this playbook, certificate paths are managed automatically via `group_vars/matrix_servers` when certificate dumping is enabled.
+
+If your setup uses `other-traefik-container` or [another reverse-proxy](./configuring-playbook-own-webserver.md), behavior is unchanged by default and still relies on certificates being available inside the container as before.
+
+Deployments using `other-traefik-container` can opt into the same Traefik-terminated mode there, by setting:
+
+```yml
+livekit_server_config_turn_external_tls: true
+livekit_server_container_labels_turn_traefik_enabled: true
+livekit_server_container_labels_turn_traefik_entrypoints: "<your-livekit-turn-traffic-entrypoint>"
+```
+
+and configuring their own Traefik TCP entrypoint dedicated to LiveKit TURN traffic.
+
+### TURN/TLS clients advertising an ALPN protocol
+
+Traefik's default TLS options allow only `h2`, `http/1.1` and `acme-tls/1` as ALPN protocols, and Traefik aborts the TLS handshake when the client's advertised protocols don't intersect with that list. TURN clients advertising `stun.turn` (see [RFC 7443](https://datatracker.ietf.org/doc/html/rfc7443)) therefore could not use TURN over TLS at all.
+
+The playbook defines a `livekit-turn` Traefik TLS option (see `traefik_config_tls_options_auto` in `group_vars/matrix_servers`) that also allows `stun.turn` and `stun.nat-discovery`, and attaches it to the TURN router. This applies whenever TURN TLS handling is active (see above).
+
+If you use `other-traefik-container` or [another reverse-proxy](./configuring-playbook-own-webserver.md), define an equivalent TLS option in the Traefik instance that terminates TURN TLS and point `livekit_server_container_labels_turn_traefik_tls_options` at it (for example, `livekit-turn@file`). TLS options cannot be defined through container labels, so the role can only reference an option that your Traefik configuration defines itself.
+
+## TURN access controls
+
+LiveKit's embedded TURN server enforces a credential TTL and restricts which peer CIDRs it will relay to. The playbook leaves these at the role's secure defaults, which are appropriate for typical deployments where TURN peers live on the public Internet.
+
+If your setup needs TURN to relay to private/restricted ranges, or you want to override the credential TTL, see the [TURN access controls and credential TTL](https://github.com/mother-of-all-self-hosting/ansible-role-livekit-server/blob/main/docs/configuring-livekit-server.md#turn-access-controls-and-credential-ttl) section of the role's documentation.
+
+## Limitations
+
+LiveKit Server's TURN listener behavior depends on where TLS is terminated:
+
+- Direct LiveKit TURN listeners (`livekit_server_config_turn_external_tls: false`) still use IPv4-only sockets for `3479/udp` and `5350/tcp`, so IPv6 connectivity to these endpoints is not possible.
+- With [TURN TLS handling](#turn-tls-handling) (`livekit_server_config_turn_external_tls: true`), the playbook's dedicated `matrix-livekit-turn` TCP entrypoint can still listen on both IPv4 and IPv6. Traefik then forwards TURN/TCP to LiveKit.
+
+It appears that LiveKit Server intentionally only listens on `udp4` and `tcp4` in direct mode, as seen [here](https://github.com/livekit/livekit/blob/154b4d26b769c68a03c096124094b97bf61a996f/pkg/service/turn.go#L128) and [here](https://github.com/livekit/livekit/blob/154b4d26b769c68a03c096124094b97bf61a996f/pkg/service/turn.go#L92).

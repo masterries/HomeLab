@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: 2022 - 2023 Julian-Samuel Gebühr
+# SPDX-FileCopyrightText: 2022 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2022 Sebastian Gumprich
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Ensure matrix-cactus-comments paths exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: '0750'
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+  with_items:
+    - {path: "{{ matrix_cactus_comments_base_path }}", when: true}
+    - {path: "{{ matrix_cactus_comments_container_tmp_path }}", when: true}
+    - {path: "{{ matrix_cactus_comments_container_src_files_path }}", when: "{{ matrix_cactus_comments_container_image_self_build }}"}
+  when: "item.when | bool"
+
+- name: Ensure matrix-cactus-comments environment file created
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/env.j2"
+    dest: "{{ matrix_cactus_comments_app_service_env_file }}"
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+    mode: '0640'
+  register: matrix_cactus_comments_config_env_result
+
+- name: Ensure matrix-cactus-comments appservice file created
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/cactus_appservice.yaml.j2"
+    dest: "{{ matrix_cactus_comments_app_service_config_file }}"
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+    mode: '0640'
+  register: matrix_cactus_comments_config_appservice_result
+
+- name: Ensure matrix-cactus-comments image is pulled
+  community.docker.docker_image_pull:
+    name: "{{ matrix_cactus_comments_container_image }}"
+    pull: always
+  when: "not matrix_cactus_comments_container_image_self_build | bool"
+  register: matrix_cactus_comments_container_image_pull_result
+  retries: "{{ devture_playbook_help_container_retries_count }}"
+  delay: "{{ devture_playbook_help_container_retries_delay }}"
+  until: matrix_cactus_comments_container_image_pull_result is not failed
+
+# A checkout owned by a different user (a uid change, an earlier clone by another user, etc.) would make the git task below fail on ownership or permissions.
+- name: Ensure matrix-cactus-comments repository ownership is correct on self-build
+  ansible.builtin.file:
+    path: "{{ matrix_cactus_comments_container_src_files_path }}"
+    state: directory
+    owner: "{{ matrix_user_name }}"
+    group: "{{ matrix_group_name }}"
+    recurse: true
+  when: "matrix_cactus_comments_container_image_self_build | bool"
+
+- name: Ensure matrix-cactus-comments repository is present on self-build
+  ansible.builtin.git:
+    repo: "{{ matrix_cactus_comments_container_repo }}"
+    version: "{{ matrix_cactus_comments_container_repo_version }}"
+    dest: "{{ matrix_cactus_comments_container_src_files_path }}"
+    force: "yes"
+  become: true
+  become_user: "{{ matrix_user_name }}"
+  # Keep this even though the task above normalizes ownership. Git may still see an ownership mismatch when Ansible becomes an unprivileged user (see #5065).
+  environment:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: safe.directory
+    GIT_CONFIG_VALUE_0: "{{ matrix_cactus_comments_container_src_files_path }}"
+  register: matrix_cactus_comments_git_pull_results
+  when: "matrix_cactus_comments_container_image_self_build | bool"
+
+- name: Ensure matrix-cactus-comments image is built
+  community.docker.docker_image_build:
+    name: "{{ matrix_cactus_comments_container_image }}"
+    dockerfile: Dockerfile
+    path: "{{ matrix_cactus_comments_container_src_files_path }}"
+    pull: true
+    rebuild: "{{ 'always' if matrix_cactus_comments_git_pull_results.changed | bool else 'never' }}"
+  when: "matrix_cactus_comments_container_image_self_build | bool"
+  register: matrix_cactus_comments_container_image_build_result
+
+- name: Ensure matrix-cactus-comments.service installed
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/systemd/matrix-cactus-comments.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/matrix-cactus-comments.service"
+    mode: '0644'
+  register: matrix_cactus_comments_systemd_service_result
+
+- name: Determine whether matrix-cactus-comments needs a restart
+  ansible.builtin.set_fact:
+    matrix_cactus_comments_restart_necessary: >-
+      {{
+        matrix_cactus_comments_config_env_result.changed | default(false)
+        or matrix_cactus_comments_config_appservice_result.changed | default(false)
+        or matrix_cactus_comments_systemd_service_result.changed | default(false)
+        or matrix_cactus_comments_container_image_pull_result.changed | default(false)
+        or matrix_cactus_comments_container_image_build_result.changed | default(false)
+      }}

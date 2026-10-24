@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+- name: Prepare matrix-livekit-jwt-service Molecule tests
+  hosts: all
+  become: true
+  vars_files:
+    - "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/../../../molecule-shared/vars.yml"
+    - "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/../../../molecule-shared/playbook-context.yml"
+  gather_facts: true
+  tasks:
+    - name: Ensure apt cache is updated
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 600
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Ensure required packages are installed
+      ansible.builtin.package:
+        name:
+          - python3-requests
+          - fuse-overlayfs
+          - openssl
+        state: present
+
+    - name: Ensure Docker is installed
+      ansible.builtin.include_role:
+        name: ansible-role-docker
+      vars:
+        docker_daemon_options:
+          storage-driver: fuse-overlayfs
+
+    - name: Ensure the matrix group exists
+      ansible.builtin.group:
+        name: "{{ matrix_group_name }}"
+        gid: "{{ matrix_user_gid }}"
+        state: present
+
+    - name: Ensure the matrix user exists
+      ansible.builtin.user:
+        name: "{{ matrix_user_name }}"
+        uid: "{{ matrix_user_uid }}"
+        group: "{{ matrix_group_name }}"
+        create_home: false
+        system: true
+        state: present
+
+    - name: Ensure the base data path exists
+      ansible.builtin.file:
+        path: "{{ matrix_base_data_path }}"
+        state: directory
+        owner: "{{ matrix_user_name }}"
+        group: "{{ matrix_group_name }}"
+        mode: "0750"
+
+    - name: Ensure the OpenID fixture directory exists
+      ansible.builtin.file:
+        path: /matrix/molecule-livekit-openid-fixture
+        state: directory
+        mode: "0755"
+
+    - name: Install the OpenID fixture server
+      ansible.builtin.copy:
+        src: openid-fixture.py
+        dest: /matrix/molecule-livekit-openid-fixture/openid-fixture.py
+        mode: "0644"
+
+    - name: Generate a self-signed certificate for the OpenID fixture
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -keyout
+          - /matrix/molecule-livekit-openid-fixture/key.pem
+          - -out
+          - /matrix/molecule-livekit-openid-fixture/cert.pem
+          - -days
+          - "2"
+          - -subj
+          - /CN=matrix-openid-fixture
+        creates: /matrix/molecule-livekit-openid-fixture/key.pem
+
+    - name: Ensure the scenario container network exists
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - create
+          - "{{ matrix_livekit_jwt_service_container_network }}"
+      register: matrix_livekit_jwt_service_molecule_network
+      changed_when: matrix_livekit_jwt_service_molecule_network.rc == 0
+      failed_when:
+        - matrix_livekit_jwt_service_molecule_network.rc != 0
+        - "'already exists' not in matrix_livekit_jwt_service_molecule_network.stderr"
+
+    - name: Ensure a previous HTTPS OpenID fixture is gone
+      ansible.builtin.command:
+        argv:
+          - docker
+          - rm
+          - --force
+          - matrix-livekit-jwt-openid-fixture
+      register: matrix_livekit_jwt_service_openid_fixture_removal
+      changed_when: matrix_livekit_jwt_service_openid_fixture_removal.rc == 0
+      failed_when: false
+
+    - name: Ensure the HTTPS OpenID fixture is running
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name=matrix-livekit-jwt-openid-fixture
+          - --network={{ matrix_livekit_jwt_service_container_network }}
+          - --network-alias=matrix-openid-fixture
+          - --network-alias=full-access.molecule.local
+          - --mount=type=bind,src=/matrix/molecule-livekit-openid-fixture,dst=/fixture,readonly
+          - "{{ molecule_shared_image_python }}"
+          - python3
+          - /fixture/openid-fixture.py
+      register: matrix_livekit_jwt_service_openid_fixture_start
+      changed_when: matrix_livekit_jwt_service_openid_fixture_start.rc == 0
+
+    - name: Configure the SFU fixture with room auto-creation disabled
+      ansible.builtin.copy:
+        dest: /matrix/molecule-livekit-openid-fixture/livekit.yml
+        mode: "0644"
+        content: |
+          port: 7880
+          bind_addresses: ["0.0.0.0"]
+          rtc:
+            tcp_port: 7881
+            udp_port: 7882
+            use_external_ip: false
+          keys:
+            {{ matrix_livekit_jwt_service_environment_variable_livekit_key }}: {{ matrix_livekit_jwt_service_environment_variable_livekit_secret }}
+          room:
+            auto_create: false
+
+    - name: Ensure a previous SFU fixture is gone
+      ansible.builtin.command:
+        argv:
+          - docker
+          - rm
+          - --force
+          - matrix-livekit-sfu-fixture
+      register: matrix_livekit_jwt_service_sfu_fixture_removal
+      changed_when: matrix_livekit_jwt_service_sfu_fixture_removal.rc == 0
+      failed_when: false
+
+    - name: Ensure the real SFU fixture is running
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name=matrix-livekit-sfu-fixture
+          - --network={{ matrix_livekit_jwt_service_container_network }}
+          - --mount=type=bind,src=/matrix/molecule-livekit-openid-fixture/livekit.yml,dst=/livekit.yml,readonly
+          - "{{ molecule_shared_image_livekit_server }}"
+          - --config=/livekit.yml
+      register: matrix_livekit_jwt_service_sfu_fixture_start
+      changed_when: matrix_livekit_jwt_service_sfu_fixture_start.rc == 0
+
+    - name: Wait for the SFU fixture to accept requests
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network={{ matrix_livekit_jwt_service_container_network }}
+          - "{{ molecule_shared_image_curl }}"
+          - --silent
+          - --show-error
+          - --fail
+          - http://matrix-livekit-sfu-fixture:7880/
+      register: matrix_livekit_jwt_service_sfu_fixture_ready
+      changed_when: false
+      until: matrix_livekit_jwt_service_sfu_fixture_ready.rc == 0
+      retries: 15
+      delay: 2

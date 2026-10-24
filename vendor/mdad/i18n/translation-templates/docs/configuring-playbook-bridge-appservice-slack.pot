@@ -1,0 +1,37 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2018-2026, Slavi Pantaleev, Aine Etke, MDAD community members
+# This file is distributed under the same license as the matrix-docker-ansible-deploy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: matrix-docker-ansible-deploy \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-15 09:10+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../../docs/configuring-playbook-bridge-appservice-slack.md:22
+msgid "Setting up Appservice Slack bridging (optional, removed)"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-slack.md:24
+msgid "🪦 The playbook used to be able to install and configure [matrix-appservice-slack](https://github.com/matrix-org/matrix-appservice-slack), but no longer includes this component, as it had been unavailable for new installation since 2024, and was finally abandoned because the public Matrix.org Slack bridge has been decommissioned on January 14th, 2026."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-slack.md:26
+msgid "**Note**: Bridging to [Slack](https://slack.com) can also happen via the [mautrix-slack](configuring-playbook-bridge-mautrix-slack.md) bridge supported by the playbook."
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-slack.md:28
+msgid "Uninstalling the component manually"
+msgstr ""
+
+#: ../../../docs/configuring-playbook-bridge-appservice-slack.md:30
+msgid "If you still have matrix-appservice-slack installed on your Matrix server, the playbook can no longer help you uninstall it and you will need to do it manually. To uninstall manually, run these commands on the server:"
+msgstr ""

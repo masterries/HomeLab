@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2021 - 2024 Slavi Pantaleev
+# SPDX-FileCopyrightText: 2022 Marko Weltzer
+# SPDX-FileCopyrightText: 2024 Michael Hollister
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- ansible.builtin.set_fact:
+    matrix_synapse_worker_systemd_service_name: "{{ matrix_synapse_worker_details.name }}"
+    matrix_synapse_worker_container_name: "{{ matrix_synapse_worker_details.name }}"
+    matrix_synapse_worker_type: "{{ matrix_synapse_worker_details.type }}"
+    matrix_synapse_worker_config_file_name: "worker.{{ matrix_synapse_worker_details.name }}.yaml"
+    matrix_synapse_worker_labels_file_name: "worker.{{ matrix_synapse_worker_details.name }}.labels"
+
+- name: Ensure configuration exists for {{ matrix_synapse_worker_systemd_service_name }}
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/synapse/worker.yaml.j2"
+    dest: "{{ matrix_synapse_config_dir_path }}/{{ matrix_synapse_worker_config_file_name }}"
+    mode: '0644'
+    owner: "{{ matrix_synapse_uid }}"
+    group: "{{ matrix_synapse_gid }}"
+  register: matrix_synapse_worker_config_result
+
+- name: Ensure labels exists for {{ matrix_synapse_worker_systemd_service_name }}
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/synapse/worker-labels.j2"
+    dest: "{{ matrix_synapse_base_path }}/{{ matrix_synapse_worker_labels_file_name }}"
+    mode: '0644'
+    owner: "{{ matrix_synapse_uid }}"
+    group: "{{ matrix_synapse_gid }}"
+  register: matrix_synapse_worker_labels_result
+
+- name: Ensure systemd service exists for {{ matrix_synapse_worker_systemd_service_name }}
+  ansible.builtin.template:
+    src: "{{ role_path }}/templates/synapse/systemd/matrix-synapse-worker.service.j2"
+    dest: "{{ devture_systemd_docker_base_systemd_path }}/{{ matrix_synapse_worker_systemd_service_name }}.service"
+    mode: '0644'
+  register: matrix_synapse_worker_systemd_service_result
+
+# Workers share Synapse's restart decision (see `matrix_synapse_restart_necessary`),
+# so a change to any one worker's files marks it as needed.
+- ansible.builtin.set_fact:
+    matrix_synapse_workers_files_changed: >-
+      {{
+        matrix_synapse_workers_files_changed | default(false) | bool
+        or matrix_synapse_worker_config_result.changed | default(false)
+        or matrix_synapse_worker_labels_result.changed | default(false)
+        or matrix_synapse_worker_systemd_service_result.changed | default(false)
+      }}

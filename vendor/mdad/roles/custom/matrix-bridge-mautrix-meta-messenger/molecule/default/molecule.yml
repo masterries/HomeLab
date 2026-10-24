@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+dependency:
+  name: galaxy
+  options:
+    requirements-file: requirements.yml
+    force: true
+driver:
+  name: docker
+platforms:
+  - name: mautrix-meta-messenger-${MOLECULE_DISTRO:-ubuntu2604}-default
+    image: "geerlingguy/docker-${MOLECULE_DISTRO:-ubuntu2604}-ansible:latest"
+    command: ${MOLECULE_DOCKER_COMMAND:-""}
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+    pre_build_image: true
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callback_result_format: yaml
+  inventory:
+    group_vars:
+      all:
+        matrix_bridge_mautrix_meta_messenger_container_network: mautrix-meta-messenger-molecule
+
+        # The stub prepare.yml stands up. Not a real homeserver, and nothing is asserted
+        # about it.
+        matrix_bridge_mautrix_meta_messenger_homeserver_address: http://matrix.molecule.local:8008
+        matrix_bridge_mautrix_meta_messenger_homeserver_domain: molecule.local
+
+        # Postgres, because that is what `group_vars/matrix_servers` selects whenever postgres
+        # is enabled - which is the default, so it is what essentially every real deployment
+        # runs. prepare.yml stands one up. Name and user differ from the role's defaults, so
+        # reaching the database proves the role built its connection string out of these.
+        matrix_bridge_mautrix_meta_messenger_database_engine: postgres
+        matrix_bridge_mautrix_meta_messenger_database_hostname: matrix-postgres-molecule
+        matrix_bridge_mautrix_meta_messenger_database_name: molecule_meta_messenger
+        matrix_bridge_mautrix_meta_messenger_database_username: molecule_meta_messenger
+        matrix_bridge_mautrix_meta_messenger_database_password: molecule_pg_password_d24e70
+
+        # Here these only have to reach the rendered configuration and the registration.
+        matrix_bridge_mautrix_meta_messenger_appservice_token: molecule_meta_as_token_5c81de
+        matrix_bridge_mautrix_meta_messenger_homeserver_token: molecule_meta_hs_token_a70f24
+
+        # What makes this role family unusual: one upstream codebase serves several Meta
+        # networks, and this variable picks which. It reaches the rendered configuration in
+        # four places at once - appservice id, ghost username prefix, bot displayname and the
+        # bridge's `tor` switch - so a value other than the role's default is what tells
+        # verify.yml the role propagated the choice rather than everything agreeing by accident.
+        #
+        # `facebook-tor` is used because it is the only mode that also flips a boolean.
+        # Nothing logs in during the scenario, so the bridge never connects to Meta.
+        matrix_bridge_mautrix_meta_messenger_meta_mode: facebook-tor
+
+        # Different from the role's defaults and from what the bridge would pick on its own,
+        # so verify.yml can tell what the role rendered apart from a coincidence.
+        matrix_bridge_mautrix_meta_messenger_appservice_username: molecule-metabot
+        matrix_bridge_mautrix_meta_messenger_bridge_command_prefix: "!molecule-meta"
+        matrix_bridge_mautrix_meta_messenger_bridge_displayname_suffix: "(Molecule)"
+        matrix_bridge_mautrix_meta_messenger_logging_min_level: debug
+
+        # Traefik is not deployed here, so nothing routes to it. What is tested is that the
+        # role turns these three variables into both the container's Traefik labels and the
+        # `appservice.public_address` the bridge itself reads.
+        matrix_bridge_mautrix_meta_messenger_exposure_enabled: true
+        matrix_bridge_mautrix_meta_messenger_exposure_hostname: bridges.molecule.local
+        matrix_bridge_mautrix_meta_messenger_exposure_path_prefix: /bridges/meta-messenger
+        matrix_bridge_mautrix_meta_messenger_scheme: https
+
+        # verify.yml runs as its own play, where the role's defaults are out of scope,
+        # so the paths it reads are pinned here to match what the role derives.
+        matrix_bridge_mautrix_meta_messenger_base_path: /matrix/mautrix-meta-messenger
+        matrix_bridge_mautrix_meta_messenger_config_path: /matrix/mautrix-meta-messenger/config
+        matrix_bridge_mautrix_meta_messenger_data_path: /matrix/mautrix-meta-messenger/data
+  env:
+    # Workaround for https://github.com/ansible/molecule/issues/4391
+    ANSIBLE_ROLES_PATH: ${MOLECULE_PROJECT_DIRECTORY}/../..:/.ansible/roles:/usr/share/ansible/roles:/etc/ansible/roles:${ANSIBLE_HOME:-~/.ansible}/roles
+scenario:
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - cleanup
+    - destroy
+verifier:
+  name: ansible

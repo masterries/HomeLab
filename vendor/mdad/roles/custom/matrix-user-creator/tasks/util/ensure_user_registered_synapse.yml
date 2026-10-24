@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2022 - 2024 Slavi Pantaleev
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+
+- name: Build Synapse user registration command - {{ user.username | quote }}
+  ansible.builtin.set_fact:
+    matrix_synapse_register_user_command: |-
+      {{ devture_systemd_docker_base_host_command_docker }} exec matrix-synapse
+      register_new_matrix_user
+      -u  {{ user.username | quote }}
+      -p {{ user.initial_password | quote }}
+      -c /data/homeserver.yaml
+      {% if user.initial_type == 'admin' %}
+        --admin
+      {% else %}
+        --no-admin
+        {% if user.initial_type != 'user' %}
+          --user_type={{ user.initial_type | quote }}
+        {% endif %}
+      {% endif %}
+      http://localhost:{{ matrix_synapse_container_client_api_port }}
+
+- name: Ensure Synapse user registered - {{ user.username | quote }}
+  ansible.builtin.command:
+    cmd: "{{ matrix_synapse_register_user_command }}"
+  register: matrix_synapse_register_user_result
+  changed_when: matrix_synapse_register_user_result.rc == 0 and 'User ID already taken' not in matrix_synapse_register_user_result.stdout
+  failed_when: >-
+    matrix_synapse_register_user_result.rc != 0
+    and 'User ID already taken' not in matrix_synapse_register_user_result.stdout
+    and 'HMAC incorrect' not in matrix_synapse_register_user_result.stdout
+    and 'Connection refused' not in matrix_synapse_register_user_result.stderr | default('')
+
+- when: >-
+    'HMAC incorrect' in matrix_synapse_register_user_result.stdout | default('')
+    or 'Connection refused' in matrix_synapse_register_user_result.stderr | default('')
+  block:
+    - name: Restart Synapse due to registration failure (likely a registration_shared_secret or DB credentials change)
+      ansible.builtin.service:
+        name: "matrix-synapse.service"
+        state: restarted
+
+    - name: Wait for Synapse to start after restart
+      ansible.builtin.pause:
+        seconds: "{{ matrix_user_creator_homeserver_start_wait_time_seconds }}"
+
+    - name: Retry Synapse user registration - {{ user.username | quote }}
+      ansible.builtin.command:
+        cmd: "{{ matrix_synapse_register_user_command }}"
+      register: matrix_synapse_register_user_result
+      changed_when: matrix_synapse_register_user_result.rc == 0 and 'User ID already taken' not in matrix_synapse_register_user_result.stdout
+      failed_when: matrix_synapse_register_user_result.rc != 0 and 'User ID already taken' not in matrix_synapse_register_user_result.stdout
