@@ -14,7 +14,10 @@
       - every playbook has a run profile (or is started by a script that is in one), and every
         OpenBao policy file is used,
       - no code or comment names a script or function that no longer exists (the repository's
-        layout before lab.ps1). README.md is not checked: its rename table names them on purpose.
+        layout before lab.ps1); README.md names them only in its rename section ("Where the old
+        scripts went"),
+      - every link in README.md, tests\README.md and vendor\README.md resolves: "#anchor" links to
+        a heading of the same document, other links to a file or folder of the repository.
     The dispatcher: "help" works, an unknown command is refused, a command for your own window is
     refused when the output is redirected (as here), "breakglass" without a command is refused.
 
@@ -77,7 +80,8 @@ $retired = 'Initialize-Lab', 'New-LabFirewall', 'Deploy-LabVault', 'Deploy-LabKe
     'Connect-Lab', 'Show-LabSecret', 'New-LabRecoveryKit', 'Install-LabHostNetwork', 'Invoke-LabPlaybook', 'Unlock-LabVault',
     'Backup-LabVault', 'Open-LabVaultUi', 'Update-LabSshCertificate', 'New-LabSshCa', 'New-LabRootCA', 'Import-LabSecrets',
     'Complete-LabSshMigration'
-$pattern = "(\b($($retired -join '|'))\.ps1\b|\bInvoke-LabRunToken\b|\bUpdate-GuiCertificate\b|\bLabTlsPin2\b|tests/remote\b)"
+# Also any script directly in scripts\ (there are none since lab.ps1) and "Deploy-Lab*.ps1".
+$pattern = "(\b($($retired -join '|'))\.ps1\b|\bscripts[\\/][A-Z][A-Za-z-]*\.ps1\b|Deploy-Lab\*|\bInvoke-LabRunToken\b|\bUpdate-GuiCertificate\b|\bLabTlsPin2\b|tests[\\/]remote\b)"
 # The firewall VM's tag in Hyper-V keeps its old text: changing it would make lab.ps1 refuse the
 # existing firewall as "not built by this script".
 $frozen = 'managed-by=DeployableServer/scripts/New-LabFirewall.ps1'
@@ -93,6 +97,61 @@ foreach ($file in $checked | Where-Object { $_ -ne $PSCommandPath }) {
     }
 }
 Assert-LabTest 'no retired script or function is named' ($found.Count -eq 0) (($found | Select-Object -First 8) -join ', ')
+
+Write-Host 'Documentation'
+# GitHub's anchor for a heading: lower case, without punctuation (letters, digits, spaces, "-" and
+# "_" stay), spaces become "-"; a repeated heading gets "-1", "-2", ...
+function Get-LabDocAnchors([string[]]$Lines) {
+    $anchors = @{}
+    $inCode = $false
+    foreach ($line in $Lines) {
+        if ($line -match '^\s*```') { $inCode = -not $inCode; continue }
+        if ($inCode -or $line -notmatch '^#{1,6} +(.+?)\s*$') { continue }
+        $slug = ($Matches[1].ToLowerInvariant() -replace '[^\p{L}\p{Nd} _-]', '') -replace ' ', '-'
+        $unique = $slug; $n = 0
+        while ($anchors.ContainsKey($unique)) { $n++; $unique = "$slug-$n" }
+        $anchors[$unique] = $true
+    }
+    return $anchors
+}
+foreach ($doc in 'README.md', 'tests\README.md', 'vendor\README.md') {
+    $path = Join-Path $root $doc
+    $lines = [IO.File]::ReadAllLines($path)
+    $anchors = Get-LabDocAnchors $lines
+    $broken = @()
+    $inCode = $false
+    $lineNumber = 0
+    foreach ($line in $lines) {
+        $lineNumber++
+        if ($line -match '^\s*```') { $inCode = -not $inCode; continue }
+        if ($inCode) { continue }
+        foreach ($m in [regex]::Matches($line, '\]\(([^)\s]+)\)')) {
+            $target = $m.Groups[1].Value
+            if ($target -match '^(https?|mailto):') { continue }
+            if ($target.StartsWith('#')) {
+                if (-not $anchors.ContainsKey($target.Substring(1))) { $broken += "${doc}:$lineNumber $target" }
+                continue
+            }
+            # A file link, relative to the document's folder (anchors and :line suffixes dropped).
+            $file = ($target -replace '#.*$', '' -replace ':\d+$', '') -replace '/', '\'
+            if (-not (Test-Path (Join-Path (Split-Path -Parent $path) ([Uri]::UnescapeDataString($file))))) { $broken += "${doc}:$lineNumber $target" }
+        }
+    }
+    Assert-LabTest "$doc`: every link resolves" ($broken.Count -eq 0) "$($broken.Count) broken$(if ($broken) { ': ' + (($broken | Select-Object -First 6) -join ', ') })"
+}
+# Retired names in the README only in its rename section ("Where the old scripts went").
+$readmeLines = [IO.File]::ReadAllLines((Join-Path $root 'README.md'))
+$inRenames = $false
+$inCode = $false
+$found = @()
+$lineNumber = 0
+foreach ($line in $readmeLines) {
+    $lineNumber++
+    if ($line -match '^\s*```') { $inCode = -not $inCode }
+    if (-not $inCode -and $line -match '^#{1,6} ') { $inRenames = $line -match '^#{1,6} Where the old scripts went' }
+    if (-not $inRenames -and $line -match $pattern -and -not $line.Contains($frozen)) { $found += "README.md:$lineNumber" }
+}
+Assert-LabTest 'README names retired scripts only in "Where the old scripts went"' ($found.Count -eq 0) "$($found.Count) lines$(if ($found) { ': ' + (($found | Select-Object -First 8) -join ', ') })"
 
 Write-Host 'Dispatcher'
 $ErrorActionPreference = 'Continue'

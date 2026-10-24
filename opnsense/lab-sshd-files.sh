@@ -3,7 +3,7 @@
 # drop-in, but only if the complete sshd configuration still passes "sshd -t" afterwards
 #
 # Where it runs:
-#   On the firewall, as root, started over SSH by scripts/commands/firewall.ps1 (Update-FirewallSsh);
+#   On the firewall, as root, started over SSH by scripts/lib/LabFirewall.ps1 (Update-FirewallSsh);
 #   it is copied to a private /tmp folder together with the two files and deleted afterwards:
 #     sh lab-sshd-files.sh <host certificate> <drop-in>
 #   Prints "changed" when a file was replaced; the caller then restarts sshd

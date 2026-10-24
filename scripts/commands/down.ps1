@@ -31,8 +31,8 @@
     and logins on this PC (keys\openbao) only fit the installation they were made for, so when
     the vault VM is deleted they are MOVED to keys\openbao-retired-<date-time>, together with
     its snapshots (restoring a snapshot needs the key shares of its time). A rebuilt OpenBao
-    starts empty, and the Deploy-Lab*.ps1 scripts generate new secrets for NEW Keycloak and
-    Matrix installations. Deleting only the vault VM while keeping Keycloak and Matrix
+    starts empty, and the deployments (lab.ps1 deploy keycloak, deploy matrix) generate new
+    secrets for NEW Keycloak and Matrix installations. Deleting only the vault VM while keeping Keycloak and Matrix
     therefore means restoring OpenBao from a snapshot (README.md, "Restore OpenBao from a
     snapshot"); the playbooks refuse to generate new secrets for an existing database.
 

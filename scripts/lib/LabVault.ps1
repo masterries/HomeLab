@@ -552,7 +552,7 @@ function Invoke-LabUnseal {
 <#
 .SYNOPSIS
     Renews what is due (lab.ps1 maintain): OpenBao's TLS certificate, the root CA's revocation
-    list, the intermediate CA, Keycloak's certificate.
+    list, the intermediate CA, Keycloak's and the firewall's certificates.
 
 .DESCRIPTION
     Certificates expire, and they are only renewed when the code that renews them runs.

@@ -135,8 +135,7 @@ LAB = JSON.parse(File.read(File.expand_path("../config/lab.json", __dir__)))
 LAB_VMS = LAB["vms"].map { |vm|
   [vm["name"], { mac: vm["mac"], ip: vm["ip"], cpus: vm["cpus"] || 2, memory: vm["memory"] || 2048,
                  # "false" in lab.json only for VMs that hold keys in RAM (vault): see below.
-                 checkpoints: vm.fetch("checkpoints", true),
-                 console_autologin: vm.fetch("consoleAutologin", true) }]
+                 checkpoints: vm.fetch("checkpoints", true) }]
 }.to_h
 LAB_SWITCH = "LabNet"
 

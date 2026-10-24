@@ -37,8 +37,8 @@
 #>
 
 $script:LabProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-# A wrong root would make every library look for keys\ in the wrong place - and New-LabSshCa
-# would then create a NEW offline SSH CA there. So the root is checked, not assumed.
+# A wrong root would make every library look for keys\ in the wrong place - and
+# Initialize-LabSshCa would then create a NEW offline SSH CA there. So the root is checked, not assumed.
 foreach ($marker in 'lab.ps1', 'config\lab.json', 'vagrant\Vagrantfile') {
     if (-not (Test-Path (Join-Path $script:LabProjectRoot $marker))) {
         throw "scripts\lib\Lab.ps1: $script:LabProjectRoot is not the project folder ($marker is missing)."
@@ -65,7 +65,7 @@ $script:LabCommands = [ordered]@{
     'down'         = @{ File = 'scripts\commands\down.ps1'; Elevated = $true; Group = 'Build'; Help = 'delete the lab VMs (or one VM: down matrix); asks first' }
     'firewall'     = @{ File = 'scripts\commands\firewall.ps1'; Elevated = $true; Group = 'Build'; Help = 'build (-Rebuild) or check the OPNsense firewall VM' }
     'deploy'       = @{ File = 'scripts\commands\deploy.ps1'; Group = 'Deploy'; Help = 'deploy vault | firewall | keycloak | matrix | all' }
-    'run'          = @{ Function = 'Invoke-LabRunCli'; PassExitCode = $true; Group = 'Deploy'; Help = 'run a playbook on ansible-control (run <playbook.yml> [ansible-playbook options])' }
+    'run'          = @{ Function = 'Invoke-LabRunCli'; PassExitCode = $true; Group = 'Deploy'; Help = 'run a profile on ansible-control (run <profile|playbook.yml> [ansible-playbook options]; alone: list them)' }
     'maintain'     = @{ Function = 'Invoke-LabMaintenance'; Group = 'Deploy'; Help = 'renew what is due (certificates, revocation lists); -List only shows it' }
     'connect'      = @{ File = 'scripts\commands\connect.ps1'; PassExitCode = $true; Group = 'Use'; Help = 'SSH to a lab machine as ansible (connect [vm] [command])' }
     'secret'       = @{ File = 'scripts\commands\secret.ps1'; Group = 'Use'; Help = 'copy a secret to the clipboard (secret keycloak/users/alice, secret -List)' }
@@ -120,7 +120,7 @@ function Show-LabHelp([string]$Command) {
         }
     }
     Write-Host ''
-    Write-Host 'First time:  host-setup (own window) -> up -> deploy vault -> recovery (own window) -> deploy all'
+    Write-Host 'First time:  host-setup (own window) -> up -> deploy vault -> trust (own window) -> recovery (own window) -> deploy all'
     Write-Host 'Every day:   up (after a Windows restart), then connect / secret / ui as needed'
 }
 

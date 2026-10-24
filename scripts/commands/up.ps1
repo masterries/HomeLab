@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
     Builds the lab or brings it up to date: the firewall VM and the lab VMs from
-    config\lab.json (ansible-control, matrix, keycloak).
+    config\lab.json (ansible-control, matrix, keycloak, vault).
 
 .DESCRIPTION
     This is the central orchestration script of the lab. It takes the firewall and the lab
@@ -22,9 +22,8 @@
         at vagrant\ itself, so the current directory does not matter.
       - It drives lab.ps1 firewall (the OPNsense firewall), Vagrant (Hyper-V provider,
         the Linux VMs) and the Hyper-V cmdlets, then tests the result over SSH. It does not
-        deploy applications: that is done afterwards, in this order, by
-        .\lab.ps1 deploy vault (OpenBao), .\lab.ps1 deploy keycloak and
-        .\lab.ps1 deploy matrix (other playbooks through
+        deploy applications: that is done afterwards by .\lab.ps1 deploy vault (OpenBao), then
+        .\lab.ps1 deploy all (vault, firewall, keycloak, matrix; other playbooks through
         .\lab.ps1 run).
       - Run again (for example after a Windows restart), it also unseals OpenBao and renews
         what is due: certificates and the root CA's revocation list (step 7).
@@ -74,18 +73,19 @@
       5. Lab VMs (ansible-control, matrix, keycloak, vault; the list comes from
          config\lab.json). Started on LabNet only, then provisioned: user "ansible", SSH
          (own host keys, published to the PC through Hyper-V KVP, trust in the lab's SSH CAs,
-         certificate logins only), console autologin (not on vault) and zsh on all;
-         ansible-control also gets its own SSH key and Ansible. Then every VM gets its host
-         certificate. The services on them are deployed afterwards with their own scripts
-         (lab.ps1 deploy vault, lab.ps1 deploy keycloak, lab.ps1 deploy matrix).
-      6. Tests. Name resolution from the PC, an SSH login to every VM through
-         keys\ssh_config (with the PC's certificate, checking every host certificate), and
-         the Ansible playbook ping.yml, which shows that ansible-control reaches the other VMs
-         by their DNS names with a certificate of its own and that sudo works on every VM.
+         certificate logins only); ansible-control also gets its own SSH key and Ansible -
+         only what must exist before Ansible can reach a VM. Then every VM gets its host
+         certificate. The services on them are deployed afterwards (lab.ps1 deploy ...).
+      6. Checks and the base setup. Name resolution from the PC and an SSH login to every
+         VM through keys\ssh_config (with the PC's certificate, checking every host
+         certificate); then two runs on ansible-control (lib\LabRun.ps1): base.yml (zsh, the
+         console autologin - not on vault) on every Ubuntu VM, and checks.yml, which reaches
+         every machine by its DNS name with a certificate of its own and checks host
+         certificates, sudo, sshd's settings and the firewall's bootstrap contract.
       7. Maintenance (once OpenBao is deployed): renewals that are due - OpenBao's TLS
-         certificate, the root CA's revocation list, the intermediate CA (lab.ps1 deploy vault)
-         and Keycloak's certificate (lab.ps1 deploy keycloak); see Get-LabMaintenanceDue in
-         LabSecrets.ps1.
+         certificate, the root CA's revocation list, the intermediate CA (lab.ps1 deploy vault),
+         Keycloak's certificate (lab.ps1 deploy keycloak) and the firewall's GUI certificate
+         (lab.ps1 deploy firewall); see Get-LabMaintenanceDue in LabSecrets.ps1.
 
     Idempotency. The script can be run again at any time, also after a Windows reboot
     (which gives the Default Switch a new subnet; only the firewall's WAN side uses it, and
@@ -96,9 +96,9 @@
     started, Hyper-V files are moved only if they are somewhere else, host certificates are
     signed only when they are due (30 days before they expire). keys\ssh_config is
     rewritten on every run. Provisioning of the Linux VMs also runs on every run ("vagrant
-    up" alone runs it only when a VM is first created), so changes to provision\ are
-    applied by running this script again. The provisioning scripts are written so that they
-    can be re-run safely. Changes to the firewall's configuration (opnsense\, and the VMs and
+    up" alone runs it only when a VM is first created), and so does base.yml, so changes to
+    provision\ and to the base setup are applied by running this script again. Both are
+    written so that they can be re-run safely. Changes to the firewall's configuration (opnsense\, and the VMs and
     "published" entries in config\lab.json) need a rebuild of the firewall:
     .\lab.ps1 firewall -Rebuild.
 
@@ -112,17 +112,18 @@
     An existing VAGRANT_HOME and an existing .vagrant junction are kept. Once both are in
     place, changing this value only moves the Hyper-V files.
 
-.PARAMETER BreakGlass
-    When OpenBao cannot sign SSH certificates (the vault VM is broken), let the offline SSH CA
-    sign them for this run instead (LabSsh.ps1, Get-LabSshSigner). Without it the script stops
-    with the reason, so that OpenBao being unavailable never moves signing outside its audit
-    log by accident.
-
 .EXAMPLE
     .\lab.ps1 up
 
     Builds the lab from scratch, or brings an existing lab up to date: starts stopped VMs,
-    re-runs provisioning and runs the tests.
+    re-runs provisioning and the base setup, and runs the checks.
+
+    .\lab.ps1 breakglass up
+
+    The same, but when OpenBao cannot sign SSH certificates (the vault VM is broken), the
+    offline SSH CA signs them for this run instead (LabSsh.ps1, Get-LabSshSigner). Without it
+    the script stops with the reason, so that OpenBao being unavailable never moves signing
+    outside its audit log by accident.
 
 .NOTES
     Lab-only shortcuts in this script, and what an enterprise setup does instead:
@@ -137,8 +138,8 @@
 
     Related scripts: lab.ps1 host-setup (once, before this script),
     lab.ps1 trust (make Windows trust the lab root CA), lab.ps1 deploy vault (OpenBao:
-    secrets and the intermediate CA), lab.ps1 deploy keycloak and lab.ps1 deploy matrix (the
-    applications, in this order after this script), lab.ps1 secret (read a password),
+    secrets and the intermediate CA), lab.ps1 deploy all (vault, firewall, keycloak, matrix,
+    in this order after this script), lab.ps1 secret (read a password),
     lab.ps1 connect (SSH login), lab.ps1 run (run Ansible playbooks),
     lab.ps1 down (delete VMs).
 #>
@@ -369,7 +370,7 @@ try {
     }
     if ($states.Contains('vault') -and $states['vault'] -ne 'not_created' -and (Test-LabSshOpenBaoTrusted)) {
         try { Unlock-LabVault -TimeoutSeconds 240 }
-        catch { Write-Warning "OpenBao is not usable yet ($($_.Exception.Message)). SSH certificates need it; if it stays broken, run this script with -BreakGlass." }
+        catch { Write-Warning "OpenBao is not usable yet ($($_.Exception.Message)). SSH certificates need it; if it stays broken: .\lab.ps1 breakglass up" }
     }
     # The firewall is an OPNsense VM. There is no Vagrant box for OPNsense on Hyper-V, so
     # lab.ps1 firewall builds it: official nano image, configuration rendered from

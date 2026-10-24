@@ -11,8 +11,10 @@
 # Why: the playbooks read the lab's secrets from OpenBao at run time and keep them only in
 # memory. For that they need a token, and that token should exist only while they run, be valid
 # only from this machine, and allow only what that playbook needs. The PC creates one per run
-# (token role "ansible-run": 2 hours at most, bound to ansible-control's address, policies
-# ansible-keycloak and/or ansible-matrix) and hands it over WRAPPED:
+# with the policies of the run's profile (config/run-profiles.json), bound to ansible-control's
+# address, through the profile's token role - "ansible-run" for deployments (2 hours at most;
+# ansible-keycloak, ansible-matrix, ansible-firewall, ansible-web) or "ansible-config" for
+# OpenBao's configuration plane (30 minutes, openbao-config) - and hands it over WRAPPED:
 #
 # RESPONSE WRAPPING
 #   OpenBao does not return the new token itself, but a single-use "wrapping token" that is valid
@@ -33,7 +35,7 @@
 #      (playbooks/tasks/openbao-secrets.yml) understand - and runs the command with stdin from
 #      /dev/null.
 #   4. On exit, also after a failure or Ctrl+C: revokes the token (auth/token/revoke-self), so
-#      it is useless even before its 2 hours are over, and removes Ansible's temporary folder
+#      it is useless even before its lifetime is over, and removes Ansible's temporary folder
 #      (in RAM, see ANSIBLE_LOCAL_TEMP below).
 #
 # Environment: VAULT_ADDR (set by the PC from config/lab.json); VAULT_CACERT defaults to

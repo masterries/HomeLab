@@ -35,7 +35,7 @@ set -euo pipefail
 
 ANSIBLE_USER=ansible
 
-# The login shell becomes zsh later (setup-zsh.sh); bash is only the starting point.
+# The login shell becomes zsh later (ansible/playbooks/base.yml); bash is only the starting point.
 if ! id "$ANSIBLE_USER" >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash "$ANSIBLE_USER"
 fi

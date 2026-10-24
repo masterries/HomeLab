@@ -172,14 +172,16 @@ function Initialize-LabRootCa {
 }
 
 # Signs a certificate signing request (PEM) with the root and writes the certificate (PEM) to
-# $OutFile; a copy goes to keys\pki\issued.
+# $OutFile; a copy goes to keys\pki\issued. The root is created first if there is none yet (the
+# very first signature is the GUI certificate of a new lab's firewall, before deploy vault), and
+# its CRL is renewed when due.
 #   -Kind Intermediate   a CA one level below the root (3 years by default)
 #   -Kind Server         a TLS server certificate for $DnsName, all under the lab domain (397 days)
 # OpenSSL 1.1 never copies extensions from the CSR: only the profile here counts, so a CSR cannot
 # sneak in extra names or CA rights.
 function Invoke-LabRootCaSign([string]$Csr, [ValidateSet('Intermediate', 'Server')][string]$Kind, [string[]]$DnsName, [int]$Days, [string]$OutFile) {
     if (-not $OutFile) { throw 'Invoke-LabRootCaSign: -OutFile is required.' }
-    Write-LabPkiConfig
+    Initialize-LabRootCa
     $domain = $script:LabConfig.domain
     $csrPath = (Resolve-Path $Csr).Path
     $outPath = [IO.Path]::GetFullPath($OutFile)

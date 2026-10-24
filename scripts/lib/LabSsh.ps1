@@ -29,7 +29,7 @@
       offline CA   An ed25519 key on this PC (keys\ssh\offline-ca), encrypted with a passphrase
                    that is stored with DPAPI (ssh/offline-ca-passphrase). It signs while OpenBao
                    does not exist yet (bootstrap) and when OpenBao is broken (break-glass, only
-                   on request: -BreakGlass). Every machine trusts it permanently, so a firewall
+                   on request: .\lab.ps1 breakglass <command>). Every machine trusts it permanently, so a firewall
                    rebuild is always a way back in. Both are in the recovery file.
       OpenBao CA   The SSH secrets engine "ssh" in OpenBao (lab.ps1 deploy vault). Its key is
                    generated inside OpenBao and never leaves it. It signs everyday certificates,
@@ -318,7 +318,8 @@ function Assert-LabSshCertificate([string]$Path, $Expected) {
 #   - during the bootstrap (OpenBao not deployed yet, or its CA not yet pushed and verified),
 #   - when OpenBao's TLS certificate is genuine (issued under the lab root, right name) but has
 #     expired: renewing it needs SSH to the vault VM, so this must not depend on OpenBao itself,
-#   - on request: -BreakGlass, or $env:LAB_SSH_BREAKGLASS = '1'.
+#   - on request: .\lab.ps1 breakglass <command> (it sets $env:LAB_SSH_BREAKGLASS = '1'), or the
+#     -BreakGlass switch of the functions below.
 # Everything else (OpenBao stopped, sealed and not unsealable, a TLS certificate that does not
 # chain to the lab root) throws: an attacker who blocks or impersonates OpenBao must not be
 # able to push the lab into unaudited offline signing.

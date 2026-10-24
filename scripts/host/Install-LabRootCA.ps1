@@ -108,7 +108,7 @@ $roots = @(
     @{ File = Join-Path $projectRoot 'keys\ca\lab-root-ca.crt'; Retired = $true }
 ) | Where-Object { Test-Path $_.File }
 if (-not $roots -and -not $Remove) {
-    throw 'No lab root CA found (keys\pki\root-ca.crt). It is created by .\lab.ps1 deploy vault (also run by lab.ps1 up and lab.ps1 deploy vault).'
+    throw 'No lab root CA found (keys\pki\root-ca.crt). It is created by the first firewall build (.\lab.ps1 up) or by .\lab.ps1 deploy vault.'
 }
 $roots = @($roots)
 
