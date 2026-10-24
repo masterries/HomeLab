@@ -171,4 +171,11 @@ $glass = Invoke-LabChild @('breakglass')
 Assert-LabTest 'breakglass without a command is refused' ($glass.Code -eq 2) "exit code $($glass.Code)"
 $list = Invoke-LabChild @('run')
 Assert-LabTest 'run without arguments lists the profiles' ($list.Code -eq 0 -and $list.Text -match 'openbao-config') "exit code $($list.Code)"
+# Typed in a PowerShell session, "-Confirm:$false" reaches lab.ps1 as two elements of $args,
+# "-Confirm:" and $false (Split-LabArguments in scripts\lib\Lab.ps1). They must become one named
+# parameter; everything else stays positional, in its order.
+$split = Split-LabArguments @('matrix', '-Confirm:', $false, '-WhatIf', '--check', '-Target:', 'vault')
+$splitOk = ($split.Named.Count -eq 2 -and $split.Named['Confirm'] -eq $false -and $split.Named['Target'] -eq 'vault' -and
+    (@($split.Positional) -join ' ') -eq 'matrix -WhatIf --check')
+Assert-LabTest '-Name:value becomes a named parameter (Split-LabArguments)' $splitOk "named: $(($split.Named.Keys | Sort-Object) -join ','); positional: $(@($split.Positional) -join ' ')"
 Complete-LabTest 'Test-LabLayout'

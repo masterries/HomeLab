@@ -81,6 +81,24 @@ $script:LabCommands = [ordered]@{
     'mdad-upgrade' = @{ File = 'scripts\dev\Update-LabMdad.ps1'; Group = 'Maintainer'; Help = 'take a new matrix-docker-ansible-deploy commit into vendor\mdad' }
 }
 
+# lab.ps1's arguments for the command behind it, as @{ Positional = @(...); Named = @{...} } for
+# splatting both. "-Name:value" (for example -Confirm:$false) arrives in $args as TWO elements,
+# "-Name:" and the value, and splatting the array would pass them on as two arguments: for
+# -Confirm that means "ask" plus $false as the first positional parameter. Such pairs become named
+# parameters; every other argument stays as it is (also "-WhatIf" or "--check"), in its order.
+function Split-LabArguments([object[]]$Arguments) {
+    $named = @{}
+    $positional = @()
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        if ($Arguments[$i] -is [string] -and $Arguments[$i] -match '^-([A-Za-z][A-Za-z0-9_]*):$' -and $i + 1 -lt $Arguments.Count) {
+            $named[$Matches[1]] = $Arguments[$i + 1]
+            $i++
+        }
+        else { $positional += , $Arguments[$i] }
+    }
+    return @{ Positional = $positional; Named = $named }
+}
+
 # Administrator rights (elevated, under UAC) or membership in "Hyper-V Administrators"
 # (S-1-5-32-578): Hyper-V and Vagrant's Hyper-V provider need one of them.
 function Test-LabElevated {

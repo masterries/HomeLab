@@ -26,7 +26,8 @@
     .\lab.ps1 breakglass up
 #>
 # A plain script on purpose (no [CmdletBinding()]): every argument after the command lands in
-# $args and is passed on unchanged - also "-v", "--check" or "-WhatIf" for the command behind it.
+# $args and is passed on unchanged - also "-v", "--check" or "-WhatIf" for the command behind it
+# (only "-Name:value" pairs are rebuilt as named parameters, see Split-LabArguments).
 # The only parameter starts with "_", so that no abbreviation a command uses (-s, -c, -f ...) can
 # be taken for it. Enterprise equivalent: one CLI with subcommands (az, kubectl, gh).
 param(
@@ -38,7 +39,13 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'scripts\lib\Lab.ps1')
 
-if ($_Command -eq 'help') { Show-LabHelp @args; exit 0 }
+# The arguments for the command, "-Name:value" pairs as named parameters (Split-LabArguments in
+# scripts\lib\Lab.ps1 explains why; -Confirm:$false would otherwise not arrive).
+$split = Split-LabArguments $args
+$rest = $split.Positional
+$named = $split.Named
+
+if ($_Command -eq 'help') { Show-LabHelp @rest @named; exit 0 }
 
 # BREAK-GLASS: one command with the offline SSH CA allowed to sign when OpenBao cannot
 # (LabSsh.ps1, Get-LabSshSigner). Set for the inner command only, then removed again.
@@ -47,7 +54,7 @@ if ($_Command -eq 'breakglass') {
     Write-Host 'BREAK-GLASS: the offline SSH CA may sign SSH certificates for this command.' -ForegroundColor Red
     $previous = $env:LAB_SSH_BREAKGLASS
     $env:LAB_SSH_BREAKGLASS = '1'
-    try { & $PSCommandPath @args; $code = $LASTEXITCODE }
+    try { & $PSCommandPath @rest @named; $code = $LASTEXITCODE }
     finally { $env:LAB_SSH_BREAKGLASS = $previous }
     exit $code
 }
@@ -67,8 +74,8 @@ if ($entry.UserOnly -and ([Console]::IsInputRedirected -or [Console]::IsOutputRe
 
 $global:LASTEXITCODE = 0
 try {
-    if ($entry.File) { & (Join-Path $PSScriptRoot $entry.File) @args }
-    else { & $entry.Function @args }
+    if ($entry.File) { & (Join-Path $PSScriptRoot $entry.File) @rest @named }
+    else { & $entry.Function @rest @named }
 }
 catch {
     Write-Host "$($_.Exception.Message)" -ForegroundColor Red

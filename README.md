@@ -8159,11 +8159,17 @@ path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
   `--check` and `-WhatIf` among them (`-WhatIf` exists only with
   `SupportsShouldProcess`) ([P11](#p11-windows-powershell-51-quirks)); the parameter is named
   `_Command` so that no abbreviation a command uses (`-s`, `-c`, `-f` ...) can
-  match it. Exit codes: 0 done, 1 failed or unknown command, 2 refused before
+  match it. One exception to "unchanged": typed in a session, `-Name:value`
+  (`-Confirm:$false`, `-Machine:matrix`) arrives in `$args` as two elements,
+  `-Name:` and the value, and splatting the array would hand them on as two
+  arguments - for `-Confirm:$false` that means "ask" plus a stray `$false` as
+  the first positional parameter. `Split-LabArguments` (`scripts\lib\Lab.ps1`)
+  turns such pairs into named parameters and leaves everything else in its
+  order. Exit codes: 0 done, 1 failed or unknown command, 2 refused before
   anything changed (not elevated, not your own window); `run`, `connect` and
   `test` pass on the exit code of what they ran. `Test-LabLayout` checks that
-  the `ValidateSet` and the table name the same commands. Enterprise equivalent:
-  one CLI with subcommands (`az`, `kubectl`, `gh`).
+  the `ValidateSet` and the table name the same commands, and the pairs.
+  Enterprise equivalent: one CLI with subcommands (`az`, `kubectl`, `gh`).
 - The PowerShell libraries are plain `.ps1` files, loaded by "dot-sourcing"
   (`. <file>`): `lab.ps1`, every command script and every test load
   `scripts\lib\Lab.ps1` that way, always at script level, never inside a function, and `Lab.ps1`
