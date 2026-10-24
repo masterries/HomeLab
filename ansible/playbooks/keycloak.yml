@@ -84,8 +84,8 @@
         openbao_existing_state: "{{ keycloak_database.stat.exists }}"
 
     # Before OpenBao, the secrets were a plain file here (generated once, backed up on the PC).
-    # They are in OpenBao now (scripts\Import-LabSecrets.ps1 moved them there unchanged), so
-    # the file is removed.
+    # They are in OpenBao now (a one-time migration, since removed, moved them there unchanged),
+    # so the file is removed.
     - name: Old plain-text secrets file removed
       ansible.builtin.file:
         path: "{{ keycloak_secrets_dir }}"

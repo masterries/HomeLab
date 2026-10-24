@@ -164,7 +164,7 @@
 
     # Before OpenBao, the secrets were plain files here (generated once, backed up on the PC),
     # and the client secret for MAS was in keycloak-upstream.yml. They are in OpenBao now
-    # (scripts\Import-LabSecrets.ps1 moved them there unchanged), so the files are removed.
+    # (a one-time migration, since removed, moved them there unchanged), so the files are removed.
     - name: Old plain-text secret files removed
       ansible.builtin.file:
         path: "{{ item }}"

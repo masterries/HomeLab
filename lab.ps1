@@ -14,9 +14,9 @@
     ($LabCommands). lab.ps1 itself only checks those rights and passes every further argument on
     unchanged.
 
-    Exit codes: 0 done, 1 the command failed (the reason is printed), 2 refused before anything
-    was changed (wrong window, not elevated, unknown command); run, connect and test pass on the
-    exit code of what they ran.
+    Exit codes: 0 done, 1 the command failed (the reason is printed) or is unknown (PowerShell
+    itself refuses it; Tab completes the command names), 2 refused before anything was changed
+    (wrong window, not elevated); run, connect and test pass on the exit code of what they ran.
 
 .EXAMPLE
     .\lab.ps1 up

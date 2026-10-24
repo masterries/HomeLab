@@ -9,9 +9,8 @@
       2. real run: the value is generated and stored,
       3. second real run: the stored value is read, nothing new is created,
       4. the throwaway secret is deleted again (with pc-admin).
-    Runs tests/remote/secret-creation.yml on ansible-control with a run token for the policy
-    ansible-keycloak. Needs ~/lab on ansible-control (any lab.ps1 run run puts it
-    there). No secret is printed, only lengths.
+    Runs ansible/tests/secret-creation.yml on ansible-control (profile test-secret-creation)
+    with a run token for the policy ansible-keycloak. No secret is printed, only lengths.
 
 .EXAMPLE
     .\tests\Test-LabSecretCreation.ps1

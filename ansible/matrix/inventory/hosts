@@ -12,14 +12,15 @@
 # Where it is used:
 #   ansible/playbooks/matrix-prepare.yml copies this folder into ~/mdad/inventory/ on
 #   ansible-control (MDAD expects its inventory there, and ignores that folder in git).
-#   scripts/Deploy-LabMatrix.ps1 then runs MDAD there. Edit the files here, not on the VM.
+#   ansible/bin/deploy-matrix (.\lab.ps1 deploy matrix) then runs MDAD there. Edit the files
+#   here, not on the VM.
 #
 # The group name "matrix_servers" is what MDAD's playbook targets. The host's inventory name
 # matrix.lab.internal follows MDAD's convention (the homeserver's FQDN); it selects the folder
 # host_vars/matrix.lab.internal/. The machine is the lab VM "matrix", reached by its DNS name
 # (ansible_host; inside the lab it resolves to the VM's own address 10.10.10.30), as user
 # "ansible" with ansible-control's own key (~/.ssh/id_ed25519, ssh's default key file) and the
-# run's SSH certificate next to it (valid for matrix only, scripts/Deploy-LabMatrix.ps1), and
+# run's SSH certificate next to it (valid for matrix only, scripts/lib/LabRun.ps1), and
 # sudo (become) to root. The host certificate of matrix is checked against the lab's SSH CAs
 # (/etc/ssh/ssh_config.d/20-lab.conf on ansible-control).
 #

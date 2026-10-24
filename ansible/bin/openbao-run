@@ -3,7 +3,8 @@
 #
 # Where it runs:
 #   On ansible-control, as user "ansible", started over SSH by the PC's scripts
-#   (lab.ps1 run, lab.ps1 deploy matrix, through Invoke-LabRunToken in LabSecrets.ps1):
+#   (bin/lab-run, for every run profile with OpenBao policies - Invoke-LabRun in
+#   scripts/lib/LabRun.ps1, that is lab.ps1 run, deploy and up):
 #     <wrapping token on stdin> | openbao-run '<shell command>'
 #   Not meant to be started by hand.
 #
