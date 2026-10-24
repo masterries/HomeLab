@@ -329,19 +329,27 @@ public static class LabConsoleMode {
 
 # A token for ONE Ansible run on ansible-control, returned WRAPPED: what comes back is a
 # single-use wrapping token, valid for 120 seconds, that ansible-control exchanges for the real
-# token (ansible\bin\openbao-run explains the pattern). Minted through the token role
-# "ansible-run" (LabVault.ps1): at most 2 hours, usable only from ansible-control's address, with
-# only the given policies (those of the run's profile, config\run-profiles.json). The PC itself
-# logs in as "pc-deploy", which may do little else (sign SSH certificates, take snapshots).
+# token (ansible\bin\openbao-run explains the pattern). Minted through a token role (LabVault.ps1),
+# usable only from ansible-control's address, with only the given policies (those of the run's
+# profile, config\run-profiles.json). Which of the PC's logins may mint depends on the role:
+#   ansible-run     deployments, at most 2 hours     pc-deploy, which may do little else (sign SSH
+#                                                    certificates, take snapshots)
+#   ansible-config  openbao-config.yml, 30 minutes   pc-admin (the root token while the bootstrap is
+#                                                    not finished): changing how OpenBao works is an
+#                                                    administrator's decision
 # LabRun.ps1 (Invoke-LabRun) hands it to ansible-control on stdin.
-function New-LabRunToken([string[]]$Policies, [string]$Name = 'ansible') {
-    $deployToken = Get-LabBaoToken 'pc-deploy'
+function New-LabRunToken([string[]]$Policies, [string]$Name = 'ansible', [string]$Role = 'ansible-run') {
+    $minter = switch ($Role) {
+        'ansible-run' { Get-LabBaoToken 'pc-deploy' }
+        'ansible-config' { Get-LabAdminToken }
+        default { throw "No token role '$Role' for runs (ansible-run or ansible-config)." }
+    }
     try {
-        $answer = Invoke-LabBao POST 'auth/token/create/ansible-run' @{ policies = $Policies; display_name = $Name } -Token $deployToken -Headers @{ 'X-Vault-Wrap-TTL' = '120s' }
+        $answer = Invoke-LabBao POST "auth/token/create/$Role" @{ policies = $Policies; display_name = $Name } -Token $minter -Headers @{ 'X-Vault-Wrap-TTL' = '120s' }
         if (-not $answer.wrap_info.token) { throw 'OpenBao returned no wrapped token.' }
         return $answer.wrap_info.token
     }
-    finally { Close-LabBaoToken $deployToken }
+    finally { Close-LabBaoToken $minter }
 }
 
 # --- Certificate maintenance --------------------------------------------------------------------

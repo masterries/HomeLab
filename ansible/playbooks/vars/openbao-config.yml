@@ -1,0 +1,88 @@
+# vars/openbao-config.yml -- the desired configuration of OpenBao's engines (playbooks/openbao-config.yml)
+#
+# Every value is written in the form OpenBao RETURNS it when the object is read (durations in
+# seconds where OpenBao answers with seconds, lists as lists). That is what makes the playbook
+# idempotent: it reads each object, compares these keys, and writes only when one differs - and
+# what it writes is exactly these values (OpenBao accepts both forms).
+# "!unsafe" keeps Ansible from treating OpenBao's own {{...}} templates as Jinja.
+
+# Mounts that must exist (created only when missing, never compared or removed; their settings are
+# tuned below).
+openbao_mounts:
+  lab: { type: kv, options: { version: "2" }, description: Lab secrets }
+  pki_int: { type: pki, description: Lab intermediate CA, config: { max_lease_ttl: 8760h } }
+
+openbao_password_policy_hcl: |
+  rule "charset" {
+    charset = "abcdefghijklmnopqrstuvwxyz"
+    min-chars = 1
+  }
+  rule "charset" {
+    charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    min-chars = 1
+  }
+  rule "charset" {
+    charset = "0123456789"
+    min-chars = 1
+  }
+
+# Objects written whenever they differ, in this order.
+openbao_config_objects:
+  # The three headers are part of the ACME protocol and must pass through OpenBao's API.
+  - path: sys/mounts/pki_int/tune
+    desired: { max_lease_ttl: 31536000, allowed_response_headers: [Replay-Nonce, Link, Location] }
+  # KV version 2 with check-and-set required: every write must say which version it expects, so two
+  # writers cannot silently overwrite each other; writing a NEW secret means cas=0.
+  - path: lab/config
+    desired: { cas_required: true, max_versions: 10 }
+  # Password policies: OpenBao generates the values (GET sys/policies/password/<name>/generate).
+  # Letters and digits only, as everywhere in the lab (no escaping problems in YAML, shell, env
+  # files and URLs).
+  - path: sys/policies/password/lab-alnum-24
+    desired: { policy: "length = 24\n{{ openbao_password_policy_hcl }}" }
+  - path: sys/policies/password/lab-alnum-48
+    desired: { policy: "length = 48\n{{ openbao_password_policy_hcl }}" }
+  - path: sys/policies/password/lab-alnum-64
+    desired: { policy: "length = 64\n{{ openbao_password_policy_hcl }}" }
+  # URLs baked into every certificate the intermediate issues: where to get the CA certificate (AIA)
+  # and the revocation list (CDP), over plain HTTP (port 80, nginx on the vault VM).
+  - path: pki_int/config/cluster
+    desired: { path: "https://vault.{{ lab_domain }}:8200/v1/pki_int", aia_path: "http://vault.{{ lab_domain }}/v1/pki_int" }
+  - path: pki_int/config/urls
+    desired:
+      enable_templating: true
+      issuing_certificates: [!unsafe "{{cluster_aia_path}}/issuer/{{issuer_id}}/der"]
+      crl_distribution_points: [!unsafe "{{cluster_aia_path}}/issuer/{{issuer_id}}/crl/der"]
+  # The revocation list is rebuilt automatically (else it goes stale after 72 h and Windows reports
+  # "revocation offline"); expired certificates are tidied daily.
+  - path: pki_int/config/crl
+    desired: { expiry: 168h, auto_rebuild: true, auto_rebuild_grace_period: 48h, ocsp_disable: true }
+  - path: pki_int/config/auto-tidy
+    desired: { enabled: true, interval_duration: 86400, tidy_cert_store: true, tidy_revoked_certs: true, tidy_acme: true, safety_buffer: 259200 }
+
+# PKI roles: what may be issued, explicitly (the defaults are permissive: localhost, IP SANs,
+# wildcards and client certificates would all be allowed). Written once an issuer exists.
+openbao_pki_role_defaults:
+  allow_subdomains: false
+  allow_bare_domains: true
+  allow_wildcard_certificates: false
+  allow_localhost: false
+  allow_ip_sans: false
+  enforce_hostnames: true
+  server_flag: true
+  client_flag: false
+  key_usage: [DigitalSignature]
+  no_store: false
+  issuer_ref: default
+openbao_pki_roles:
+  # Traefik on the Matrix VM, through ACME (90-day certificates, renewed automatically).
+  acme-matrix: { allowed_domains: ["matrix.{{ lab_domain }}", "element.{{ lab_domain }}", "{{ lab_domain }}"], key_type: any, ttl: 7776000, max_ttl: 7776000 }
+  # Keycloak: Ansible sends a CSR made on the Keycloak VM (the key stays there).
+  keycloak: { allowed_domains: ["keycloak.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
+  # The nginx demo (hello-nginx.yml) on a VM named "hello"; add names here for others.
+  web: { allowed_domains: ["hello.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
+
+# ACME (the protocol of Let's Encrypt): clients prove control of a name over HTTP and get a
+# certificate. Only the role acme-matrix may be used; the role-less default directory is closed
+# ("forbid"). No external account binding in the isolated lab.
+openbao_acme: { enabled: true, allowed_roles: [acme-matrix], allowed_issuers: ["*"], default_directory_policy: forbid, eab_policy: not-required }

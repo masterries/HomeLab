@@ -1,0 +1,140 @@
+# playbooks/openbao-config.yml -- OpenBao's configuration plane: the secrets engines and how they
+# behave
+#
+# Where it runs: on ansible-control itself (profile "openbao-config", started by ".\lab.ps1 deploy
+# vault"), against OpenBao's API, with a token for this run only: token role ansible-config, policy
+# openbao-config (config/openbao/policies/openbao-config.hcl), 30 minutes, minted only by pc-admin on
+# the PC, bound to ansible-control's address, revoked when the run ends (bin/openbao-run).
+#
+# WHO CONFIGURES WHAT
+#   The PC (scripts/lib/LabVault.ps1) owns OpenBao's IDENTITY PLANE and its bootstrap: initialising
+#   and unsealing (the key shares are in DPAPI), the ACL policies (config/openbao/policies), AppRoles,
+#   token roles, the SSH CA, and the intermediate CA's key and certificate (signed by the offline
+#   root, which lives only on the PC). This playbook owns the CONFIGURATION PLANE: the KV mount
+#   "lab", password policies, the intermediate's mount, URLs, revocation list and tidying, its PKI
+#   roles and ACME. The token cannot write any of the PC's objects (see the policy), so a stolen
+#   token of a run cannot give anyone new rights.
+#
+# Idempotent: each object is read, compared and written only when a value differs
+# (tasks/openbao-api.yml); a second run reports changed=0. --check --diff shows what would change.
+# Nothing is ever deleted. On a brand-new OpenBao the PKI roles and ACME wait for the intermediate CA,
+# which the PC creates after this playbook's first run; "deploy vault" then runs it again.
+- name: OpenBao's configuration plane
+  hosts: control
+  gather_facts: false
+  vars_files:
+    - vars/openbao-config.yml
+  vars:
+    openbao_headers:
+      X-Vault-Token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+    openbao_url: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}"
+    openbao_ca: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+  tasks:
+    - name: A token for this run is present
+      ansible.builtin.assert:
+        that: lookup('ansible.builtin.env', 'VAULT_TOKEN') | length > 0
+        fail_msg: No OpenBao token. Run this through .\lab.ps1 deploy vault (or .\lab.ps1 run openbao-config).
+        quiet: true
+
+    # The token must be exactly what it should be - a run that got an administrator token by mistake
+    # would otherwise go unnoticed.
+    - name: The token has the policy openbao-config only
+      ansible.builtin.uri:
+        url: "{{ openbao_url }}/v1/auth/token/lookup-self"
+        headers: "{{ openbao_headers }}"
+        ca_path: "{{ openbao_ca }}"
+      register: lookup_self
+      check_mode: false
+      no_log: true
+
+    - name: Checked
+      ansible.builtin.assert:
+        that: (lookup_self.json.data.policies | sort) == ['default', 'openbao-config']
+        fail_msg: "The token has the policies {{ lookup_self.json.data.policies | default([]) | join(', ') }}, not exactly openbao-config."
+        quiet: true
+
+    - name: The mounts
+      ansible.builtin.uri:
+        url: "{{ openbao_url }}/v1/sys/mounts"
+        headers: "{{ openbao_headers }}"
+        ca_path: "{{ openbao_ca }}"
+      register: mounts
+      check_mode: false
+      no_log: true
+
+    - name: Mount the missing secrets engines
+      ansible.builtin.uri:
+        url: "{{ openbao_url }}/v1/sys/mounts/{{ item.key }}"
+        method: POST
+        headers: "{{ openbao_headers }}"
+        ca_path: "{{ openbao_ca }}"
+        body_format: json
+        body: "{{ item.value }}"
+        status_code: [200, 204]
+      loop: "{{ openbao_mounts | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: (item.key ~ '/') not in mounts.json.data
+      changed_when: true
+      no_log: true
+
+    - name: Configuration objects
+      ansible.builtin.include_tasks: tasks/openbao-api.yml
+      vars:
+        openbao_api_path: "{{ item.path }}"
+        openbao_api_desired: "{{ item.desired }}"
+      loop: "{{ openbao_config_objects }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Is there an intermediate CA yet?
+      ansible.builtin.uri:
+        url: "{{ openbao_url }}/v1/pki_int/issuer/default"
+        headers: "{{ openbao_headers }}"
+        ca_path: "{{ openbao_ca }}"
+        status_code: [200, 400, 404, 500]
+      register: default_issuer
+      check_mode: false
+      no_log: true
+
+    - name: PKI roles
+      ansible.builtin.include_tasks: tasks/openbao-api.yml
+      vars:
+        openbao_api_path: "pki_int/roles/{{ item.key }}"
+        openbao_api_desired: "{{ openbao_pki_role_defaults | combine(item.value) }}"
+      loop: "{{ openbao_pki_roles | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: default_issuer.status == 200
+
+    - name: ACME
+      ansible.builtin.include_tasks: tasks/openbao-api.yml
+      vars:
+        openbao_api_path: pki_int/config/acme
+        openbao_api_desired: "{{ openbao_acme }}"
+      when: default_issuer.status == 200
+
+    - name: Waiting for the intermediate CA
+      ansible.builtin.debug:
+        msg: No intermediate CA yet (a new OpenBao); the PKI roles and ACME follow once the PC has created it.
+      when: default_issuer.status != 200
+
+    # --- Checks: what clients use, read without a token -------------------------------------------
+    - name: The intermediate CA certificate is served
+      ansible.builtin.uri:
+        url: "{{ openbao_url }}/v1/pki_int/ca/pem"
+        ca_path: "{{ openbao_ca }}"
+        return_content: true
+      register: ca_pem
+      failed_when: "'BEGIN CERTIFICATE' not in ca_pem.content"
+      when: default_issuer.status == 200
+      check_mode: false
+
+    - name: The ACME directory answers
+      ansible.builtin.uri:
+        url: "{{ openbao_url }}/v1/pki_int/roles/acme-matrix/acme/directory"
+        ca_path: "{{ openbao_ca }}"
+      register: acme_directory
+      failed_when: acme_directory.json.newNonce is not defined
+      when: default_issuer.status == 200
+      check_mode: false

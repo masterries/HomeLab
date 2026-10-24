@@ -31,18 +31,25 @@
          you move it to paper and the recovery file with .\lab.ps1 recovery. The
          initial root token is stored the same way, only until step 7. Nothing is printed.
       5. Unseal with shares A and B.
-      6. Configuration through the API (re-applied on every run, so the code is the truth):
-         - secrets engine "lab" (KV version 2, check-and-set required)
-         - password policies (OpenBao generates passwords, Ansible never invents them)
-         - access policies (one per consumer, least privilege)
+      6. Configuration (re-applied on every run, so the code is the truth), in two planes:
+         IDENTITY PLANE, from this PC through the API - who may do what:
+         - access policies, one per consumer, least privilege (config\openbao\policies\*.hcl)
          - AppRoles "pc-admin" and "pc-deploy" for this PC (credentials stored with DPAPI,
            usable only from your PC's address), the break-glass AppRole "recovery" (its
-           secret only in the recovery file) and the token role "ansible-run"
-         - PKI: intermediate CA (key generated inside OpenBao, certificate signed by the
-           offline root; a new one 400 days before the current one expires), revocation
-           lists, roles, ACME
+           secret only in the recovery file), and the token roles "ansible-run" (deployments),
+           "ansible-config" (the configuration plane) and "ui-admin" (lab.ps1 ui)
          - SSH: the secrets engine "ssh", an SSH CA whose key is generated inside OpenBao, and
            the roles pc, ansible-control and lab-hosts (scripts\lib\LabSsh.ps1, $LabSshRoles)
+         - the intermediate CA: key generated inside OpenBao, certificate signed by the offline
+           root on this PC; a new one 400 days before the current one expires
+         CONFIGURATION PLANE, by Ansible on ansible-control (ansible\playbooks\openbao-config.yml,
+         profile openbao-config, a token of the role ansible-config for that run only) - the
+         engines and how they behave:
+         - secrets engine "lab" (KV version 2, check-and-set required)
+         - password policies (OpenBao generates passwords, Ansible never invents them)
+         - PKI: the intermediate's mount, its URLs, revocation lists, tidying, roles, ACME
+         Its token cannot write a policy, a login or a CA, so the configuration plane cannot
+         hand out rights. ".\lab.ps1 run openbao-config --check --diff" shows what it would change.
       7. End of the bootstrap: once a pc-admin login works, the root token is revoked and its
          DPAPI file deleted. Routine administration then uses pc-admin.
       8. SSH CA in use (once): OpenBao's SSH CA public key goes to every machine (firewall,
@@ -176,7 +183,12 @@ function Invoke-LabVaultDeploy {
     Unlock-LabVault
 
     # --- 6. Configuration ---------------------------------------------------------------------------
-    Write-Host '== 6/8 Configuration (secrets engine, policies, identities, PKI) =='
+    # Two planes (ansible\playbooks\openbao-config.yml explains them): the PC writes the IDENTITY
+    # plane - who may do what: policies, AppRoles, token roles, the SSH CA - and Ansible on
+    # ansible-control writes the CONFIGURATION plane - the engines and how they behave - with a token
+    # for one run that cannot touch the identity plane. The intermediate CA's certificate is signed
+    # by the offline root, which only this PC holds, so that part stays here as well.
+    Write-Host '== 6/8 Configuration: identities and policies (PC), engines (Ansible), intermediate CA (PC) =='
     $token = Get-LabAdminToken
     try {
         function Bao([string]$Method, [string]$Path, $Body) { Invoke-LabBao $Method $Path $Body -Token $token }
@@ -184,52 +196,22 @@ function Invoke-LabVaultDeploy {
             $list = Bao GET "sys/$Kind"
             return @($list.data.PSObject.Properties.Name) -contains "$Path/"
         }
-
-        # KV version 2 at "lab/". cas_required: every write must say which version it expects
-        # ("check and set"), so two writers cannot silently overwrite each other; writing a NEW
-        # secret means cas=0.
-        if (-not (Test-Mount 'lab' 'mounts')) { Bao POST 'sys/mounts/lab' @{ type = 'kv'; options = @{ version = '2' }; description = 'Lab secrets' } | Out-Null }
-        Bao POST 'lab/config' @{ cas_required = $true; max_versions = 10 } | Out-Null
-
-        # Password policies: OpenBao generates values (GET sys/policies/password/<name>/generate).
-        # Letters and digits only, as everywhere in the lab (no escaping problems in YAML, shell,
-        # env files and URLs).
-        foreach ($length in 24, 48, 64) {
-            $hcl = "length = $length`nrule `"charset`" {`n  charset = `"abcdefghijklmnopqrstuvwxyz`"`n  min-chars = 1`n}`nrule `"charset`" {`n  charset = `"ABCDEFGHIJKLMNOPQRSTUVWXYZ`"`n  min-chars = 1`n}`nrule `"charset`" {`n  charset = `"0123456789`"`n  min-chars = 1`n}`n"
-            Bao POST "sys/policies/password/lab-alnum-$length" @{ policy = $hcl } | Out-Null
+        # Does the intermediate's mount hold an issuer with its key (a CA that can sign)?
+        function Test-Issuer {
+            if (-not (Test-Mount $pkiMount 'mounts')) { return $false }
+            $issuers = Invoke-LabBao GET "$pkiMount/issuers?list=true" -Token $token -AllowNotFound
+            if ($issuers) { foreach ($id in $issuers.data.keys) { if ($issuers.data.key_info.$id.key_id) { return $true } } }
+            return $false
         }
 
-        # Access policies (HCL). Paths of KV v2 have "data/" and "metadata/" in them. "create"
-        # without "update" means write-once: a consumer can add a missing secret but never change
-        # an existing one; rotation is an administrator's decision.
-        $policies = [ordered]@{
-            'openbao-admin' = 'path "*" { capabilities = ["create", "read", "update", "patch", "delete", "list", "scan", "sudo"] }'
-            # pc-deploy also signs the SSH certificates (LabSsh.ps1): the PC's own, ansible-control's
-            # per run and the hosts'. Only signing; the CA and its roles are pc-admin's.
-            'pc-deploy' = @'
-path "auth/token/create/ansible-run" { capabilities = ["create", "update"] }
-path "sys/storage/raft/snapshot"     { capabilities = ["read"] }
-path "ssh/sign/pc"                   { capabilities = ["create", "update"] }
-path "ssh/sign/ansible-control"      { capabilities = ["create", "update"] }
-path "ssh/sign/lab-hosts"            { capabilities = ["create", "update"] }
-'@
-            'ansible-keycloak' = @'
-path "lab/data/keycloak/*"     { capabilities = ["create", "read"] }
-path "lab/metadata/keycloak/*" { capabilities = ["read"] }
-path "sys/policies/password/lab-alnum-24/generate" { capabilities = ["read"] }
-path "sys/policies/password/lab-alnum-48/generate" { capabilities = ["read"] }
-path "pki_int/sign/keycloak"   { capabilities = ["create", "update"] }
-'@
-            'ansible-matrix' = @'
-path "lab/data/matrix/*"       { capabilities = ["create", "read"] }
-path "lab/metadata/matrix/*"   { capabilities = ["read"] }
-path "lab/data/keycloak/clients/matrix-authentication-service" { capabilities = ["read"] }
-path "sys/policies/password/lab-alnum-64/generate" { capabilities = ["read"] }
-'@
-            # hello-nginx.yml, the nginx demo: only certificates of the role "web".
-            'ansible-web' = 'path "pki_int/sign/web" { capabilities = ["create", "update"] }'
+        # Access policies (HCL), one file per policy in config\openbao\policies: the file name is the
+        # policy's name, its comments say who uses it. Paths of KV v2 have "data/" and "metadata/" in
+        # them. "create" without "update" means write-once: a consumer can add a missing secret but
+        # never change an existing one; rotation is an administrator's decision.
+        foreach ($file in Get-ChildItem (Join-Path $projectRoot 'config\openbao\policies') -Filter '*.hcl') {
+            $hcl = [IO.File]::ReadAllText($file.FullName) -replace "`r`n", "`n"
+            Bao POST "sys/policies/acl/$($file.BaseName)" @{ policy = $hcl } | Out-Null
         }
-        foreach ($name in $policies.Keys) { Bao POST "sys/policies/acl/$name" @{ policy = $policies[$name] } | Out-Null }
 
         # AppRole: a login for machines (role_id = user name, secret_id = password). The PC's roles
         # only accept logins from the PC's address, and their tokens only work from there.
@@ -266,31 +248,36 @@ path "sys/policies/password/lab-alnum-64/generate" { capabilities = ["read"] }
         # the hint at the end asks for a new one (lab.ps1 recovery -Renew).
         $recoveryIds = Invoke-LabBao GET 'auth/approle/role/recovery/secret-id?list=true' -Token $token -AllowNotFound
         $kitOutdated = (-not (Test-LabSecret 'openbao/unseal-c-pending')) -and -not ($recoveryIds -and @($recoveryIds.data.keys).Count -gt 0)
-        # Token role for Ansible runs: tokens minted through it are "orphans" (they outlive the PC's
-        # short login), last at most 2 hours, and work only from ansible-control's address.
+
+        # Token roles for Ansible runs (New-LabRunToken in LabSecrets.ps1 mints through them). Their
+        # tokens are "orphans" (they outlive the PC's short login), cannot be renewed and work only
+        # from ansible-control's address:
+        #   ansible-run     deployments: the secrets of one application, at most 2 hours (pc-deploy)
+        #   ansible-config  openbao-config.yml: OpenBao's configuration plane, at most 30 minutes
+        #                   (pc-admin: changing how OpenBao works is an administrator's decision)
         $controlIp = ($script:LabConfig.vms | Where-Object { $_.name -eq 'ansible-control' }).ip
-        Bao POST 'auth/token/roles/ansible-run' @{
-            allowed_policies = @('ansible-keycloak', 'ansible-matrix', 'ansible-web'); orphan = $true; renewable = $false
-            token_type = 'service'; token_explicit_max_ttl = '2h'; token_bound_cidrs = @("$controlIp/32")
-        } | Out-Null
+        $tokenRoles = [ordered]@{
+            'ansible-run'    = @{ allowed_policies = @('ansible-keycloak', 'ansible-matrix', 'ansible-web'); token_explicit_max_ttl = '2h' }
+            'ansible-config' = @{ allowed_policies = @('openbao-config'); token_explicit_max_ttl = '30m' }
+        }
+        foreach ($role in $tokenRoles.Keys) {
+            $body = $tokenRoles[$role]
+            $body.orphan = $true; $body.renewable = $false; $body.token_type = 'service'; $body.token_bound_cidrs = @("$controlIp/32")
+            Bao POST "auth/token/roles/$role" $body | Out-Null
+        }
         # Token role for your web UI sessions (lab.ps1 ui; defined in LabSecrets.ps1).
         Set-LabUiTokenRole $token
 
-        # --- PKI: the intermediate CA ---------------------------------------------------------------
-        if (-not (Test-Mount $pkiMount 'mounts')) {
-            Bao POST "sys/mounts/$pkiMount" @{ type = 'pki'; description = 'Lab intermediate CA'; config = @{ max_lease_ttl = '8760h' } } | Out-Null
-        }
-        # The three headers are part of the ACME protocol and must pass through OpenBao's API.
-        Bao POST "sys/mounts/$pkiMount/tune" @{ max_lease_ttl = '8760h'; allowed_response_headers = @('Replay-Nonce', 'Link', 'Location') } | Out-Null
-        # URLs baked into every certificate this CA issues (before the first issue!): where to get
-        # the CA certificate (AIA) and the revocation list (CDP), over plain HTTP (port 80, nginx).
-        Bao POST "$pkiMount/config/cluster" @{ path = "https://${vaultName}:8200/v1/$pkiMount"; aia_path = "http://$vaultName/v1/$pkiMount" } | Out-Null
-        Bao POST "$pkiMount/config/urls" @{
-            enable_templating = $true
-            issuing_certificates = @('{{cluster_aia_path}}/issuer/{{issuer_id}}/der')
-            crl_distribution_points = @('{{cluster_aia_path}}/issuer/{{issuer_id}}/crl/der')
-        } | Out-Null
+        # --- The configuration plane, on ansible-control --------------------------------------------
+        # The KV mount "lab", password policies, the intermediate's mount and URLs (they must be set
+        # before its first certificate), revocation list, tidying, PKI roles and ACME. On a new
+        # OpenBao the PKI roles and ACME wait for the intermediate CA made below, so the run is
+        # repeated after it.
+        $hadIssuer = Test-Issuer
+        Invoke-LabRun openbao-config
+        if ($LASTEXITCODE -ne 0) { throw "openbao-config.yml failed (exit code $LASTEXITCODE)." }
 
+        # --- PKI: the intermediate CA ---------------------------------------------------------------
         # The default issuer (the intermediate CA that signs new certificates) must stay valid for
         # longer than the longest certificate it issues (Keycloak's: 1 year) plus a margin, so a new
         # one is made 400 days before the current one expires: a "rotation". The old issuer stays in
@@ -298,11 +285,7 @@ path "sys/policies/password/lab-alnum-64/generate" { capabilities = ["read"] }
         # services move to the new one at their next renewal (Keycloak's playbook and Traefik notice
         # that their certificate comes from another CA). Issuer and key names are unique, so a
         # rotation gets names with the date.
-        $issuers = Invoke-LabBao GET "$pkiMount/issuers?list=true" -Token $token -AllowNotFound
-        $hasIssuer = $false
-        if ($issuers) {
-            foreach ($id in $issuers.data.keys) { if ($issuers.data.key_info.$id.key_id) { $hasIssuer = $true } }
-        }
+        $hasIssuer = Test-Issuer
         $issuerValid = $false
         if ($hasIssuer) {
             $default = Invoke-LabBao GET "$pkiMount/issuer/default" -Token $token
@@ -347,36 +330,11 @@ path "sys/policies/password/lab-alnum-64/generate" { capabilities = ["read"] }
             Write-Host "PKI:         intermediate CA created in OpenBao, signed by the offline root ($intermediateFile)"
         }
         else { Write-Host 'PKI:         intermediate CA present' }
-
-        # Revocation list rebuilt automatically (else it goes stale after 72 h and Windows reports
-        # "revocation offline"); expired certificates tidied daily.
-        Bao POST "$pkiMount/config/crl" @{ expiry = '168h'; auto_rebuild = $true; auto_rebuild_grace_period = '48h'; ocsp_disable = $true } | Out-Null
-        Bao POST "$pkiMount/config/auto-tidy" @{ enabled = $true; interval_duration = '24h'; tidy_cert_store = $true; tidy_revoked_certs = $true; tidy_acme = $true; safety_buffer = '72h' } | Out-Null
-
-        # Roles: what may be issued, explicitly (the defaults are permissive: localhost, IP SANs,
-        # wildcards and client certificates would all be allowed).
-        $roleDefaults = @{ allow_subdomains = $false; allow_bare_domains = $true; allow_wildcard_certificates = $false
-            allow_localhost = $false; allow_ip_sans = $false; enforce_hostnames = $true; server_flag = $true
-            client_flag = $false; key_usage = @('DigitalSignature'); no_store = $false; issuer_ref = 'default' }
-        $pkiRoles = @{
-            # Traefik on the Matrix VM, through ACME (90-day certificates, renewed automatically).
-            'acme-matrix' = @{ allowed_domains = @("matrix.$domain", "element.$domain", $domain); key_type = 'any'; ttl = '2160h'; max_ttl = '2160h' }
-            # Keycloak: Ansible sends a CSR made on the Keycloak VM (the key stays there).
-            'keycloak'    = @{ allowed_domains = @("keycloak.$domain"); key_type = 'ec'; key_bits = 256; ttl = '8760h'; max_ttl = '8760h' }
-            # The nginx demo (hello-nginx.yml) on a VM named "hello"; add names here for others.
-            'web'         = @{ allowed_domains = @("hello.$domain"); key_type = 'ec'; key_bits = 256; ttl = '8760h'; max_ttl = '8760h' }
+        if (-not $hadIssuer) {
+            Write-Host 'PKI:         the new intermediate CA can sign: openbao-config.yml again, for the PKI roles and ACME'
+            Invoke-LabRun openbao-config
+            if ($LASTEXITCODE -ne 0) { throw "openbao-config.yml failed (exit code $LASTEXITCODE)." }
         }
-        foreach ($name in $pkiRoles.Keys) {
-            $body = @{}
-            foreach ($k in $roleDefaults.Keys) { $body[$k] = $roleDefaults[$k] }
-            foreach ($k in $pkiRoles[$name].Keys) { $body[$k] = $pkiRoles[$name][$k] }
-            Bao POST "$pkiMount/roles/$name" $body | Out-Null
-        }
-
-        # ACME (the protocol of Let's Encrypt): clients prove control of a name over HTTP and get a
-        # certificate. Only the role "acme-matrix" may be used; the role-less default directory is
-        # closed ("forbid"). No external account binding in the isolated lab.
-        Bao POST "$pkiMount/config/acme" @{ enabled = $true; allowed_roles = @('acme-matrix'); allowed_issuers = @('*'); default_directory_policy = 'forbid'; eab_policy = 'not-required' } | Out-Null
 
         # --- SSH: the online SSH CA -------------------------------------------------------------------
         # OpenBao's SSH secrets engine in "CA mode": it signs SSH public keys and returns certificates
@@ -456,13 +414,11 @@ path "sys/policies/password/lab-alnum-64/generate" { capabilities = ["read"] }
     Enable-LabOpenBaoSshCa
 
     # --- Checks -----------------------------------------------------------------------------------
-    $caPem = Invoke-LabBao GET "$pkiMount/ca/pem"
-    if ("$caPem" -notmatch 'BEGIN CERTIFICATE') { throw "OpenBao does not serve the intermediate CA certificate ($pkiMount/ca/pem)." }
-    $directory = Invoke-LabBao GET "$pkiMount/roles/acme-matrix/acme/directory"
-    if (-not $directory.newNonce) { throw 'The ACME directory does not answer as expected.' }
+    # openbao-config.yml has checked the intermediate CA certificate and the ACME directory; what
+    # is left is the root CRL, published on port 80 by openbao.yml.
     $crlStatus = (Invoke-WebRequest -UseBasicParsing -Uri "http://$vaultName/pki/root-ca.crl").StatusCode
     if ($crlStatus -ne 200) { throw "The root CRL is not served on http://$vaultName/pki/root-ca.crl (HTTP $crlStatus)." }
-    Write-Host "Check:       intermediate CA served, ACME directory $($directory.newNonce -replace '/new-nonce$', '/directory'), root CRL on port 80"
+    Write-Host 'Check:       root CRL served on port 80'
 
     Write-Host ''
     Write-Host "OpenBao is ready:  https://${vaultName}:8200/ui/"

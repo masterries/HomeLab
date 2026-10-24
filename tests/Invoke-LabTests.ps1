@@ -24,7 +24,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$safe = 'Test-LabCertificates', 'Test-LabTlsPin', 'Test-LabPasswordHash', 'Test-LabRetiredDpapi', 'Test-LabRunToken', 'Test-LabSecretCreation', 'Test-LabFirewallRender', 'Test-LabSshCa', 'Test-LabSshCertificates'
+$safe = 'Test-LabCertificates', 'Test-LabTlsPin', 'Test-LabPasswordHash', 'Test-LabRetiredDpapi', 'Test-LabRunToken', 'Test-LabOpenBaoConfig', 'Test-LabSecretCreation', 'Test-LabFirewallRender', 'Test-LabSshCa', 'Test-LabSshCertificates'
 $tests = if ($Name) { $Name } else { $safe + $(if ($IncludeStateChanging) { 'Test-LabRecoveryLogin' }) }
 $results = [ordered]@{}
 foreach ($test in $tests) {

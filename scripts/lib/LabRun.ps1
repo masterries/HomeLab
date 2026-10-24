@@ -14,9 +14,10 @@
          connection into the lab). With "syncMdad" also vendor\mdad.
       2. Sign ansible-control's own key for this run: an SSH certificate valid 2 hours, only for the
          principals of the profile (LabSsh.ps1, Get-LabControlCertificate).
-      3. If the profile needs OpenBao: a token for exactly its policies, valid 2 hours, bound to
-         ansible-control's address, handed over WRAPPED on stdin (New-LabRunToken in
-         LabSecrets.ps1; ansible\bin\openbao-run unwraps it and revokes it at the end).
+      3. If the profile needs OpenBao: a token for exactly its policies, through the profile's
+         token role (ansible-run: 2 hours; ansible-config: 30 minutes), bound to ansible-control's
+         address, handed over WRAPPED on stdin (New-LabRunToken in LabSecrets.ps1;
+         ansible\bin\openbao-run unwraps it and revokes it at the end).
       4. One SSH call starts ansible\bin\lab-run there: it replaces ~/lab with the fresh copy,
          installs the certificate, runs the playbook, and removes the certificate again.
 
@@ -124,7 +125,8 @@ function Invoke-LabRun([string]$Name, [string[]]$ExtraArgs = @()) {
         # A wrapped token on stdin, so no pseudo-terminal (-t would echo stdin). Colour is switched
         # on with ANSIBLE_FORCE_COLOR instead, when this console can show it.
         if (Enable-LabConsoleColors) { $options += '--color' }
-        $wrapped = New-LabRunToken $policies $profileArg
+        $tokenRole = if ($runProfile.tokenRole) { $runProfile.tokenRole } else { 'ansible-run' }
+        $wrapped = New-LabRunToken $policies $profileArg $tokenRole
         $wrapped | & ssh -F $sshConfig -o LogLevel=ERROR ansible-control "{ $unpack && bash ~/.lab-incoming/$id/bin/lab-run $id $profileArg $($options -join ' ') --token -- $extra; $after; } 2>&1"
         $wrapped = $null
     }
@@ -149,7 +151,7 @@ function Invoke-LabRunCli {
             $principals = @($p.principals | Where-Object { $_ })
             $policies = @($p.policies | Where-Object { $_ })
             if ($principals.Count -gt 0) { $rights += "SSH: $($principals -join ',')" }
-            if ($policies.Count -gt 0) { $rights += "OpenBao: $($policies -join ',')" }
+            if ($policies.Count -gt 0) { $rights += "OpenBao: $($policies -join ',')$(if ($p.tokenRole) { " via $($p.tokenRole)" })" }
             Write-Host ("  {0,-22} {1}  ({2})" -f $property.Name, $what, $(if ($rights) { $rights -join '; ' } else { 'no credentials' }))
         }
         return

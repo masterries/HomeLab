@@ -1,0 +1,65 @@
+# tasks/openbao-api.yml -- make one OpenBao configuration object look like this: read it, compare
+# the desired keys, write only when one differs ("read-compare-write"). Never deletes anything.
+#
+# Used by playbooks/openbao-config.yml (include_tasks with these variables):
+#   openbao_api_path     the API path below /v1/, e.g. pki_int/config/crl
+#   openbao_api_desired  a dictionary of the keys that matter, in the form OpenBao returns on a read
+#   openbao_config_force (optional, -e openbao_config_force=true) write every object even when it
+#                        already matches: a harmless way to try each write request once, which a
+#                        lab that matches the repository otherwise never sends
+# The token comes from the environment (VAULT_ADDR, VAULT_TOKEN, VAULT_CACERT: bin/openbao-run).
+# no_log on the requests: Ansible would show their arguments, token included, with -vvv. What
+# differs (configuration, no secrets) is reported by a separate task, which in check mode
+# (--check --diff) counts as "changed" without writing anything.
+- name: Read {{ openbao_api_path }}
+  ansible.builtin.uri:
+    url: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}/v1/{{ openbao_api_path }}"
+    headers:
+      X-Vault-Token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+    ca_path: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+    status_code: [200, 404]
+  register: openbao_api_read
+  check_mode: false
+  no_log: true
+
+# A missing object (404) differs in every key.
+- name: Compare {{ openbao_api_path }}
+  ansible.builtin.set_fact:
+    openbao_api_changes: >-
+      {%- set current = openbao_api_read.json.data if openbao_api_read.status == 200 else {} -%}
+      {%- set ns = namespace(found={}) -%}
+      {%- for key, value in openbao_api_desired.items() -%}
+      {%- if current[key] is not defined or current[key] != value -%}
+      {%- set ns.found = ns.found | combine({key: {'now': current[key] | default(None), 'wanted': value}}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.found }}
+
+- name: Write {{ openbao_api_path }}
+  ansible.builtin.uri:
+    url: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}/v1/{{ openbao_api_path }}"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+    ca_path: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+    body_format: json
+    body: "{{ openbao_api_desired }}"
+    status_code: [200, 204]
+  register: openbao_api_write
+  when: (openbao_api_changes | length > 0 or openbao_config_force | default(false) | bool) and not ansible_check_mode
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: OpenBao accepted {{ openbao_api_path }}
+  ansible.builtin.assert:
+    that: openbao_api_write.status in [200, 204]
+    fail_msg: "OpenBao refused to write {{ openbao_api_path }} (HTTP {{ openbao_api_write.status }}): {{ openbao_api_write.json.errors | default([]) | join('; ') }}"
+    quiet: true
+  when: (openbao_api_changes | length > 0 or openbao_config_force | default(false) | bool) and not ansible_check_mode
+
+- name: Differences in {{ openbao_api_path }}
+  ansible.builtin.debug:
+    var: openbao_api_changes
+  when: openbao_api_changes | length > 0
+  changed_when: true

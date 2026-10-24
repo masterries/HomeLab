@@ -9,8 +9,11 @@
     "  principals  the SSH principals of ansible-control's certificate for this run (2 hours):",
     "              host-<vm> opens only that machine, lab-all every one; [] = no certificate (the",
     "              run stays on ansible-control). Least privilege per run.",
-    "  policies    the OpenBao policies of the run's token (token role ansible-run, 2 hours,",
-    "              bound to ansible-control, revoked when the run ends); none = no token",
+    "  policies    the OpenBao policies of the run's token (bound to ansible-control, revoked when",
+    "              the run ends); none = no token",
+    "  tokenRole   the token role it is minted through: ansible-run (the default; deployments,",
+    "              2 hours, minted by pc-deploy) or ansible-config (OpenBao's configuration plane,",
+    "              30 minutes, minted by pc-admin)",
     "  syncMdad    also copy vendor/mdad from the repository to ~/mdad first",
     "",
     "Enterprise equivalent: job templates in AWX / Ansible Automation Platform, each with its own",
@@ -21,6 +24,7 @@
     "base":                 { "playbook": "playbooks/base.yml",           "principals": ["host-matrix", "host-keycloak", "host-vault"] },
     "checks":               { "playbook": "playbooks/checks.yml",         "principals": ["lab-all"] },
     "openbao":              { "playbook": "playbooks/openbao.yml",        "principals": ["host-vault"] },
+    "openbao-config":       { "playbook": "playbooks/openbao-config.yml", "principals": [], "policies": ["openbao-config"], "tokenRole": "ansible-config" },
     "keycloak":             { "playbook": "playbooks/keycloak.yml",       "principals": ["host-keycloak"], "policies": ["ansible-keycloak"] },
     "matrix-prepare":       { "playbook": "playbooks/matrix-prepare.yml", "principals": ["host-matrix"], "policies": ["ansible-matrix"], "syncMdad": true },
     "matrix":               { "command": "bash bin/deploy-matrix install-all", "principals": ["host-matrix"], "policies": ["ansible-matrix"] },
@@ -29,7 +33,8 @@
     "hello-nginx":          { "playbook": "playbooks/hello-nginx.yml",    "principals": ["lab-all"], "policies": ["ansible-web"] },
     "syntax":               { "command": "bash bin/syntax-check",         "principals": [] },
     "test-run-token":       { "command": "bash tests/run-token-check.sh", "principals": [], "policies": ["ansible-keycloak"] },
-    "test-secret-creation": { "playbook": "tests/secret-creation.yml",    "principals": [], "policies": ["ansible-keycloak"] },
+    "test-config-token":    { "command": "bash tests/config-token-check.sh", "principals": [], "policies": ["openbao-config"], "tokenRole": "ansible-config" },
+    "test-secret-creation":{ "playbook": "tests/secret-creation.yml",    "principals": [], "policies": ["ansible-keycloak"] },
     "test-sleep":           { "command": "sleep 20",                      "principals": [] }
   }
 }
