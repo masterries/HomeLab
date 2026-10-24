@@ -66,14 +66,20 @@
       <uid>0</uid>
     </user>
     <!-- ansible: the account the rest of the lab uses.
-         - SSH jump host: your PC and Vagrant log in with the lab key (authorizedkeys, base64)
-           and tunnel on to the lab VMs (ProxyJump / ssh -W). OPNsense never disables TCP
-           forwarding in its sshd_config, so this works without extra settings.
+         - SSH jump host: your PC (and Vagrant through it) and ansible-control log in with SSH
+           CERTIFICATES and tunnel on to the lab VMs (ProxyJump / ssh -W). <authorizedkeys>
+           (base64 of keys\ssh\firewall_authorized_keys, scripts/LabSsh.ps1) holds one line
+           per lab SSH CA:
+             cert-authority,principals="lab-all,host-firewall",from="<PC>,<ansible-control>" ssh-ed25519 AAAA...
+           "cert-authority": certificates signed by this CA log in; principals: only certificates
+           for these roles; from: only from the PC and ansible-control. The sshd drop-in that
+           New-LabFirewall.ps1 installs (opnsense/sshd_config.d/20-lab-ssh.conf) adds the host
+           certificate and limits forwarding to SSH of the lab VMs (PermitOpen). A running
+           firewall gets new CA lines through opnsense/lab-ssh-trust.php, without a rebuild.
          - REST API: the line in <apikeys> is "key|hash"; the secret itself is kept
            DPAPI-encrypted on the PC (keys\opnsense\api-ansible.dpapi).
-         LAB SHORTCUT: one full-admin account does both jobs. Enterprise: a restricted jump
-         account (e.g. a Match block with PermitOpen in sshd_config.d) and a separate,
-         least-privilege API user per automation tool. -->
+         LAB SHORTCUT: one full-admin account does both jobs. Enterprise: a separate, restricted
+         jump account and a least-privilege API user per automation tool. -->
     <user>
       <name>ansible</name>
       <descr>Lab automation and SSH jump host</descr>

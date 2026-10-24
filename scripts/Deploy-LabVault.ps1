@@ -30,8 +30,14 @@
          - PKI: intermediate CA (key generated inside OpenBao, certificate signed by the
            offline root; a new one 400 days before the current one expires), revocation
            lists, roles, ACME
+         - SSH: the secrets engine "ssh", an SSH CA whose key is generated inside OpenBao, and
+           the roles pc, ansible-control and lab-hosts (scripts\LabSsh.ps1, $LabSshRoles)
       7. End of the bootstrap: once a pc-admin login works, the root token is revoked and its
          DPAPI file deleted. Routine administration then uses pc-admin.
+      8. SSH CA in use (once): OpenBao's SSH CA public key goes to every machine (firewall,
+         VMs, the PC's known_hosts), a login with a throwaway certificate from OpenBao is
+         tried on each of them, and only when all pass does OpenBao take over signing the SSH
+         certificates from the offline SSH CA (Enable-LabOpenBaoSshCa in LabSsh.ps1).
 
     It refuses to initialise a NEW OpenBao while key shares of an earlier one exist in
     keys\openbao (they could be the only way to restore a backup).
@@ -58,7 +64,6 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'LabSecrets.ps1')
 
 $projectRoot = $script:LabProjectRoot
-$sshConfig = Join-Path $projectRoot 'keys\ssh_config'
 $domain = $script:LabConfig.domain
 $vaultName = "vault.$domain"
 $published = $script:LabConfig.published | Where-Object { $_.vm -eq 'vault' }
@@ -70,11 +75,12 @@ $pkiMount = 'pki_int'
 $intermediateKeyName = "lab-int-$(Get-Date -Format yyyy)"
 $intermediateCommonName = "DeployableServer Lab Intermediate CA $(Get-Date -Format yyyy)"
 
-if (-not (Test-Path $sshConfig)) { throw "No SSH configuration ($sshConfig). Run .\scripts\Initialize-Lab.ps1 first." }
-
 # A command on the vault VM (as user ansible, sudo inside the command). No double quotes in
-# $Command (Windows PowerShell 5.1). Returns the output lines.
+# $Command (Windows PowerShell 5.1). Returns the output lines. Get-LabSshConfig renews the PC's
+# SSH certificate when it is due; while OpenBao's own TLS certificate has expired, the offline
+# SSH CA signs it (LabSsh.ps1), so this renewal never depends on OpenBao being reachable.
 function Invoke-VaultSsh([string]$Command, [string]$What) {
+    $sshConfig = Get-LabSshConfig
     $ErrorActionPreference = 'Continue'
     $output = & ssh -F $sshConfig -o LogLevel=ERROR vault "{ $Command; } 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "$What failed on vault (exit code $LASTEXITCODE): $($output -join ' ')" }
@@ -88,12 +94,12 @@ if (($answer -join ',') -ne $published.address) {
 }
 
 # --- 1. Offline root CA -----------------------------------------------------------------------
-Write-Host '== 1/7 Offline root CA =='
+Write-Host '== 1/8 Offline root CA =='
 & (Join-Path $PSScriptRoot 'New-LabRootCA.ps1')
 $rootCert = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $script:LabRootCaCert
 
 # --- 2. OpenBao's TLS certificate ----------------------------------------------------------------
-Write-Host '== 2/7 TLS certificate of OpenBao (signed by the offline root) =='
+Write-Host '== 2/8 TLS certificate of OpenBao (signed by the offline root) =='
 function Test-ListenerCertificate {
     $pem = Invoke-VaultSsh 'sudo cat /opt/openbao/tls/tls.crt 2>/dev/null || true' 'Reading the TLS certificate'
     $text = ($pem -join "`n")
@@ -129,12 +135,12 @@ else {
 }
 
 # --- 3. Package and configuration --------------------------------------------------------------
-Write-Host '== 3/7 OpenBao package, configuration, service (openbao.yml) =='
+Write-Host '== 3/8 OpenBao package, configuration, service (openbao.yml) =='
 & (Join-Path $PSScriptRoot 'Invoke-LabPlaybook.ps1') openbao.yml
 if ($LASTEXITCODE -ne 0) { throw "openbao.yml failed (exit code $LASTEXITCODE)." }
 
 # --- 4. Initialisation (once) -----------------------------------------------------------------
-Write-Host '== 4/7 Initialisation =='
+Write-Host '== 4/8 Initialisation =='
 $health = Wait-LabVaultReachable 120
 if ($health.initialized) {
     Write-Host 'OpenBao:     already initialised'
@@ -155,11 +161,11 @@ else {
 }
 
 # --- 5. Unseal ----------------------------------------------------------------------------------
-Write-Host '== 5/7 Unseal =='
+Write-Host '== 5/8 Unseal =='
 Unlock-LabVault
 
 # --- 6. Configuration ---------------------------------------------------------------------------
-Write-Host '== 6/7 Configuration (secrets engine, policies, identities, PKI) =='
+Write-Host '== 6/8 Configuration (secrets engine, policies, identities, PKI) =='
 $token = Get-LabAdminToken
 try {
     function Bao([string]$Method, [string]$Path, $Body) { Invoke-LabBao $Method $Path $Body -Token $token }
@@ -187,9 +193,14 @@ try {
     # an existing one; rotation is an administrator's decision.
     $policies = [ordered]@{
         'openbao-admin' = 'path "*" { capabilities = ["create", "read", "update", "patch", "delete", "list", "scan", "sudo"] }'
+        # pc-deploy also signs the SSH certificates (LabSsh.ps1): the PC's own, ansible-control's
+        # per run and the hosts'. Only signing; the CA and its roles are pc-admin's.
         'pc-deploy' = @'
 path "auth/token/create/ansible-run" { capabilities = ["create", "update"] }
 path "sys/storage/raft/snapshot"     { capabilities = ["read"] }
+path "ssh/sign/pc"                   { capabilities = ["create", "update"] }
+path "ssh/sign/ansible-control"      { capabilities = ["create", "update"] }
+path "ssh/sign/lab-hosts"            { capabilities = ["create", "update"] }
 '@
         'ansible-keycloak' = @'
 path "lab/data/keycloak/*"     { capabilities = ["create", "read"] }
@@ -356,9 +367,62 @@ path "sys/policies/password/lab-alnum-64/generate" { capabilities = ["read"] }
     # closed ("forbid"). No external account binding in the isolated lab.
     Bao POST "$pkiMount/config/acme" @{ enabled = $true; allowed_roles = @('acme-matrix'); allowed_issuers = @('*'); default_directory_policy = 'forbid'; eab_policy = 'not-required' } | Out-Null
 
+    # --- SSH: the online SSH CA -------------------------------------------------------------------
+    # OpenBao's SSH secrets engine in "CA mode": it signs SSH public keys and returns certificates
+    # (scripts\LabSsh.ps1 explains them). One CA key for user and host certificates; the roles keep
+    # the two apart (allow_user_certificates / allow_host_certificates), and OpenSSH itself never
+    # accepts a host certificate as a user login or the other way round.
+    # Audit: OpenBao's audit log normally stores every request and response value only as an HMAC
+    # (a keyed hash). For SSH, principals, type, lifetime and serial number are logged in plain
+    # text, so a login in a machine's SSH log (it names the serial) can be found in OpenBao's log.
+    $sshMount = $script:LabSshMount
+    if (-not (Test-Mount $sshMount 'mounts')) { Bao POST "sys/mounts/$sshMount" @{ type = 'ssh'; description = 'Lab SSH CA: user and host certificates' } | Out-Null }
+    Bao POST "sys/mounts/$sshMount/tune" @{ max_lease_ttl = '8760h'; audit_non_hmac_request_keys = @('valid_principals', 'cert_type', 'ttl'); audit_non_hmac_response_keys = @('serial_number') } | Out-Null
+    # The CA key is generated ONCE. Writing config/ca again would silently replace the CA, and
+    # every machine would reject the next certificate - so it is only written when reading it
+    # says there is none yet (HTTP 4xx), never on other errors.
+    $sshCaExists = $true
+    try { [void](Bao GET "$sshMount/config/ca") }
+    catch { if ($_.Exception.Message -match '\(HTTP 4\d\d\)') { $sshCaExists = $false } else { throw } }
+    if (-not $sshCaExists) {
+        Bao POST "$sshMount/config/ca" @{ generate_signing_key = $true; key_type = 'ed25519' } | Out-Null
+        Write-Host 'SSH CA:      new SSH CA created inside OpenBao (its key never leaves it)'
+    }
+    # Roles: every value set explicitly (the defaults are permissive or useless: unset lifetimes
+    # fall back to 32 days, an unset key ID names only "approle"). The same table as the offline CA
+    # uses, so both issue identical certificates:
+    #   key_id_format       <role>-<hash of the public key>: every certificate names its holder in
+    #                       the SSH logs
+    #   allowed_extensions  "": the requester cannot add extensions; default_extensions apply
+    #   not_before_duration valid from 5 minutes ago (a VM whose clock lags a little)
+    #   source-address      the certificate works only from the holder's own addresses
+    $userPrincipals = Get-LabSshUserPrincipals
+    $hostNames = @(Get-LabSshMachines | ForEach-Object { Get-LabSshFqdn $_ })
+    foreach ($role in $script:LabSshRoles.Keys) {
+        $spec = $script:LabSshRoles[$role]
+        $body = @{ key_type = 'ca'; allow_user_key_ids = $false; key_id_format = '{{role_name}}-{{public_key_hash}}'
+            allowed_extensions = ''; allow_empty_principals = $false; not_before_duration = '5m'
+            ttl = "$($spec.Hours)h"; max_ttl = "$($spec.Hours)h" }
+        $extensions = @{}
+        foreach ($extension in $spec.Extensions) { $extensions[$extension] = '' }
+        $body.default_extensions = $extensions
+        if ($spec.Type -eq 'host') {
+            # Exactly the lab's host names (no subdomains, no wildcards).
+            $body.allow_host_certificates = $true; $body.allow_user_certificates = $false
+            $body.allowed_domains = $hostNames -join ','; $body.allow_bare_domains = $true; $body.allow_subdomains = $false
+        }
+        else {
+            $body.allow_user_certificates = $true; $body.allow_host_certificates = $false
+            $body.allowed_users = if ($role -eq 'pc') { 'lab-all' } else { $userPrincipals -join ',' }
+            $body.allowed_critical_options = 'source-address'
+            $body.default_critical_options = @{ 'source-address' = $spec.SourceAddress }
+        }
+        Bao POST "$sshMount/roles/$role" $body | Out-Null
+    }
+
     # --- 7. End of the bootstrap -----------------------------------------------------------------
     if (Test-LabSecret 'openbao/root-token') {
-        Write-Host '== 7/7 Bootstrap: test pc-admin, then revoke the root token =='
+        Write-Host '== 7/8 Bootstrap: test pc-admin, then revoke the root token =='
         $pcToken = Get-LabBaoToken 'pc-admin'
         $self = Invoke-LabBao GET 'auth/token/lookup-self' -Token $pcToken
         if (@($self.data.policies) -notcontains 'openbao-admin') { throw 'pc-admin login works, but without the openbao-admin policy. Root token kept.' }
@@ -370,11 +434,15 @@ path "sys/policies/password/lab-alnum-64/generate" { capabilities = ["read"] }
         $token = $null
         Write-Host 'OpenBao:     root token revoked; administration uses the pc-admin AppRole from now on'
     }
-    else { Write-Host '== 7/7 Bootstrap: already finished (no root token stored) ==' }
+    else { Write-Host '== 7/8 Bootstrap: already finished (no root token stored) ==' }
 }
 finally {
     if ($token) { Close-LabBaoToken $token }
 }
+
+# --- 8. SSH CA in use ---------------------------------------------------------------------------
+Write-Host '== 8/8 SSH CA: every machine trusts OpenBao''s SSH CA =='
+Enable-LabOpenBaoSshCa
 
 # --- Checks -----------------------------------------------------------------------------------
 $caPem = Invoke-LabBao GET "$pkiMount/ca/pem"
@@ -392,4 +460,7 @@ if (Test-LabSecret 'openbao/unseal-c-pending') {
 }
 elseif ($kitOutdated) {
     Write-Host 'PENDING: your recovery file has no break-glass login (it was made before that existed). Make a new one in your own PowerShell window:  .\scripts\New-LabRecoveryKit.ps1 -Renew'
+}
+elseif (-not (Test-LabSshCaInRecoveryKit)) {
+    Write-Host 'PENDING: your recovery file has no copy of the current offline SSH CA. Make a new one in your own PowerShell window:  .\scripts\New-LabRecoveryKit.ps1 -Renew'
 }

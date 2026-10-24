@@ -18,8 +18,10 @@
 # matrix.lab.internal follows MDAD's convention (the homeserver's FQDN); it selects the folder
 # host_vars/matrix.lab.internal/. The machine is the lab VM "matrix", reached by its DNS name
 # (ansible_host; inside the lab it resolves to the VM's own address 10.10.10.30), as user
-# "ansible" with the lab key (~/.ssh/id_ed25519 on ansible-control, ssh's default key file) and
-# sudo (become) to root.
+# "ansible" with ansible-control's own key (~/.ssh/id_ed25519, ssh's default key file) and the
+# run's SSH certificate next to it (valid for matrix only, scripts/Deploy-LabMatrix.ps1), and
+# sudo (become) to root. The host certificate of matrix is checked against the lab's SSH CAs
+# (/etc/ssh/ssh_config.d/20-lab.conf on ansible-control).
 #
 # Note: keep comments on their own lines (see ansible/inventory/hosts.ini).
 

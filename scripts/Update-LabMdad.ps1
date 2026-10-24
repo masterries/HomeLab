@@ -52,7 +52,9 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $upstream = 'https://github.com/spantaleev/matrix-docker-ansible-deploy.git'
-$sshConfig = Join-Path $projectRoot 'keys\ssh_config'
+# LabSecrets.ps1 with LabSsh.ps1: Get-LabSshConfig renews the PC's SSH certificate when it is due.
+. (Join-Path $PSScriptRoot 'LabSecrets.ps1')
+$sshConfig = Get-LabSshConfig
 $galaxyDir = Join-Path $projectRoot 'vendor\mdad\roles\galaxy'
 $archive = Join-Path ([IO.Path]::GetTempPath()) 'lab-mdad-roles.tgz'
 $short = $Commit.Substring(0, 7)

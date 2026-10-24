@@ -29,7 +29,7 @@ function Complete-LabTest([string]$What) {
 # Copies scripts from tests\remote to /tmp/lab-tests on ansible-control (the tests run them
 # there); Remove-LabTestRemote deletes them again.
 function Copy-LabTestRemote([string[]]$Files) {
-    $sshConfig = Join-Path $script:LabKeysDir 'ssh_config'
+    $sshConfig = Get-LabSshConfig
     $ErrorActionPreference = 'Continue'
     & ssh -F $sshConfig -o LogLevel=ERROR ansible-control 'rm -rf /tmp/lab-tests && mkdir -m 700 /tmp/lab-tests'
     & scp -q -F $sshConfig -o LogLevel=ERROR ($Files | ForEach-Object { Join-Path $script:LabTestRoot "tests\remote\$_" }) 'ansible-control:/tmp/lab-tests/'
@@ -37,7 +37,7 @@ function Copy-LabTestRemote([string[]]$Files) {
 }
 
 function Remove-LabTestRemote {
-    $sshConfig = Join-Path $script:LabKeysDir 'ssh_config'
+    $sshConfig = Get-LabSshConfig
     $ErrorActionPreference = 'Continue'
     & ssh -F $sshConfig -o LogLevel=ERROR ansible-control 'rm -rf /tmp/lab-tests' | Out-Null
 }

@@ -16,6 +16,7 @@
       recovery file   key share B, the "break-glass" login for OpenBao (AppRole "recovery",
                       administrator rights, its secret only in this file), the root CA key
                       (still encrypted) with its passphrase, the root certificate, the
+                      offline SSH CA key (still encrypted) with its passphrase, the
                       firewall's passwords and API key, and a fingerprint (SHA-256) of share C
                       that catches typing errors - all encrypted with a passphrase YOU choose
                       and remember (or keep in a third place)
@@ -45,9 +46,10 @@
       -Open <file>      decrypts a recovery file and shows share B, the root CA key's passphrase
                         and the firewall's root password.
       -Recover <file>   after losing this PC's DPAPI keys: puts the root CA passphrase, the
-                        firewall's passwords and API key and key shares B and C (you type C,
-                        checked against its fingerprint) back into DPAPI, restores the root CA
-                        files if they are missing, unseals OpenBao if needed, logs in with the
+                        offline SSH CA passphrase, the firewall's passwords and API key and key
+                        shares B and C (you type C, checked against its fingerprint) back into
+                        DPAPI, restores the root CA and offline SSH CA files if they are missing,
+                        unseals OpenBao if needed, logs in with the
                         break-glass login and issues NEW logins for the PC's scripts (pc-admin,
                         pc-deploy). Afterwards everything works as before; make a new kit with
                         -Renew (the break-glass secret was used).
@@ -158,7 +160,7 @@ if ($Open) {
     Write-Host "OpenBao key share B:       $($content.openbao_unseal_share_b)"
     Write-Host "Root CA key passphrase:    $($content.root_ca_key_passphrase)"
     Write-Host "Firewall root password:    $($content.firewall_root_password)"
-    Write-Host 'Root CA key and certificate, break-glass login, firewall API key: in the file (used by -Recover).'
+    Write-Host 'Root CA key and certificate, offline SSH CA key and passphrase, break-glass login, firewall API key: in the file (used by -Recover).'
     Write-Host 'Unseal with share B and your share C:            .\scripts\Unlock-LabVault.ps1 -Interactive'
     Write-Host 'Restore this PC''s access after losing DPAPI:    .\scripts\New-LabRecoveryKit.ps1 -Recover <file>'
     Read-Host 'Press Enter to clear the screen' | Out-Null
@@ -192,6 +194,24 @@ if ($Recover) {
     }
     if ($caKeyMatches) { Protect-LabSecret 'pki/root-ca-passphrase' $content.root_ca_key_passphrase -Force }
     else { Write-Warning 'The root CA passphrase was not replaced: keys\pki\root-ca.key is a different key than the one in the file.' }
+
+    # The offline SSH CA, the same way: its files only if missing, its passphrase only if the
+    # key on this PC is the one from the file. (A file made before the SSH CA existed has none;
+    # then New-LabSshCa.ps1 makes a new CA, and the firewall needs a rebuild to trust it.)
+    if ($content.ssh_offline_ca_key) {
+        New-Item -ItemType Directory -Force -Path $script:LabSshDir | Out-Null
+        $sshCaMatches = $true
+        foreach ($file in @(@{ Path = $script:LabSshOfflineCa; Text = $content.ssh_offline_ca_key }, @{ Path = "$($script:LabSshOfflineCa).pub"; Text = $content.ssh_offline_ca_public })) {
+            if (-not (Test-Path $file.Path)) { [IO.File]::WriteAllText($file.Path, $file.Text); Write-Host "Restored keys\ssh\$(Split-Path -Leaf $file.Path)" }
+            elseif ([IO.File]::ReadAllText($file.Path).Trim() -ne $file.Text.Trim()) {
+                Write-Warning "keys\ssh\$(Split-Path -Leaf $file.Path) differs from the one in the recovery file; it was left as it is."
+                $sshCaMatches = $false
+            }
+        }
+        if ($sshCaMatches) { Protect-LabSecret 'ssh/offline-ca-passphrase' $content.ssh_offline_ca_passphrase -Force }
+        else { Write-Warning 'The offline SSH CA passphrase was not replaced: keys\ssh\offline-ca is a different key than the one in the file.' }
+    }
+    else { Write-Warning 'This file holds no offline SSH CA (made before it existed).' }
 
     # The firewall's secrets. A file made before the ansible password and API key were included
     # restores only the root password; the other two are then made new by the next firewall
@@ -275,6 +295,13 @@ $bundleCaCert = [IO.File]::ReadAllText((Join-Path $script:LabKeysDir 'pki\root-c
 $bundleFirewallRoot = Get-OptionalSecret 'opnsense/root-password'
 $bundleFirewallAnsible = Get-OptionalSecret 'opnsense/ansible-password'
 $bundleFirewallApi = Get-OptionalSecret 'opnsense/api-ansible'
+# The offline SSH CA (New-LabSshCa.ps1): its key file is encrypted with the passphrase from DPAPI.
+$bundleSshCaKey = ''; $bundleSshCaPublic = ''
+if (Test-Path $script:LabSshOfflineCa) {
+    $bundleSshCaKey = [IO.File]::ReadAllText($script:LabSshOfflineCa)
+    $bundleSshCaPublic = [IO.File]::ReadAllText("$($script:LabSshOfflineCa).pub")
+}
+$bundleSshCaPassphrase = Get-OptionalSecret 'ssh/offline-ca-passphrase'
 
 # 1. Share C, to write down (a renewed file does not need it: the file holds share B, and your
 #    copy of C stays valid). Its fingerprint goes into the file and to keys\openbao.
@@ -323,6 +350,9 @@ try {
         firewall_root_password        = $bundleFirewallRoot
         firewall_ansible_password     = $bundleFirewallAnsible
         firewall_api_ansible          = $bundleFirewallApi
+        ssh_offline_ca_key            = $bundleSshCaKey
+        ssh_offline_ca_public         = $bundleSshCaPublic
+        ssh_offline_ca_passphrase     = $bundleSshCaPassphrase
     } | ConvertTo-Json
     [IO.File]::WriteAllBytes($file, (Protect-Bundle $content $p1))
     $verify = Unprotect-Bundle ([IO.File]::ReadAllBytes($file)) $p1 | ConvertFrom-Json
@@ -333,8 +363,11 @@ finally {
     Close-LabBaoToken $token
     $content = $null; $verify = $null; $recoveryLogin = $null
     $bundleShareB = $null; $bundleCaPassphrase = $null; $bundleFirewallRoot = $null; $bundleFirewallAnsible = $null; $bundleFirewallApi = $null
+    $bundleSshCaKey = $null; $bundleSshCaPassphrase = $null
 }
 if ($shareCFingerprint) { [IO.File]::WriteAllText($shareCFingerprintFile, $shareCFingerprint) }
+# Remember which offline SSH CA the recovery file holds (Test-LabSshCaInRecoveryKit, LabSsh.ps1).
+if ($bundleSshCaPublic) { [void](Write-LabSshFile $script:LabSshCaInKit @(Get-LabSshFingerprint $bundleSshCaPublic)) }
 $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
 Write-Host "Recovery file written and verified: $file"
 Write-Host "SHA-256 (note it next to share C): $hash"

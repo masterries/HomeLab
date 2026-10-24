@@ -16,10 +16,16 @@
     Notes is touched.
 
     What stays: the Vagrant box cache, the OPNsense image cache, the scripts and the Ansible
-    project in the repository, and keys\: the lab SSH key, the offline root CA (keys\pki) and
-    the firewall's passwords and API key (DPAPI, keys\opnsense). Because the root CA stays, the
-    rebuilt lab's certificates chain to the same root and Windows keeps trusting them; because
-    the firewall secrets stay, its GUI password does not change either.
+    project in the repository, and keys\: the offline SSH CA and this PC's SSH key (keys\ssh),
+    the offline root CA (keys\pki) and the firewall's passwords and API key (DPAPI,
+    keys\opnsense). Because the root CA stays, the rebuilt lab's certificates chain to the same
+    root and Windows keeps trusting them; because the SSH CA stays, the rebuilt machines get
+    host certificates that every client already trusts; because the firewall secrets stay, its
+    GUI password does not change either.
+
+    SSH host keys: the deleted machines' host keys go into the revocation list
+    (keys\ssh\revoked_host_keys, LabSsh.ps1), so a copy of an old key (from a checkpoint or an
+    old disk) can never pass for the rebuilt machine.
 
     OpenBao (the vault VM) holds the services' secrets and the intermediate CA. Its key shares
     and logins on this PC (keys\openbao) only fit the installation they were made for, so when
@@ -77,6 +83,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# LabSecrets.ps1 with LabSsh.ps1: the revocation list for the deleted machines' host keys.
+. (Join-Path $PSScriptRoot 'LabSecrets.ps1')
 
 $vagrantDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'vagrant'
 # Must match New-LabFirewall.ps1.
@@ -98,6 +106,7 @@ function Remove-LabFirewall {
         Remove-Item -Recurse -Force $vmFolder
     }
     Write-Host "Firewall: VM '$firewallName' and $vmFolder removed."
+    Revoke-LabSshHostKey $firewallName
 }
 
 # Initialize-Lab.ps1 stores VAGRANT_HOME (where Vagrant keeps boxes, plugins and its index
@@ -163,6 +172,9 @@ if ($PSCmdlet.ShouldProcess($target, 'delete')) {
                 Write-Host "Removed the leftover Hyper-V folder $folder"
             }
         }
+        foreach ($name in $labVmNames) {
+            if ((-not $Machine -or $Machine -eq $name) -and -not (Get-VM -Name $name -ErrorAction SilentlyContinue)) { Revoke-LabSshHostKey $name }
+        }
     }
     # OpenBao's key shares and logins fit only the deleted installation. Moved, not deleted:
     # the snapshots in there can only be restored with the key shares of their time.
@@ -171,8 +183,25 @@ if ($PSCmdlet.ShouldProcess($target, 'delete')) {
         $retired = "$openBaoKeys-retired-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
         Move-Item $openBaoKeys $retired
         Write-Host "OpenBao: key shares, logins and snapshots of the deleted installation moved to $retired"
+        # Its SSH CA is gone with it: the machines stop trusting it at the next Initialize-Lab.ps1
+        # (the trust files are rendered without it), and the offline SSH CA signs again until
+        # Deploy-LabVault.ps1 has made the new OpenBao's CA trusted.
+        $sshRetired = Join-Path $retired 'ssh'
+        foreach ($file in $script:LabSshOpenBaoCa, $script:LabSshOpenBaoTrusted) {
+            if (Test-Path $file) {
+                New-Item -ItemType Directory -Force -Path $sshRetired | Out-Null
+                Move-Item $file $sshRetired
+            }
+        }
     }
     # Without a machine name the firewall goes too, after the VMs behind it.
     if (-not $Machine -or $Machine -eq $firewallName) { Remove-LabFirewall }
+    # ansible-control checks host keys against the revocation list too: give it the new one now
+    # if it still runs (otherwise its next provisioning uploads it).
+    $control = Get-LabSshHyperVVm 'ansible-control'
+    if ($Machine -and $Machine -ne 'ansible-control' -and $Machine -ne $firewallName -and $control -and $control.State -eq 'Running') {
+        try { Update-LabSshTrust -KrlOnly }
+        catch { Write-Warning "The revocation list could not be copied to ansible-control now ($($_.Exception.Message)); Initialize-Lab.ps1 does it." }
+    }
     Write-Host 'Rebuild with:  .\scripts\Initialize-Lab.ps1'
 }

@@ -67,8 +67,17 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $ansibleDir = Join-Path $projectRoot 'ansible'
-$sshConfig = Join-Path $projectRoot 'keys\ssh_config'
 $controlHost = 'ansible-control'
+# SSH: which machines a playbook may log in to. ansible-control gets an SSH certificate for this
+# run with exactly these principals (LabSsh.ps1, Get-LabControlCertificateCommand): a certificate
+# for host-keycloak opens keycloak only, not vault or the firewall. Same idea as the OpenBao
+# policies below - least privilege per run. Playbooks not listed get lab-all (every machine).
+$sshPrincipals = @{
+    'ping.yml'           = @('lab-all')
+    'openbao.yml'        = @('host-vault')
+    'keycloak.yml'       = @('host-keycloak')
+    'matrix-prepare.yml' = @('host-matrix')
+}
 # OPENBAO: which playbooks read secrets from OpenBao, and with which policies (defined in
 # Deploy-LabVault.ps1). Least privilege per run: keycloak.yml cannot read Matrix's secrets and
 # matrix-prepare.yml can only read (not create) Keycloak's client secret for MAS.
@@ -84,8 +93,14 @@ if (-not $Playbook) {
 if (-not (Test-Path (Join-Path $ansibleDir "playbooks\$Playbook"))) {
     throw "Playbook not found: ansible\playbooks\$Playbook"
 }
-if (-not (Test-Path $sshConfig)) {
-    throw "No SSH configuration found ($sshConfig). Run .\scripts\Initialize-Lab.ps1 first."
+# LabSecrets.ps1 (with LabSsh.ps1): Get-LabSshConfig renews the PC's SSH certificate when it is
+# due and returns keys\ssh_config.
+. (Join-Path $PSScriptRoot 'LabSecrets.ps1')
+$sshConfig = Get-LabSshConfig
+$principals = $sshPrincipals[$Playbook]
+if (-not $principals) {
+    $principals = @('lab-all')
+    Write-Host "SSH:         $Playbook is not in `$sshPrincipals (Invoke-LabPlaybook.ps1): its SSH certificate is for every machine (lab-all)"
 }
 
 # --- 1. Pack the Ansible project and copy it to ansible-control ---------------------------
@@ -161,17 +176,20 @@ $command = "cd ~/lab && ansible-playbook playbooks/$Playbook $($args -join ' ')"
 if ($openBaoPolicies.ContainsKey($Playbook)) {
     # A run token instead of a pseudo-terminal: Invoke-LabRunToken (LabSecrets.ps1) passes the
     # wrapped token on stdin, which rules out -t, and switches Ansible's colours on another way.
-    . (Join-Path $PSScriptRoot 'LabSecrets.ps1')
+    # It also installs and removes the run's SSH certificate.
     $health = Get-LabVaultHealth
     if (-not $health) { throw "OpenBao ($script:LabVaultUrl) is not reachable; $Playbook needs it. Is the vault VM running, and has OpenBao been deployed (.\scripts\Deploy-LabVault.ps1)?" }
     if ($health.sealed) { Unlock-LabVault }
-    Invoke-LabRunToken $command $openBaoPolicies[$Playbook] ($Playbook -replace '\.yml$', '')
+    Invoke-LabRunToken $command $openBaoPolicies[$Playbook] ($Playbook -replace '\.yml$', '') $principals
 }
 else {
+    # The run's SSH certificate goes into ~/.ssh/id_ed25519-cert.pub first (ssh finds it next to
+    # the key) and is deleted again when ansible-playbook ends, whatever its exit code.
     # "{ ...; } 2>&1" merges Ansible's warnings (stderr) into stdout on ansible-control, so
     # Windows PowerShell 5.1 does not show them as red error records when this output is
     # redirected to a file.
-    & ssh -F $sshConfig -o LogLevel=ERROR @ttyOption $controlHost "{ $command; } 2>&1"
+    $certificate = Get-LabControlCertificateCommand $principals
+    & ssh -F $sshConfig -o LogLevel=ERROR @ttyOption $controlHost "{ $($certificate.Install) && $command; rc=`$?; $($certificate.Remove); exit `$rc; } 2>&1"
 }
 # Exit code of ansible-playbook (or 255 if the SSH connection itself failed).
 $playbookExitCode = $LASTEXITCODE

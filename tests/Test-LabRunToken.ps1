@@ -52,7 +52,7 @@ $ErrorActionPreference = 'Continue'
 $localTemp = "$($report.local_temp)"
 $gone = $false
 if ($localTemp -match '^/[A-Za-z0-9/._-]+$') {
-    $answer = & ssh -F (Join-Path $script:LabKeysDir 'ssh_config') -o LogLevel=ERROR ansible-control "test -e $localTemp && echo present || echo gone"
+    $answer = & ssh -F (Get-LabSshConfig) -o LogLevel=ERROR ansible-control "test -e $localTemp && echo present || echo gone"
     $gone = ("$answer".Trim() -eq 'gone')
 }
 Assert-LabTest "Ansible's temporary folder of this run removed" $gone $localTemp

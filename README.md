@@ -23,7 +23,8 @@ the overall picture and tells you which file to read for each topic.
 4. [Quick start](#4-quick-start)
 5. [Everyday operations](#5-everyday-operations)
 6. [How to ...](#6-how-to-)
-7. [Concepts explained](#7-concepts-explained)
+7. [Concepts explained](#7-concepts-explained), among them
+   [SSH certificates: user and host CAs](#ssh-certificates-user-and-host-cas)
 8. [Repository layout](#8-repository-layout)
 9. [Pitfalls and troubleshooting](#9-pitfalls-and-troubleshooting)
 10. [Security notes](#10-security-notes)
@@ -46,7 +47,8 @@ another user and start a video call. Behind that page work five VMs:
   official image and a configuration file kept in this repository.
 - **ansible-control** (Ubuntu, built with Vagrant): the Ansible control node.
   Every deployment runs from here. It keeps no service secrets on disk: for
-  each run your PC hands it a short-lived OpenBao token, and the playbooks hold
+  each run your PC hands it a short-lived OpenBao token and a short-lived SSH
+  certificate for only the machines that run configures, and the playbooks hold
   the secrets they read only in memory (even Ansible's temporary files are kept
   in RAM).
 - **matrix** (Ubuntu, built with Vagrant): the chat. A Matrix homeserver
@@ -69,16 +71,18 @@ another user and start a video call. Behind that page work five VMs:
   "sealed" until two of its three key shares unlock it.
 
 Your PC has a part of its own: it holds the offline root certificate authority,
-which signs only a handful of certificates, the few secrets that must exist
-before OpenBao runs, encrypted with Windows DPAPI, and OpenBao's backups
-(snapshots).
+which signs only a handful of certificates, the offline SSH certificate
+authority, which signs SSH certificates only before OpenBao exists and in an
+emergency, the few secrets that must exist before OpenBao runs, encrypted with
+Windows DPAPI, and OpenBao's backups (snapshots).
 
 What you learn by building and reading it:
 
 | Topic | What you see in this lab |
 |---|---|
 | Perimeter firewall | OPNsense (FreeBSD + pf) with a web GUI and a REST API: default deny, stateful rules per interface, outbound NAT, inbound port forwarding (DNAT) to separate "published" addresses, one per published VM. |
-| Bastion / jump host | Your PC reaches internal machines only through SSH on the firewall (`ProxyJump`). Vagrant itself does the same. |
+| Bastion / jump host | Your PC reaches internal machines only through SSH on the firewall (`ProxyJump`), which forwards nothing but SSH to the lab VMs. Vagrant itself does the same. |
+| SSH certificates | No shared SSH key and no "trust on first use": two SSH certificate authorities (an offline one on the PC for the bootstrap and break-glass, OpenBao's SSH secrets engine for everyday signing) issue 8-hour certificates for the PC, 2-hour certificates per Ansible run for only the hosts that run configures, and host certificates for every machine, whose host keys were verified out of band first (serial console, Hyper-V KVP). |
 | Network segmentation | Three Hyper-V switches with different trust levels: internet uplink, host network, private lab network. |
 | DHCP reservations | Static MAC addresses + DHCP reservations on the firewall (generated from one data file) give every VM a fixed IP without static configuration in the guest. |
 | Split-horizon DNS | The same name (`element.lab.internal`) resolves to a different address for your PC (the published address) than for the lab (the VM itself). |
@@ -125,9 +129,9 @@ enterprise practice it replaces.
                                         |
  +--------------------------------------+--------------------------------------+
  | Windows PC (Hyper-V host)  browser: element, keycloak, vault .lab.internal  |
- |  offline root CA (keys\pki, key encrypted)                                  |
+ |  offline root CA (keys\pki) and offline SSH CA (keys\ssh), keys encrypted   |
  |  DPAPI secrets (keys\...\*.dpapi): OpenBao key shares A + B and logins,     |
- |  firewall passwords and API key                                             |
+ |  firewall passwords and API key, the offline SSH CA's passphrase            |
  |  OpenBao snapshots (backups, keys\openbao\snapshots)                        |
  |                                                                             |
  |  vEthernet (Default Switch)                 vEthernet (LabHost)             |
@@ -241,9 +245,13 @@ and OpenBao, tokens and certificates in
 - **Browser on the PC to the firewall's GUI**: `https://firewall.lab.internal` ->
   answer `10.10.99.2` -> TCP 443 to the OPNsense web GUI itself.
 - **SSH from the PC**: `ssh -F keys\ssh_config matrix` -> SSH to the firewall at
-  `10.10.99.2` as user `ansible` -> the firewall opens the onward connection to
-  `matrix.lab.internal:22` (`ProxyJump`) and resolves that name itself, to the
-  lab address.
+  `10.10.99.2` as user `ansible`, logged in with the PC's short-lived SSH
+  certificate, the firewall's host certificate checked -> the firewall opens the
+  onward connection to `matrix.lab.internal:22` (`ProxyJump`; port 22 of a lab
+  VM is the only place it forwards to) and resolves that name itself, to the
+  lab address -> through that tunnel the PC logs in to matrix and checks its
+  host certificate (see
+  [SSH certificates](#ssh-certificates-user-and-host-cas)).
 - **Lab VMs to the internet** (Ubuntu packages, PyPI, Docker's and OpenBao's
   package repositories, container images, and GitHub, only when
   `Update-LabMdad.ps1` fetches a new MDAD version): lab VM -> `hn1` (LAN) ->
@@ -252,7 +260,8 @@ and OpenBao, tokens and certificates in
   firewall's own downloads (OPNsense updates from `pkg.opnsense.org`) leave
   through `hn0` the same way.
 - **Ansible**: ansible-control connects over LabNet directly to the matrix,
-  keycloak and vault VMs (SSH), to Keycloak's admin API
+  keycloak and vault VMs (SSH, with its own key and a certificate for this run
+  that names only the hosts the playbook configures), to Keycloak's admin API
   (`https://keycloak.lab.internal`, lab view `10.10.10.40`), to OpenBao's API
   (`https://vault.lab.internal:8200`, lab view `10.10.10.50`; secrets and
   certificate signing, with a run token that works only from ansible-control's
@@ -260,9 +269,11 @@ and OpenBao, tokens and certificates in
 - **Vagrant**: manages only the four Ubuntu VMs and never talks to the
   firewall's WAN side. It reaches the lab VMs through the firewall:
   `ssh.proxy_command` in the Vagrantfile opens an SSH connection to the firewall
-  at `10.10.99.2` as user `ansible` (settings from `keys\ssh_config`) and tunnels
-  it to the VM's LabNet address (`-W %h:%p`). Through that tunnel Vagrant logs
-  in to the VM as `vagrant`.
+  at `10.10.99.2` as user `ansible` (Windows' own `ssh.exe`, settings and the
+  PC's certificate from `keys\ssh_config`) and tunnels it to the VM's LabNet
+  address (`-W %h:%p`). Through that tunnel Vagrant logs in to the VM as
+  `vagrant`, with its own per-VM key; this last hop does not check the VM's
+  host key, and nothing of the lab's trust depends on it.
 
 ### The login flow
 
@@ -341,9 +352,12 @@ server to server (back-channel logout,
 
 ### Where secrets and certificates come from
 
-No secret of the lab is kept in a plain file, with one known exception, the lab
-SSH key. Secrets live in two places, and which one holds a secret follows from
-one question: is it needed before OpenBao runs, or to open OpenBao?
+No secret of the lab that opens anything on its own is kept in a plain file.
+The two SSH keys without a passphrase, the PC's and ansible-control's, open
+nothing without a certificate that is valid for a few hours and only from their
+own addresses ([SSH certificates](#ssh-certificates-user-and-host-cas)).
+Secrets live in two places, and which one holds a secret follows from one
+question: is it needed before OpenBao runs, or to open OpenBao?
 
 | Secret | Stored in | Created by |
 |---|---|---|
@@ -354,7 +368,10 @@ one question: is it needed before OpenBao runs, or to open OpenBao?
 | OpenBao: key share C | you: a password manager or paper | `Deploy-LabVault.ps1`; handed to you once by `New-LabRecoveryKit.ps1` |
 | OpenBao: the break-glass login `recovery` (administrator rights) | only in the recovery file, encrypted with your passphrase | `New-LabRecoveryKit.ps1`, a new secret for every kit |
 | Root CA private key | PC, `keys\pki\root-ca.key`, encrypted; its passphrase with DPAPI (both also in the recovery file) | `New-LabRootCA.ps1` |
-| Lab SSH key | PC, `keys\ansible_ed25519`, a plain file (a lab shortcut, see [section 10](#10-security-notes)) | `New-LabSshKey.ps1` |
+| Offline SSH CA private key | PC, `keys\ssh\offline-ca`, encrypted; its passphrase with DPAPI (both also in the recovery file) | `New-LabSshCa.ps1` |
+| OpenBao's SSH CA private key | OpenBao (mount `ssh`), generated there, never exported | `Deploy-LabVault.ps1` |
+| The PC's SSH key | PC, `keys\ssh\pc_ed25519`, no passphrase; it opens nothing without its 8-hour certificate, which works only from the PC's addresses | `New-LabSshCa.ps1` (the certificate: `Get-LabSshConfig` in `LabSsh.ps1`, on demand) |
+| ansible-control's SSH key | only on ansible-control, `~ansible/.ssh/id_ed25519`; it opens nothing without the 2-hour certificate the PC signs for each run | `bootstrap-ansible-control.sh` |
 
 Everything OpenBao holds is also in its **snapshots** (`keys\openbao\snapshots`,
 the newest 10): `Deploy-LabKeycloak.ps1` and `Deploy-LabMatrix.ps1` take one
@@ -394,8 +411,8 @@ MDAD, through `New-LabRunToken` in [scripts/LabSecrets.ps1](scripts/LabSecrets.p
 
 1. The PC logs in to OpenBao with the AppRole `pc-deploy` (an AppRole is a login
    for machines; its credentials are stored with DPAPI, and OpenBao accepts them
-   only from `10.10.99.1`). That token may do nothing but create run tokens and
-   take snapshots.
+   only from `10.10.99.1`). That token may do nothing but create run tokens,
+   take snapshots and have SSH certificates signed.
 2. It creates a run token through the token role `ansible-run` with exactly the
    policy the playbook needs: `ansible-keycloak` (`keycloak.yml`),
    `ansible-matrix` (`matrix-prepare.yml` and MDAD) or `ansible-web`
@@ -487,6 +504,11 @@ concepts behind all of this (two-level PKI, name constraints, revocation, ACME,
 rotation, sealing, response wrapping, break-glass access) are explained in
 [section 7](#7-concepts-explained).
 
+SSH logins and SSH host keys use certificates too, of OpenSSH's own, simpler
+kind and from two SSH CAs of their own (the offline SSH CA on the PC and
+OpenBao's SSH secrets engine), not from this PKI:
+[SSH certificates](#ssh-certificates-user-and-host-cas).
+
 The lab's first CA, "DeployableServer Lab CA" (a single level, its key a plain
 file), is retired: no lab service uses its certificates any more, and the VMs no
 longer trust it. Only its certificate is kept, in `keys\ca\lab-root-ca.crt`, so
@@ -552,7 +574,7 @@ explains why that matters.
 | VM | Role | Addresses | DNS names | Size |
 |---|---|---|---|---|
 | firewall | OPNsense: router/NAT, pf packet filter, dnsmasq DHCP + DNS, SSH bastion, web GUI + REST API | `hn0` WAN: DHCP from the Default Switch (MAC 02:00:0a:0a:0a:fe); `hn1` LAN: 10.10.10.1 (MAC 02:00:0a:0a:0a:01); `hn2` HOST: 10.10.99.2 + virtual IPs 10.10.99.3, 10.10.99.4 and 10.10.99.5 (MAC 02:00:0a:0a:0a:02) | `firewall.lab.internal` (PC gets 10.10.99.2, lab gets 10.10.10.1) | Hyper-V Generation 1, 1 vCPU, 3 GB static RAM, 16 GB disk |
-| ansible-control | Ansible control node: runs all playbooks and MDAD; holds the copy of the Ansible project (`~/lab`), a copy of the repository's `vendor\mdad` (`~/mdad`, replaced on every `Deploy-LabMatrix.ps1` run) and the public PKI files (`~/lab-pki`: root certificate and its CRL). No service secrets on disk: each run gets a run token from the PC (see [above](#where-secrets-and-certificates-come-from)); the lab SSH key is its only secret | 10.10.10.10 (MAC 02:00:0a:0a:0a:0a, DHCP reservation) | `ansible-control.lab.internal` | 2 vCPU, 2 GB |
+| ansible-control | Ansible control node: runs all playbooks and MDAD; holds the copy of the Ansible project (`~/lab`), a copy of the repository's `vendor\mdad` (`~/mdad`, replaced on every `Deploy-LabMatrix.ps1` run) and the public PKI files (`~/lab-pki`: root certificate and its CRL). No service secrets on disk: each run gets a run token from the PC (see [above](#where-secrets-and-certificates-come-from)); its only secret is its own SSH key, which opens nothing without the 2-hour certificate the PC signs for each run | 10.10.10.10 (MAC 02:00:0a:0a:0a:0a, DHCP reservation) | `ansible-control.lab.internal` | 2 vCPU, 2 GB |
 | matrix | The Matrix stack (MDAD): Traefik, Synapse, PostgreSQL, MAS, Element Web, LiveKit server and LiveKit JWT service, a static file server for `.well-known`, a Docker socket proxy; 9 systemd units `matrix-*.service` | 10.10.10.30 (MAC 02:00:0a:0a:0a:1e, DHCP reservation) | `matrix.lab.internal`, `element.lab.internal`, `lab.internal` (published: PC gets 10.10.99.3, lab gets 10.10.10.30) | 4 vCPU, 8 GB |
 | keycloak | Keycloak 26.8.1 and its PostgreSQL 18.6 as a Docker Compose project in `/opt/keycloak-stack` | 10.10.10.40 (MAC 02:00:0a:0a:0a:28, DHCP reservation) | `keycloak.lab.internal` (published: PC gets 10.10.99.4, lab gets 10.10.10.40) | 2 vCPU, 4 GB |
 | vault | OpenBao 2.7.1 (secrets manager and intermediate CA) with its data in `/opt/openbao/data`; nginx on port 80 for the CA certificates and CRLs | 10.10.10.50 (MAC 02:00:0a:0a:0a:32, DHCP reservation) | `vault.lab.internal` (published: PC gets 10.10.99.5, lab gets 10.10.10.50) | 2 vCPU, 2 GB; Hyper-V checkpoints off, no console autologin |
@@ -598,7 +620,10 @@ as in `config/lab.json`), OPNsense and dnsmasq with colons
 
 The four Ubuntu VMs also get:
 
-- user `ansible` with passwordless sudo and login with the lab SSH key
+- user `ansible` with passwordless sudo, which logs in only with an SSH
+  certificate from a lab SSH CA, and only from the jump host or ansible-control
+- their own SSH host keys, published to the PC through Hyper-V, with a host
+  certificate
 - zsh with fzf history search (Ctrl+R) and the alias `ll`, with no blue colours,
   because blue is unreadable on the blue background of Windows PowerShell
 - console autologin on tty1 ("Connect" in Hyper-V Manager opens a shell
@@ -619,8 +644,9 @@ equivalent: secrets servers run on hardened, dedicated hosts whose memory never
 ends up in snapshots, with console access restricted and audited.
 
 The firewall has its own two accounts, defined in its configuration: `root` for
-the web GUI and the console, and `ansible` for SSH with the lab key (shell
-`/bin/sh`, passwordless sudo, and an API key for the REST API). Their passwords
+the web GUI and the console, and `ansible` for SSH with SSH certificates, from
+the PC and ansible-control only (shell `/bin/sh`, passwordless sudo, and an API
+key for the REST API). Their passwords
 and the API key are random and stored with DPAPI in `keys\opnsense\`;
 `.\scripts\Show-LabSecret.ps1 -Pc opnsense/root-password` copies the GUI
 password to the clipboard. Its console in Hyper-V Manager asks for a login.
@@ -653,7 +679,7 @@ Source NAT. The rules pf actually runs are shown by
 | Lab VMs (LabNet) | internet | yes, behind the firewall's WAN address (automatic outbound NAT) |
 | Lab VMs (LabNet) | HOST network 10.10.99.0/24: the PC at 10.10.99.1 and the firewall's HOST side (.2 to .5) | no, blocked and logged by the first LAN rule |
 | Lab VMs (LabNet) | WAN network (the Hyper-V Default Switch subnet), which includes your PC's Default Switch address | no, blocked and logged by the second LAN rule (otherwise the lab could reach Windows services on the PC through outbound NAT) |
-| Lab VM | other lab VM (for example MAS on matrix to Keycloak's 443; ansible-control and Traefik to OpenBao's 8200; OpenBao to Traefik's 80 for the ACME challenge) | yes. Same switch, so this traffic never passes the firewall |
+| Lab VM | other lab VM (for example MAS on matrix to Keycloak's 443; ansible-control and Traefik to OpenBao's 8200; OpenBao to Traefik's 80 for the ACME challenge) | yes. Same switch, so this traffic never passes the firewall. (SSH logins between lab VMs are refused by sshd itself, except from ansible-control: `AllowUsers` in [provision/harden-ssh.sh](provision/harden-ssh.sh)) |
 | firewall itself | internet | yes (upstream DNS, OPNsense updates) |
 | Anything else | anything | blocked (pf default deny) |
 
@@ -719,21 +745,26 @@ back in when it breaks.
   CA, OpenBao's certificate and the firewall's GUI certificate. The firewall
   build also uses its bzip2 (unpacking the image). Both scripts stop with a hint
   if a tool is missing.
-- **Windows OpenSSH client** (`ssh`, `scp`, `ssh-keygen`), `tar.exe` and
-  `curl.exe`. All are part of current Windows 10/11. The lab was developed with
-  OpenSSH 8.1.
+- **Windows OpenSSH client** (`ssh`, `scp`, `ssh-keygen`, `ssh-keyscan`),
+  `tar.exe` and `curl.exe`. All are part of current Windows 10/11. The lab was
+  developed with OpenSSH 8.1. The scripts call `ssh-keygen` and `ssh-keyscan`
+  by their path in `C:\Windows\System32\OpenSSH`, and the Vagrantfile names
+  that `ssh.exe` in its proxy command: Vagrant and Git for Windows bring
+  OpenSSH clients of their own, and the lab is tested with Windows' one.
 - **An elevated PowerShell** ("Run as administrator") for everything that
   manages Hyper-V or Windows networking: `Install-LabHostNetwork.ps1`,
-  `Initialize-Lab.ps1`, `New-LabFirewall.ps1`, `Remove-Lab.ps1` and `vagrant`
-  itself. (`Initialize-Lab.ps1` on its own would also accept membership in the
-  local group "Hyper-V Administrators", but the firewall build it calls needs a
-  real elevated shell, because of Hyper-V and the VM's serial console pipe.)
+  `Initialize-Lab.ps1`, `New-LabFirewall.ps1`, `Remove-Lab.ps1`,
+  `Complete-LabSshMigration.ps1` and `vagrant` itself. (`Initialize-Lab.ps1` on
+  its own would also accept membership in the local group "Hyper-V
+  Administrators", but the firewall build it calls needs a real elevated shell,
+  because of Hyper-V and the VM's serial console pipe; reading the VMs' SSH host
+  keys from Hyper-V needs it too.)
   `Connect-Lab.ps1`, `Invoke-LabPlaybook.ps1`, `Install-LabRootCA.ps1`,
   `Deploy-LabVault.ps1`, `New-LabRecoveryKit.ps1`, `Deploy-LabKeycloak.ps1`,
   `Deploy-LabMatrix.ps1`, `Update-LabMdad.ps1`, `Show-LabSecret.ps1`,
-  `Unlock-LabVault.ps1` and `Backup-LabVault.ps1` need no administrator
-  rights. The scripts are written
-  for Windows PowerShell 5.1, the version built into Windows.
+  `Unlock-LabVault.ps1`, `Backup-LabVault.ps1` and
+  `Update-LabSshCertificate.ps1` need no administrator rights. The scripts are
+  written for Windows PowerShell 5.1, the version built into Windows.
 - **One Windows account for everything.** The secrets on the PC are encrypted
   with DPAPI for the Windows account that created them, and only that account
   can decrypt them. "Run as administrator" keeps your account when it is itself
@@ -751,7 +782,9 @@ back in when it breaks.
   images.
 - **A short project path without spaces**, for example
   `C:\Users\<name>\Documents\Python\DeployableServer`. The Vagrantfile passes
-  the path of `keys/ssh_config` unquoted to `ssh` in its proxy command. And the
+  the path of `keys/ssh_config` unquoted to `ssh.exe` in its proxy command, and
+  the SSH helpers in `LabSsh.ps1` refuse paths with spaces in ssh options
+  (Windows PowerShell 5.1 cannot pass the quotes they would need). And the
   longest file path inside `vendor\mdad` is about 140 characters, so the
   project folder's own path should stay below about 100 characters, or Windows'
   260-character path limit can stop the copying and unpacking of `vendor\mdad`
@@ -802,7 +835,7 @@ The order for a new lab:
 | 2 | `.\scripts\Initialize-Lab.ps1` | builds the firewall (and with it the offline root CA) and the Ubuntu VMs | the first run takes longest: it downloads the Vagrant box and the OPNsense image and provisions four VMs; the firewall build alone takes about 4 minutes |
 | 3 | `.\scripts\Deploy-LabVault.ps1` | deploys OpenBao on the vault VM: secrets manager and intermediate CA | a few minutes on the first run (not timed exactly) |
 | 4 | `.\scripts\Install-LabRootCA.ps1` | makes Windows trust the lab's root CA; you, once per PC (changes Windows) | seconds |
-| 5 | `.\scripts\New-LabRecoveryKit.ps1 -Destination <folder>` | hands you OpenBao key share C and writes the encrypted recovery file (key share B, a break-glass login for OpenBao, the root CA, the firewall's passwords); you, once, in a console window you type into yourself (it shows secrets) | a few minutes |
+| 5 | `.\scripts\New-LabRecoveryKit.ps1 -Destination <folder>` | hands you OpenBao key share C and writes the encrypted recovery file (key share B, a break-glass login for OpenBao, the root CA, the offline SSH CA, the firewall's passwords); you, once, in a console window you type into yourself (it shows secrets) | a few minutes |
 | 6 | `.\scripts\Deploy-LabKeycloak.ps1` | deploys Keycloak, the identity provider | about 1 minute on the first run |
 | 7 | `.\scripts\Deploy-LabMatrix.ps1` | deploys the Matrix stack, the chat | about 5 minutes |
 | 8 | Browser test: sign in, chat, call | manual test, by you | a few minutes |
@@ -849,12 +882,24 @@ output). You can run it again at any time:
    is not set yet. It makes `vagrant\.vagrant` a junction to the storage drive
    (VM disks). The junction is only created while no VM exists yet; VMs already
    stored in a real `.vagrant` folder stay there, and the script warns.
-2. **SSH**: creates the lab key pair `keys\ansible_ed25519` if it is missing
-   (and repairs the file permissions of the private key and of the `keys\`
-   folder with `icacls` on every run), writes `keys\ssh_config` (firewall at
-   10.10.99.2, all other VMs through it), and deletes the old `keys\known_hosts`.
+2. **SSH**: creates the offline SSH CA (`keys\ssh\offline-ca`, its key
+   encrypted, the passphrase with DPAPI) and this PC's SSH key
+   (`keys\ssh\pc_ed25519`) if they are missing
+   ([scripts/New-LabSshCa.ps1](scripts/New-LabSshCa.ps1); it also repairs the
+   file permissions of the keys and of the `keys\` folder with `icacls` on
+   every run), renders the files that say which SSH CAs to trust
+   (`keys\ssh\lab_user_ca.pub`, `known_hosts`, `firewall_authorized_keys`),
+   and writes `keys\ssh_config` (firewall at 10.10.99.2, all other VMs through
+   it; logins with the PC's short-lived certificate, host keys accepted only
+   with a host certificate). Logins in the lab use SSH certificates instead of
+   a shared key, and host keys are checked instead of trusted on first use:
+   [SSH certificates](#ssh-certificates-user-and-host-cas).
 3. **LabNet**: creates the Private switch `LabNet` if it is missing.
-4. **Firewall**: runs [scripts/New-LabFirewall.ps1](scripts/New-LabFirewall.ps1).
+4. **Firewall**: first, if they exist, the firewall and the vault VM are
+   started directly in Hyper-V and OpenBao is unsealed, over HTTPS, before any
+   SSH: once OpenBao is deployed, it signs the SSH certificates, and after a
+   Windows restart the PC's certificate (8 hours) has expired. Then the step
+   runs [scripts/New-LabFirewall.ps1](scripts/New-LabFirewall.ps1).
    If the firewall VM does not exist yet, that script builds it:
    - downloads the official OPNsense 26.7 nano image once into
      `G:\Vagrant\images\opnsense\26.7`, checks it against a pinned SHA-256 hash
@@ -883,6 +928,11 @@ output). You can run it again at any time:
      the serial console, so that the firewall starts with the lab configuration;
      only then are the adapters connected (how:
      [Automating an appliance's first boot over the serial console](#automating-an-appliances-first-boot-over-the-serial-console))
+   - sets up SSH before anything else is done over it: the host key the
+     firewall presents must have the fingerprint that OPNsense printed on its
+     serial console during the first boot; that key gets a host certificate,
+     and an sshd drop-in limits the jump host to SSH of the lab VMs. From then
+     on every connection checks the firewall's host certificate
    - logs in over SSH, checks that `hn0`/`hn1`/`hn2` are the right adapters,
      installs the
      [split-horizon DNS](#split-horizon-dns-and-conditional-forwarding) drop-in,
@@ -895,7 +945,9 @@ output). You can run it again at any time:
 
    If the firewall already exists, nothing is rebuilt: a seed ISO left behind
    (the script was killed during the first boot, or deleting it failed) is
-   removed, the firewall is started (if it is off),
+   removed, the firewall is started (if it is off), its SSH setup is applied
+   again (a new host certificate when the current one is due, the sshd drop-in,
+   the SSH CAs that user `ansible` accepts),
    the DNS drop-in is installed again, it is updated only if a part of
    OPNsense is still below 26.7.7, and the GUI certificate is renewed in place
    when it is due. Either way the script ends with DNS checks from the PC:
@@ -907,18 +959,25 @@ output). You can run it again at any time:
    half-built firewall needs `-Rebuild`, not a plain re-run.
 5. **Lab VMs**: starts ansible-control, matrix, keycloak and vault with Vagrant
    (the list comes from `config/lab.json`), moves their Hyper-V files, and
-   provisions them (user `ansible`, own SSH host keys and key-only SSH, console
-   autologin except on vault, zsh, Ansible on the control node). If OpenBao was
+   provisions them (user `ansible`; SSH: own host keys, published to the PC
+   through Hyper-V KVP, trust in the lab's SSH CAs, certificate logins only;
+   console autologin except on vault, zsh, Ansible and an SSH key of its own on
+   the control node). Then every VM gets its SSH host certificate: signed for
+   exactly the host key the VM published, and installed over a connection that
+   accepts only that key. If OpenBao was
    initialised before (a re-run, for example after a Windows restart), it is
-   unsealed now with `Unlock-LabVault.ps1`; on a new lab that comes in Step 3.
+   unsealed now with `Unlock-LabVault.ps1`, unless step 4 has done that already;
+   on a new lab that comes in Step 3.
    If OpenBao's TLS certificate has fewer than 30 days left, or has already
    expired (after weeks without a run), the script runs `Deploy-LabVault.ps1`
    instead: the pinned TLS check would refuse an expired certificate, so the
    unseal itself would fail, and `Deploy-LabVault.ps1` renews the certificate
    over SSH first and then unseals.
-6. **Tests**: DNS from the PC, SSH to every VM (the firewall answers with its
-   OPNsense version), and the Ansible playbook `ping.yml` against all hosts,
-   the firewall included. On new VMs, Ansible warns once per VM:
+6. **Tests**: DNS from the PC, SSH to every VM with the PC's certificate,
+   checking every host certificate (the firewall answers with its OPNsense
+   version), and the Ansible playbook `ping.yml` against all hosts, the
+   firewall included, which ansible-control reaches with its own key and a
+   certificate for this run. On new VMs, Ansible warns once per VM:
    `[WARNING]: Module remote_tmp /root/.ansible/tmp did not exist and was created with a mode of 0700, ...`.
    It appears because pipelining is on (see
    [Where secrets and certificates come from](#where-secrets-and-certificates-come-from)),
@@ -939,6 +998,13 @@ output). You can run it again at any time:
    `Maintenance: no certificate or revocation list is due`. The firewall's GUI
    certificate was checked in step 4, and Traefik renews the Matrix
    certificates itself.
+
+Once OpenBao signs the SSH certificates, a vault VM that does not come up stops
+the script with the reason and the ways out: the offline SSH CA does not take
+over by itself, so that blocking OpenBao never moves signing out of its audit
+log. If OpenBao is really broken, `.\scripts\Initialize-Lab.ps1 -BreakGlass`
+lets the offline SSH CA sign for this run (break-glass, see
+[SSH certificates](#ssh-certificates-user-and-host-cas)).
 
 Building the firewall takes about four minutes once the image is cached. The
 OPNsense image (about 490 MB) is downloaded and converted only once; later
@@ -998,7 +1064,7 @@ Source License since 2023). In this lab it is the secrets manager and runs the
 intermediate certificate authority, so every later step depends on it: Keycloak
 and the Matrix stack get their secrets and their certificates from it. The
 script runs on your PC as your user (no administrator rights needed); it talks
-to the vault VM over SSH and to OpenBao's API over HTTPS. It runs seven steps,
+to the vault VM over SSH and to OpenBao's API over HTTPS. It runs eight steps,
 each of which checks first and then acts only if needed:
 
 1. **Offline root CA**: created if it is missing (normally the firewall build
@@ -1037,11 +1103,22 @@ each of which checks first and then acts only if needed:
    OpenBao, certificate signed by the offline root; on an empty OpenBao it is
    named `lab-int-<year>`, "DeployableServer Lab Intermediate CA <year>"), its
    CRL and the URLs it writes into every certificate, the roles `keycloak`,
-   `acme-matrix` and `web`, and ACME for the role `acme-matrix` only.
+   `acme-matrix` and `web`, and ACME for the role `acme-matrix` only. And the
+   SSH secrets engine `ssh`: an SSH CA whose key is generated inside OpenBao
+   (once; it is never replaced by a re-run) and the roles `pc`,
+   `ansible-control` and `lab-hosts`, made from the same table the offline SSH
+   CA uses (`$LabSshRoles` in [scripts/LabSsh.ps1](scripts/LabSsh.ps1)).
 7. **End of the bootstrap**: as soon as a `pc-admin` login works, the initial
    root token (OpenBao's all-powerful first token) is revoked and its file
    deleted. From then on nobody holds a root token; administration uses
    `pc-admin`.
+8. **SSH CA in use**, once: OpenBao's SSH CA public key goes to every machine
+   (the firewall, the VMs, the PC's and ansible-control's `known_hosts`), a
+   login with a throwaway 10-minute certificate from OpenBao is tried on each
+   of them, and only when all pass does OpenBao take over signing from the
+   offline SSH CA (`keys\ssh\openbao-ca.trusted`). Until then the offline CA
+   keeps signing, so a machine that is off or misses the new CA locks nobody
+   out; the script says which machine failed, and a later run tries again.
 
 **Certificate pinning, for OpenBao's address only.** The PC's scripts accept
 OpenBao's certificate only when its chain ends exactly at the lab root in
@@ -1062,7 +1139,9 @@ PENDING: key share C and the recovery file. Run in your own PowerShell window:  
 The `PENDING` line is repeated on every run until Step 5 is done. (On a lab
 whose recovery file was made before the break-glass login existed, a different
 reminder appears instead and asks for a new file: `PENDING: your recovery file has no break-glass
-login ...`, see [Renew the recovery kit](#renew-the-recovery-kit).) The web UI
+login ...`, and on a lab whose recovery file holds no copy of the current
+offline SSH CA, `PENDING: your recovery file has no copy of the current offline
+SSH CA ...`; see [Renew the recovery kit](#renew-the-recovery-kit).) The web UI
 opens without a warning after Step 4, but there is no personal login for it
 yet: administration goes through the scripts (single sign-on with Keycloak for
 the UI is on the [roadmap](#11-roadmap)).
@@ -1177,8 +1256,9 @@ loss without weakening the daily setup:
 - **A recovery file** with key share B, the break-glass login for OpenBao (the
   AppRole `recovery`, with administrator rights, accepted only from your PC's
   address; its secret exists nowhere else), the root CA's key (still encrypted)
-  with its passphrase, the root certificate, the firewall's passwords and API
-  key, and a fingerprint (SHA-256) of share C that catches typing errors later,
+  with its passphrase, the root certificate, the offline SSH CA's key (still
+  encrypted) with its passphrase, the firewall's passwords and API key, and a
+  fingerprint (SHA-256) of share C that catches typing errors later,
   all encrypted with a passphrase you choose (AES-256 with an HMAC-SHA256
   integrity check; the key is derived from the passphrase with PBKDF2, 600,000
   iterations).
@@ -1187,7 +1267,8 @@ Day to day, OpenBao is unsealed with A and B from DPAPI. After a loss, B from
 the file and C from you unseal it, and the break-glass login from the file lets
 the script issue new logins for the PC. Neither the file nor share C unseals
 OpenBao on its own (the file with its passphrase is, however, an administrator
-login for a running OpenBao from your PC), so keep them in different places,
+login for a running OpenBao from your PC, and, through the offline SSH CA in it,
+SSH access to every lab machine), so keep them in different places,
 guard the passphrase as well as the file, and keep the file somewhere that
 does not depend on this PC alone (a NAS share or a USB stick; for the lab, a NAS
 is fine). Enterprise equivalent: "break-glass" material split between several
@@ -1222,8 +1303,8 @@ three more modes, for later:
 | Command | When | What it does |
 |---|---|---|
 | `.\scripts\New-LabRecoveryKit.ps1 -Renew -Destination <folder>` | a new recovery file: after a `-Recover`, for a new passphrase, or when the file is lost | the same as above without steps 1 and 5: a new file with a new break-glass secret. Your share C stays valid and is not shown again. Older files can still unseal, but their break-glass login no longer works: keep only the new one |
-| `.\scripts\New-LabRecoveryKit.ps1 -Open <file>` | to read the file | asks for the passphrase and shows share B, the root CA key's passphrase and the firewall's root password (the root CA files, the break-glass login and the firewall's other secrets stay in the file, for `-Recover`) |
-| `.\scripts\New-LabRecoveryKit.ps1 -Recover <file>` | after this PC's DPAPI keys were lost, in the same project folder | asks for share C, restores this PC's DPAPI secrets (and the root CA's files if missing), unseals OpenBao with B and C if needed and, with the break-glass login, issues NEW logins `pc-admin` and `pc-deploy`, so the scripts and `Unlock-LabVault.ps1` work again; step by step in [Recover after losing the PC's DPAPI keys](#recover-after-losing-the-pcs-dpapi-keys). Then run `-Renew`: the break-glass secret has been used. (A file made before the break-glass login existed can only unseal) |
+| `.\scripts\New-LabRecoveryKit.ps1 -Open <file>` | to read the file | asks for the passphrase and shows share B, the root CA key's passphrase and the firewall's root password (the root CA files, the offline SSH CA, the break-glass login and the firewall's other secrets stay in the file, for `-Recover`) |
+| `.\scripts\New-LabRecoveryKit.ps1 -Recover <file>` | after this PC's DPAPI keys were lost, in the same project folder | asks for share C, restores this PC's DPAPI secrets (and the root CA's and the offline SSH CA's files if missing), unseals OpenBao with B and C if needed and, with the break-glass login, issues NEW logins `pc-admin` and `pc-deploy`, so the scripts and `Unlock-LabVault.ps1` work again; step by step in [Recover after losing the PC's DPAPI keys](#recover-after-losing-the-pcs-dpapi-keys). Then run `-Renew`: the break-glass secret has been used. (A file made before the break-glass login existed can only unseal) |
 
 To unseal without restoring anything, `.\scripts\Unlock-LabVault.ps1 -Interactive`
 asks for two key shares that you type in (B from `-Open`, and C). The concept
@@ -1300,8 +1381,8 @@ On a lab that still has the plain-text file `keys\keycloak\secrets.yml` from
 before OpenBao, the script first imports it unchanged into OpenBao
 (`Import-LabSecrets.ps1`); on a new lab there is no such file. The file stays
 on the PC until you remove it with `.\scripts\Import-LabSecrets.ps1 -RemovePlaintext`
-(the import prints this hint); until then it is a plain-text secret file next
-to the SSH key, and every deployment imports it again (harmlessly: values
+(the import prints this hint); until then it is a plain-text secret file in
+`keys\`, and every deployment imports it again (harmlessly: values
 already in OpenBao are only compared).
 
 ### Step 7: deploy the Matrix stack
@@ -1516,11 +1597,19 @@ browser (the [roadmap](#11-roadmap) has an idea for Element X).
 .\scripts\Connect-Lab.ps1 firewall 'opnsense-version'    # installed OPNsense version
 ```
 
-You log in as `ansible` with the lab key. The script is a thin wrapper around
-`ssh -F keys\ssh_config <vm>`, so plain `ssh`/`scp` with that config file work
-too. No administrator rights are needed. A command in single quotes runs on the
-VM; avoid double quotes inside it (Windows PowerShell 5.1 does not pass them on
-correctly, see [P11](#p11-windows-powershell-51-quirks)).
+You log in as `ansible` with the PC's SSH certificate, and ssh checks the host
+certificate of every machine on the way (the firewall's, then the VM's). The
+script is a thin wrapper around `ssh -F keys\ssh_config <vm>`; the one thing it
+adds is the renewal of the certificate: valid for 8 hours, it is renewed first
+when fewer than 4 hours are left. Plain `ssh`/`scp` with that config file work
+too, while the certificate is valid (`.\scripts\Update-LabSshCertificate.ps1`
+renews it when it is due and shows which CA signed it and until when). No
+administrator rights are needed. A command in single quotes runs on the VM;
+avoid double quotes inside it (Windows PowerShell 5.1 does not pass them on
+correctly, see [P11](#p11-windows-powershell-51-quirks)). If OpenBao cannot
+sign a new certificate (the vault VM is broken),
+`.\scripts\Connect-Lab.ps1 <vm> -BreakGlass` lets the offline SSH CA sign it
+([SSH certificates](#ssh-certificates-user-and-host-cas)).
 
 On the firewall you get FreeBSD's plain `/bin/sh`: zsh and console autologin are
 provisioned only on the Ubuntu VMs. Use the shell to look, not to change things:
@@ -1537,26 +1626,31 @@ Hyper-V Manager shows a normal login prompt there, because a password-less
 shell on that VM (user `ansible`, with sudo) would be one step away from
 OpenBao's unsealed key in its memory (see
 [OpenBao after a restart](#openbao-after-a-restart-sealed-and-unsealed)). SSH
-with the lab key works as on the other VMs.
+with the PC's certificate works as on the other VMs.
 
 ### Read a password or secret
 
-The lab keeps no secret in a plain-text file (the one exception is the lab SSH
-key, see [section 10](#10-security-notes)). Secrets live in two places:
+The lab keeps no secret that opens anything on its own in a plain-text file
+(the PC's SSH key has no passphrase, but it opens nothing without its
+short-lived certificate, see
+[SSH certificates](#ssh-certificates-user-and-host-cas)). Secrets live in two
+places:
 
 - **OpenBao** (on the vault VM, KV secrets engine mounted at `lab/`): everything
   the services use. Keycloak's database, admin and client secrets, the
   passwords of the lab users, Matrix's secret key and database password.
 - **The PC, encrypted with Windows DPAPI** (`keys\<area>\<name>.dpapi`): what
   must exist before or without OpenBao. The firewall's passwords and API key,
-  OpenBao's own unseal key shares and logins, the passphrase of the root CA
-  key. DPAPI ties the encryption to your Windows account: another account, or
-  a copy of the file on another PC, cannot decrypt it.
+  OpenBao's own unseal key shares and logins, the passphrases of the root CA
+  key and of the offline SSH CA key. DPAPI ties the encryption to your Windows
+  account: another account, or a copy of the file on another PC, cannot
+  decrypt it.
 
 For emergencies there is a third, offline place: the recovery kit, key share C
 on paper and a passphrase-encrypted recovery file with share B, the break-glass
-login for OpenBao, the root CA key with its passphrase and certificate, and the
-firewall's passwords and API key
+login for OpenBao, the root CA key with its passphrase and certificate, the
+offline SSH CA key with its passphrase, and the firewall's passwords and API
+key
 ([Step 5](#step-5-make-the-recovery-kit-once-you-run-it-yourself); the concept:
 [Break-glass: the recovery kit](#break-glass-the-recovery-kit)).
 
@@ -1798,17 +1892,26 @@ a secret:
 .\tests\Test-LabCertificates.ps1                         # or one test directly
 ```
 
-Without `-Name`, `Invoke-LabTests.ps1` runs seven tests: `Test-LabCertificates`
+Without `-Name`, `Invoke-LabTests.ps1` runs nine tests: `Test-LabCertificates`
 (every HTTPS endpoint: the right CA, valid for more than 30 days, trusted by
 Windows), `Test-LabTlsPin`, `Test-LabPasswordHash`, `Test-LabRetiredDpapi`,
-`Test-LabRunToken`, `Test-LabSecretCreation` and `Test-LabFirewallRender`.
+`Test-LabRunToken`, `Test-LabSecretCreation`, `Test-LabFirewallRender`,
+`Test-LabSshCa` (the SSH certificate code on the PC: offline signing, what a
+certificate contains, refused principals, the revocation list, the rendered
+trust files) and `Test-LabSshCertificates` (SSH in the running lab: strict
+logins everywhere, plain host keys and a foreign CA refused, a run certificate
+for `host-matrix` opens matrix only, the break-glass CA still accepted; run it
+elevated for the checks of the KVP host keys and Vagrant's jump).
 They change nothing the lab uses: `Test-LabSecretCreation` creates a
 throwaway secret `lab/keycloak/test-generated` and deletes it again,
 `Test-LabFirewallRender` builds the firewall's configuration into a temporary
-folder (the root CA signs one extra test certificate for it), and
-`Test-LabTlsPin` makes one HTTPS request to `www.microsoft.com` as an example
-of a foreign certificate chain.
-The script exits with 1 if a test failed. All seven passed on 2026-10-24.
+folder (the root CA signs one extra test certificate for it), the two SSH
+tests work with throwaway keys and short-lived certificates (listed in
+`keys\ssh\issued.log` like every certificate), and `Test-LabTlsPin` makes one
+HTTPS request to `www.microsoft.com` as an example of a foreign certificate
+chain.
+The script exits with 1 if a test failed. The first seven passed on
+2026-10-24, before the two SSH tests were added.
 
 One test **changes state** and runs only when you ask for it:
 `Test-LabRecoveryLogin.ps1` checks the break-glass login (AppRole `recovery`)
@@ -1819,7 +1922,7 @@ afterwards with `.\scripts\New-LabRecoveryKit.ps1 -Renew`. It asks before it
 starts:
 
 ```powershell
-.\tests\Invoke-LabTests.ps1 -IncludeStateChanging    # the seven tests, then Test-LabRecoveryLogin.ps1
+.\tests\Invoke-LabTests.ps1 -IncludeStateChanging    # the nine tests, then Test-LabRecoveryLogin.ps1
 ```
 
 The deployment scripts check themselves as well (`Deploy-LabMatrix.ps1`, for
@@ -1867,7 +1970,11 @@ What happens on each call of `Invoke-LabPlaybook.ps1`:
    CA's key never leaves the PC.
 3. `~/lab` on ansible-control is **replaced completely** with the new copy
    (`chmod -R go-w`, see [P20](#p20-ansible-ignores-ansiblecfg)).
-4. `ansible-playbook playbooks/<playbook> <your extra arguments>` runs there.
+4. ansible-control gets an **SSH certificate for this run**: the PC signs
+   ansible-control's own public key for exactly the machines the playbook
+   needs (below), valid 2 hours, and the certificate is deleted again when the
+   playbook ends, whatever its exit code.
+5. `ansible-playbook playbooks/<playbook> <your extra arguments>` runs there.
    A playbook that needs OpenBao runs with a **run token** (below); if OpenBao
    is sealed, the script unseals it first, and if OpenBao does not answer at
    all, it stops and asks whether the vault VM is running and OpenBao has been
@@ -1884,6 +1991,22 @@ in [Deploy-LabVault.ps1](scripts/Deploy-LabVault.ps1), the mapping in
 | `matrix-prepare.yml`, and MDAD's runs by `Deploy-LabMatrix.ps1` | `ansible-matrix` | create and read `lab/matrix/*`, read (only) the MAS client secret `lab/keycloak/clients/matrix-authentication-service`, generate passwords (`lab-alnum-64`) |
 | `hello-nginx.yml` | `ansible-web` | have OpenBao sign certificates of the PKI role `web`; no secrets |
 | `ping.yml`, `openbao.yml` | none | (they need no token: `ping.yml` does not contact OpenBao, `openbao.yml` only calls the unauthenticated health endpoint `sys/health`) |
+
+Which machines the run's SSH certificate opens (its principals, `$sshPrincipals`
+in [Invoke-LabPlaybook.ps1](scripts/Invoke-LabPlaybook.ps1); principals are
+explained in [SSH certificates](#ssh-certificates-user-and-host-cas)):
+
+| Playbook | Principals | Opens |
+|---|---|---|
+| `openbao.yml` | `host-vault` | vault |
+| `keycloak.yml` | `host-keycloak` | keycloak |
+| `matrix-prepare.yml`, and MDAD's runs by `Deploy-LabMatrix.ps1` | `host-matrix` | matrix |
+| `ping.yml`, and every playbook not in the list (today `hello-nginx.yml`; the script says so) | `lab-all` | every machine, the firewall included |
+
+The same idea as the run token's policy: least privilege per run. During a
+Matrix deployment, MDAD (third-party code) holds a certificate that opens
+matrix, not vault or the firewall. A new playbook gets an entry with the
+`host-<vm>` names it needs.
 
 How the run token reaches the playbook is drawn step by step in
 [Where secrets and certificates come from](#where-secrets-and-certificates-come-from)
@@ -1949,12 +2072,19 @@ MDAD's `justfile` would run `setup.yml` directly, without the secrets, which
 are no longer in MDAD's inventory; the lab does not use it (`just` is not
 installed). To run a single MDAD tag by hand, for example the self-check, use
 the same helper the script uses (after at least one `Deploy-LabMatrix.ps1`
-run, so that `~/mdad` exists):
+run, so that `~/mdad` exists). Its fourth argument names the SSH principals of
+the run's certificate, here only matrix:
 
 ```powershell
 . .\scripts\LabSecrets.ps1
-Invoke-LabRunToken 'cd ~/mdad && ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory/hosts lab-setup.yml --tags=self-check' @('ansible-matrix') 'mdad'
+Invoke-LabRunToken 'cd ~/mdad && ansible-playbook -i inventory/hosts lab-setup.yml --tags=self-check' @('ansible-matrix') 'mdad' @('host-matrix')
 ```
+
+MDAD checks SSH host keys like the lab's own playbooks: its `ansible.cfg` leaves
+Ansible's `host_key_checking` at its default (on), and ssh on ansible-control
+accepts a lab machine only with a valid host certificate
+(`/etc/ssh/ssh_config.d/20-lab.conf`, written by
+[provision/bootstrap-ansible-control.sh](provision/bootstrap-ansible-control.sh)).
 
 **Edit playbooks and configuration in the repository, never on the VM.** The
 repository is the source of truth: `~/lab` is overwritten on the next
@@ -1971,10 +2101,10 @@ own settings for MDAD belong in `ansible\matrix\`.
 | You changed | Apply it with |
 |---|---|
 | `config/lab.json`: `published` (addresses, names, ports) | `.\scripts\New-LabFirewall.ps1 -Rebuild` (about 4 minutes; see [Publish a name or a port](#publish-a-name-or-a-port)). If the matrix entry's `address` changes, also set `livekit_server_config_rtc_node_ip` in `vars.yml` to it and run `.\scripts\Deploy-LabMatrix.ps1`, or calls connect without media ([P35](#p35-a-call-connects-but-no-audio-or-video-flows)) |
-| `config/lab.json`: a new lab VM | see [Add a VM](#add-a-vm): firewall rebuild, then `.\scripts\Initialize-Lab.ps1` |
+| `config/lab.json`: a new lab VM | see [Add a VM](#add-a-vm): firewall rebuild, `.\scripts\Deploy-LabVault.ps1` (OpenBao's SSH roles learn the new name), then `.\scripts\Initialize-Lab.ps1` |
 | `config/lab.json`: an existing VM's `cpus` or `memory` | `vagrant reload <vm>` in the `vagrant` folder (the VM restarts; after a reload of vault, `.\scripts\Unlock-LabVault.ps1`) |
 | `config/lab.json`: an existing VM's MAC or IP | `.\scripts\Remove-Lab.ps1 <vm>`, then `.\scripts\New-LabFirewall.ps1 -Rebuild` and `.\scripts\Initialize-Lab.ps1`. For vault this means a new, empty OpenBao (see [Rebuild one VM or the whole lab](#rebuild-one-vm-or-the-whole-lab)) |
-| `config/lab.json`: the `firewall` data | `.\scripts\New-LabFirewall.ps1 -Rebuild`. If `hostIp` or `pcIp` changes: first update the matching values in `Install-LabHostNetwork.ps1` (the PC's 10.10.99.1 and its DNS server 10.10.99.2) and run it, then `.\scripts\Remove-Lab.ps1 firewall` and `.\scripts\Initialize-Lab.ps1`, which rewrites `keys\ssh_config` with the new address (step 2) before it builds the firewall (step 4). A plain `-Rebuild` would still try the old address from `keys\ssh_config` for SSH and fail. Note: the PC's OpenBao logins (`pc-admin`, `pc-deploy`, and the break-glass login `recovery` in the recovery file) are bound to the PC's address and stop working after a change of `pcIp`; no script handles that yet |
+| `config/lab.json`: the `firewall` data | `.\scripts\New-LabFirewall.ps1 -Rebuild`. If `hostIp` or `pcIp` changes: first update the matching values in `Install-LabHostNetwork.ps1` (the PC's 10.10.99.1 and its DNS server 10.10.99.2) and run it, then `.\scripts\Remove-Lab.ps1 firewall` and `.\scripts\Initialize-Lab.ps1`, which rewrites `keys\ssh_config` with the new address (step 2) before it builds the firewall (step 4). A plain `-Rebuild` would still try the old address from `keys\ssh_config` for SSH and fail. Note: the PC's OpenBao logins (`pc-admin`, `pc-deploy`, and the break-glass login `recovery` in the recovery file) are bound to the PC's address and stop working after a change of `pcIp`; no script handles that yet. With them OpenBao's signing of SSH certificates stops (its role `pc` also names the old address), so until then the SSH certificates come from the offline SSH CA (`-BreakGlass`) |
 | `opnsense/config.xml.template` | `.\scripts\New-LabFirewall.ps1 -Rebuild` (or make the same change in the GUI, see [section 6](#6-how-to-)) |
 | `opnsense/dnsmasq.conf.d/10-lab.conf` | `.\scripts\New-LabFirewall.ps1` or `.\scripts\Initialize-Lab.ps1` (the drop-in is installed again on every run) |
 | `ansible/playbooks/openbao.yml`, `ansible/templates/openbao/*`, or OpenBao's configuration in `scripts/Deploy-LabVault.ps1` (policies, AppRoles, the token role, PKI roles, ACME) | `.\scripts\Deploy-LabVault.ps1`. It re-applies the whole configuration on every run, so the code is the truth. A changed `openbao.hcl` is applied with a reload, which does not seal OpenBao; the reload covers the TLS files, the log level and the audit settings. Other settings (listener, storage) need a restart: `.\scripts\Connect-Lab.ps1 vault 'sudo systemctl restart openbao'`, then `.\scripts\Unlock-LabVault.ps1` |
@@ -1990,7 +2120,9 @@ own settings for MDAD belong in `ansible\matrix\`.
 | A secret in OpenBao: a new user's password, a new MAS client secret | written by you as administrator ([Write or change a secret](#write-or-change-a-secret-administrator)), then `.\scripts\Deploy-LabKeycloak.ps1`; for the client secret also `.\scripts\Deploy-LabMatrix.ps1` (see [Rotate the MAS client secret](#rotate-the-mas-client-secret)). Never change `keycloak/db`, `keycloak/admin`, `keycloak/clients/lab-ansible`, `matrix/generic-secret-key` or `matrix/postgres` on a running lab: they are fixed after the first start of their service. A new database password no longer matches the one PostgreSQL keeps, so the service stops working; a new admin password or `lab-ansible` secret is ignored by Keycloak, and with the latter the playbook can no longer log in to the admin API; MDAD derives keys from the Matrix secret key. A new password of an existing user is not applied either (see [Add a Keycloak user](#add-a-keycloak-user)) |
 | Other playbooks (`ping.yml`, `hello-nginx.yml`) | `.\scripts\Invoke-LabPlaybook.ps1 <playbook>` |
 | `provision/*.sh` | `.\scripts\Initialize-Lab.ps1` (it always re-runs provisioning of the Ubuntu VMs). Exception: a new `ANSIBLE_VERSION` in `bootstrap-ansible-control.sh` reaches an existing ansible-control only with the command below |
-| Lab SSH key (rotation) | `.\scripts\New-LabSshKey.ps1 -Force`, then `.\scripts\New-LabFirewall.ps1 -Rebuild` (the firewall gets the public key from its configuration), then `.\scripts\Initialize-Lab.ps1` |
+| The SSH certificate roles, `$LabSshRoles` in `scripts/LabSsh.ps1` (lifetimes, extensions, source addresses) | `.\scripts\Deploy-LabVault.ps1`, which makes OpenBao's SSH roles from the same table. Certificates already issued keep their contents until they are renewed: the PC's at once with `.\scripts\Update-LabSshCertificate.ps1 -Force`, a run's with the next run, host certificates 30 days before they expire |
+| `opnsense/sshd_config.d/20-lab-ssh.conf`, `opnsense/lab-sshd-files.sh`, `opnsense/lab-ssh-trust.php` | `.\scripts\New-LabFirewall.ps1` or `.\scripts\Initialize-Lab.ps1` (the firewall's SSH setup is applied again on every run, no rebuild) |
+| Nothing, but the PC should have a new SSH certificate now | `.\scripts\Update-LabSshCertificate.ps1 -Force` (every script renews it by itself when fewer than 4 hours are left) |
 
 Ansible is pinned too: `ANSIBLE_VERSION` in
 [provision/bootstrap-ansible-control.sh](provision/bootstrap-ansible-control.sh)
@@ -2031,12 +2163,27 @@ For safety it touches only a VM whose Notes carry the tag that
 
 What stays: the Vagrant box cache, the OPNsense image cache, the whole
 repository (the scripts, the Ansible project, the vendored MDAD in
-`vendor\mdad`), and `keys\`: the SSH key, the offline root CA (`keys\pki`,
-its key encrypted, the passphrase in DPAPI) and the firewall's passwords and API
-key (DPAPI, `keys\opnsense\`). Because the root stays, every certificate of a
-rebuilt lab chains to the same root, and Windows keeps trusting it; because the
-firewall's secrets stay, its GUI password does not change. The one exception is
-`keys\openbao`.
+`vendor\mdad`), and `keys\`: the offline SSH CA and this PC's SSH key
+(`keys\ssh`), the offline root CA (`keys\pki`, its key encrypted, the
+passphrase in DPAPI) and the firewall's passwords and API key (DPAPI,
+`keys\opnsense\`). Because the root stays, every certificate of a rebuilt lab
+chains to the same root, and Windows keeps trusting it; because the SSH CA
+stays, the rebuilt machines get host certificates that every client already
+trusts; because the firewall's secrets stay, its GUI password does not change.
+The one exception is `keys\openbao`.
+
+**SSH host keys of deleted machines are revoked.** A rebuilt machine has new
+host keys. `Remove-Lab.ps1` (and `New-LabFirewall.ps1 -Rebuild`, and
+`Initialize-Lab.ps1` when a VM publishes a different key) puts the old key into
+the revocation list `keys\ssh\revoked_host_keys` and gives ansible-control the
+new list, so a copy of an old key, from a checkpoint or an old disk, can never
+pass for the rebuilt machine. The new machine gets its host certificate from
+`Initialize-Lab.ps1` (the firewall from its build). Once OpenBao signs the SSH
+certificates, a firewall rebuild needs the vault VM running: the new firewall's
+host certificate comes from OpenBao, through the new firewall's port forward.
+`New-LabFirewall.ps1 -Rebuild` starts the vault VM itself, and refuses before it
+deletes anything when the vault VM does not exist; `-BreakGlass` lets the
+offline SSH CA sign instead.
 
 **OpenBao is a special case.** The vault VM holds the only copy of the
 services' secrets, so before `Remove-Lab.ps1` deletes it (`Remove-Lab.ps1
@@ -2055,6 +2202,12 @@ the installation they were made for: the script **moves** `keys\openbao` to
 (the new one included). A snapshot can be restored only with the key shares of
 its time, so neither is thrown away. (`Deploy-LabVault.ps1` refuses to
 initialise a new OpenBao while `keys\openbao` holds shares of an earlier one.)
+OpenBao's SSH CA goes with the deleted installation: the script moves
+`keys\ssh\openbao-ca.pub` and `openbao-ca.trusted` into the same retired folder
+(`ssh\` in it). The machines stop trusting that CA at the next
+`Initialize-Lab.ps1`, which renders the SSH trust files without it, and the
+offline SSH CA signs again until `Deploy-LabVault.ps1` has made the new
+OpenBao's SSH CA trusted everywhere (its step 8).
 A rebuilt OpenBao is a new installation: new key shares (make a new recovery
 kit with `New-LabRecoveryKit.ps1`; the old share C and recovery file belong to
 the old installation), a new intermediate CA (`lab-int-<year>`, signed by the
@@ -2100,15 +2253,16 @@ yet (see the [roadmap](#11-roadmap)); OpenBao's own data has snapshots
   version again, `~/lab` and `~/lab-pki` are copied again on the next
   `Invoke-LabPlaybook.ps1` run (every deployment makes one), and `~/mdad` on
   the next `Deploy-LabMatrix.ps1` run, which copies `vendor\mdad` there. It
-  holds no secrets and no CA any more.
+  holds no secrets and no CA any more; its provisioning makes it a new SSH key
+  of its own, which the PC signs for each run like the old one.
 - **Removing vault** deletes OpenBao's data: all secrets, the intermediate CA's
-  key, the ACME accounts. What that means is described above.
+  key, the SSH CA's key, the ACME accounts. What that means is described above.
 
 After a rebuild, deploy what the rebuilt VM runs:
 
 | Rebuilt | Then run |
 |---|---|
-| firewall | nothing: its configuration comes from the repository, and the build gives it a new GUI certificate from the root |
+| firewall | nothing: its configuration comes from the repository, and the build gives it a new GUI certificate from the root and a new SSH host certificate (its old host key is revoked) |
 | ansible-control | nothing (the next `Deploy-LabMatrix.ps1` copies MDAD there again) |
 | keycloak | `.\scripts\Deploy-LabKeycloak.ps1` |
 | matrix | `.\scripts\Deploy-LabMatrix.ps1` |
@@ -2134,13 +2288,23 @@ firewall has.
 
 Run `.\scripts\Initialize-Lab.ps1`. The firewall VM is shut down together with
 Windows and is not started automatically; the script starts it first, so that
-DHCP, DNS and the jump host are ready before the lab VMs need them, re-installs
-its DNS drop-in, checks it, and renews its GUI certificate in place if it is
-due. Then it starts whatever else is not running, re-applies the provisioning
-of the Ubuntu VMs, **unseals OpenBao** with the key shares stored on the PC
-(next section; if OpenBao's TLS certificate is due or expired, it runs
-`Deploy-LabVault.ps1` instead, which renews the certificate first and then
-unseals) and tests everything. The applications start with their VMs:
+DHCP, DNS and the jump host are ready before the lab VMs need them. The vault VM
+is started right after it, directly in Hyper-V, and **OpenBao is unsealed**
+with the key shares stored on the PC (next section), over HTTPS and before any
+SSH: the PC's SSH certificate is valid for 8 hours, so after a restart it has
+expired, and once OpenBao is deployed it is OpenBao that signs the new one
+(`vagrant up` could not start the vault VM yet: it needs SSH). Then the script
+checks the firewall: its SSH host certificate, its DNS drop-in, and its GUI
+certificate, renewed in place if it is due. Then it starts whatever else is not
+running, re-applies the provisioning of the Ubuntu VMs, checks their host
+certificates, unseals OpenBao if it is still sealed (if OpenBao's TLS
+certificate is due or expired, it runs `Deploy-LabVault.ps1` instead, which
+renews the certificate first and then unseals; until then the offline SSH CA
+signs, because renewing that certificate needs SSH to the vault VM) and tests
+everything. If OpenBao does not come up at all, the script stops at the first
+SSH login with the reason; `-BreakGlass` lets the offline SSH CA sign instead
+([P53](#p53-ssh-host-key-verification-failed-or-permission-denied-publickey)).
+The applications start with their VMs:
 MDAD's systemd units are enabled, the Keycloak containers have Docker's restart
 policy `unless-stopped`, and the `openbao` service is enabled (it starts
 sealed). The Default Switch gets a new subnet on every Windows boot; the
@@ -2166,7 +2330,9 @@ the vault VM, and the intermediate's public certificate (`Get-LabMaintenanceDue`
 [scripts/LabSecrets.ps1](scripts/LabSecrets.ps1)). Two certificates are not on
 the list because they are handled elsewhere: the firewall's GUI certificate
 (step 4, `New-LabFirewall.ps1`) and the Matrix certificates (Traefik renews
-them itself). If the PC runs for weeks without a restart, run
+them itself). The SSH certificates are not on it either: the PC's is renewed
+by whichever script needs it, and the host certificates (1 year) in steps 4 and
+5, 30 days before they expire. If the PC runs for weeks without a restart, run
 `Initialize-Lab.ps1` at least once a month anyway.
 
 Enterprise equivalent: renewals do not wait for someone to restart a PC. An
@@ -2197,13 +2363,15 @@ input:
 curl.exe -s https://vault.lab.internal:8200/v1/sys/health   # "sealed":false, "standby":false when ready
 ```
 
-You rarely run it yourself: `Initialize-Lab.ps1` unseals OpenBao after starting
-the VMs, `Invoke-LabPlaybook.ps1` does it before a playbook that needs OpenBao,
-and `Deploy-LabVault.ps1` in its own step 5. You need it after the vault VM or
-the `openbao` service was restarted some other way (`vagrant reload vault`, a
-restart on the VM). Right after unsealing, OpenBao's storage first elects
-itself leader; until then it answers writes with "cannot write to readonly
-storage". The script waits until OpenBao reports itself active.
+You rarely run it yourself: `Initialize-Lab.ps1` unseals OpenBao right after
+starting the firewall and the vault VM, `Invoke-LabPlaybook.ps1` does it before
+a playbook that needs OpenBao, the scripts do it before OpenBao signs a new SSH
+certificate for the PC, and `Deploy-LabVault.ps1` in its own step 5. You need
+it after the vault VM or the `openbao` service was restarted some other way
+(`vagrant reload vault`, a restart on the VM). Right after unsealing, OpenBao's
+storage first elects itself leader; until then it answers writes with "cannot
+write to readonly storage". The script waits until OpenBao reports itself
+active.
 
 `-Interactive` asks for two shares instead of reading them from DPAPI: for the
 case where the PC's DPAPI data is lost (a new Windows installation or profile)
@@ -2238,10 +2406,12 @@ the PC's DPAPI plays the role of that first key ("secret zero").
 
 **What it saves.** OpenBao's integrated storage (raft) exports all of its data
 as one **snapshot** file: every secret with its versions, the policies, the
-AppRoles, the PKI with the intermediate CA's key, the ACME accounts. The file
+AppRoles, the PKI with the intermediate CA's key, the SSH CA's key, the ACME
+accounts. The file
 is encrypted by OpenBao's barrier, so it is useless without the key shares, and
 it may be stored like any other backup. The script logs in as `pc-deploy`,
-whose policy allows only this and creating run tokens, saves the file under
+whose policy allows only this, creating run tokens and signing SSH
+certificates, saves the file under
 `keys\openbao\snapshots` and keeps the newest 10 there. `-Destination` copies it
 to a folder that must already exist, for example a NAS share or a USB stick.
 OpenBao must be unsealed.
@@ -2295,9 +2465,29 @@ for them: `vagrant status`, `vagrant halt`, `vagrant up`, `vagrant reload`,
 be running: the VMs get their address from its DHCP server, and Vagrant reaches
 them through it (`ssh.proxy_command`). Every provisioner has a name, so you can
 re-run a single step, for example `vagrant provision matrix --provision-with zsh`.
-The names are `lab-key-pub`, `ansible-user`, `ssh-hardening`,
+The names are `lab-ssh-ca`, `ansible-user`, `ssh-hardening`,
 `console-autologin` and `zsh` (all VMs; on vault, `console-autologin` removes
-the autologin again); `lab-key` and `ansible-control` (ansible-control).
+the autologin again); `lab-ssh-known-hosts`, `lab-ssh-revoked-host-keys` and
+`ansible-control` (ansible-control). On a lab that still has the old shared key
+`keys\ansible_ed25519`, `lab-key-pub` uploads its public half until
+`Complete-LabSshMigration.ps1` retires it
+([SSH certificates](#ssh-certificates-user-and-host-cas)).
+
+Vagrant logs in through the firewall with the PC's SSH certificate. Before
+`vagrant up`, `provision`, `reload`, `ssh`, `ssh-config`, `halt` and `resume`,
+the Vagrantfile therefore checks it and runs
+`scripts\Update-LabSshCertificate.ps1` when it expires within 4 hours (the
+scripts renew it themselves, so this matters only for vagrant commands you
+type). Its proxy command names Windows' own `ssh.exe`: Vagrant puts an OpenSSH
+of its own first in `PATH` for the programs it starts, and the lab is tested
+with Windows' client. `vagrant ssh <vm>` logs in as `vagrant` with Vagrant's
+per-VM key; sshd on the VMs lets `vagrant` in only through the jump host.
+Vagrant alone does not install host certificates (that needs Hyper-V and the
+PC's SSH CAs; `Initialize-Lab.ps1` does it), so after a VM was created or
+rebuilt with `vagrant` alone, run `Initialize-Lab.ps1` before you connect to
+it. Once OpenBao signs the certificates, a `vagrant` command can renew the
+PC's certificate only while the vault VM runs: after a Windows restart, start
+with `Initialize-Lab.ps1`.
 
 Hyper-V checkpoints are switched off for vault (`"checkpoints": false` in
 `config/lab.json`, applied by the Vagrantfile), so `vagrant snapshot` is no way
@@ -2523,13 +2713,25 @@ section):
    ```
 
    Without the reservation the new VM would get a random address from the pool
-   and no DNS name.
+   and no DNS name. The jump host's list of allowed forwarding targets
+   (`PermitOpen` in its sshd drop-in) is rendered from `lab.json` too, so only
+   after this step does it let SSH through to the new VM.
 
-5. Run `.\scripts\Initialize-Lab.ps1`. It adds the VM to `keys\ssh_config` (it
-   reads the VM list from `vagrant status`), creates and provisions the VM, and
-   tests DNS, SSH and `ping.yml`.
+5. Once OpenBao is deployed, run `.\scripts\Deploy-LabVault.ps1`. OpenBao's SSH
+   roles are made from `lab.json`: the role `lab-hosts` certifies exactly the
+   lab's host names, and the role `ansible-control` knows the principal
+   `host-<vm>` of every VM. Until this run, OpenBao refuses a host certificate
+   for `hello.lab.internal`.
 
-6. Write or run a playbook for the new group.
+6. Run `.\scripts\Initialize-Lab.ps1`. It adds the VM to `keys\ssh_config` and
+   to the SSH trust files (both from `lab.json`), creates and provisions the
+   VM, signs and installs its host certificate, and tests DNS, SSH and
+   `ping.yml`.
+
+7. Write or run a playbook for the new group. Give it an entry in
+   `$sshPrincipals` in [Invoke-LabPlaybook.ps1](scripts/Invoke-LabPlaybook.ps1)
+   (for example `@('host-hello')`); without one, its runs get a certificate for
+   every machine (`lab-all`).
 
 ### Run the hello-nginx demo on a VM of its own
 
@@ -2758,6 +2960,11 @@ GUI (the firewall exists before OpenBao). Renewal never needs a rebuild.
 | Firewall GUI (`firewall.lab.internal`) | offline root; key made on the firewall | 397 days | in place by `New-LabFirewall.ps1` (also run by `Initialize-Lab.ps1`) when less than 30 days are left or it is not from the root | `.\scripts\New-LabFirewall.ps1 -Rebuild` (a new firewall gets a new certificate) |
 | Intermediate CA, today "DeployableServer Lab Intermediate CA 2026-10-24" (issuer `lab-int-20261024`) | offline root; key generated inside OpenBao (EC P-384), never exported | 3 years | replaced by a new one (a rotation) by `Deploy-LabVault.ps1` when it has less than 400 days left (`Initialize-Lab.ps1` then runs it by itself). Certificates it issues never outlive it: OpenBao shortens them to its end date | `.\scripts\Deploy-LabVault.ps1 -RotateIntermediate` ([Rotate the intermediate CA](#rotate-the-intermediate-ca)) |
 | Root CA "DeployableServer Lab Root CA 2026" | itself; key encrypted in `keys\pki` | 10 years | never automatically | a new root means trusting it again on every client (`Install-LabRootCA.ps1`) |
+
+The SSH certificates are not in this table: they are OpenSSH certificates, not
+X.509, and come from the lab's SSH CAs (the PC's for 8 hours, one per Ansible
+run for 2 hours, the hosts' for 1 year). Their lifetimes and renewals are in
+[SSH certificates](#ssh-certificates-user-and-host-cas).
 
 How the in-place renewals work, in short: Keycloak's and hello's come from
 [tasks/openbao-certificate.yml](ansible/playbooks/tasks/openbao-certificate.yml):
@@ -2990,12 +3197,22 @@ temporary installation's shares and logins are worthless.
    Invoke-WebRequest -UseBasicParsing -Method Post -Headers @{ 'X-Vault-Token' = $token } -ContentType 'application/octet-stream' -InFile $snap -Uri 'https://vault.lab.internal:8200/v1/sys/storage/raft/snapshot-force'
    ```
 
-3. Put the old installation's files back in place:
+3. Put the old installation's files back in place, and move the temporary
+   installation's SSH CA aside:
 
    ```powershell
    Move-Item keys\openbao keys\openbao-discarded              # shares and logins of the temporary installation
    Move-Item 'keys\openbao-retired-<date-time>' keys\openbao
+   New-Item -ItemType Directory keys\openbao-discarded\ssh | Out-Null
+   Move-Item keys\ssh\openbao-ca.pub, keys\ssh\openbao-ca.trusted keys\openbao-discarded\ssh\   # the temporary installation's SSH CA
    ```
+
+   The restored OpenBao has the SSH CA of the snapshot's time (or none, for a
+   snapshot from before OpenBao signed SSH certificates), not the one step 1
+   made every machine trust, and the scripts stop as long as the two differ
+   ("OpenBao serves another SSH CA than the one the machines trust"). Without
+   these two files the offline SSH CA signs again, so SSH keeps working, and
+   step 5 makes the restored SSH CA trusted everywhere.
 
 4. Unseal with the **old** shares. If the script reports "already unsealed",
    restart OpenBao first, so that it starts with the restored keyring:
@@ -3009,7 +3226,8 @@ temporary installation's shares and logins are worthless.
 5. Re-apply the configuration from the code, check, and deploy:
 
    ```powershell
-   .\scripts\Deploy-LabVault.ps1           # logs in with the restored pc-admin; finds the restored intermediate CA
+   .\scripts\Initialize-Lab.ps1            # the machines stop trusting the temporary SSH CA; the offline SSH CA signs
+   .\scripts\Deploy-LabVault.ps1           # logs in with the restored pc-admin; finds the restored intermediate CA; step 8: the restored SSH CA trusted everywhere
    .\scripts\Show-LabSecret.ps1 -List      # the secrets are back
    .\scripts\Deploy-LabKeycloak.ps1
    .\scripts\Deploy-LabMatrix.ps1
@@ -3023,9 +3241,10 @@ temporary installation's shares and logins are worthless.
 
 The intermediate CA that step 1 created disappears with the temporary data
 (its key existed only there); only its certificate is left on the PC, in
-`keys\pki\issued`, and it can sign nothing without its key.
+`keys\pki\issued`, and it can sign nothing without its key. The same goes for
+the SSH CA that step 1 created.
 `keys\openbao-discarded` holds only the temporary installation's shares and
-logins, which are worthless now.
+logins and the public files of its SSH CA, which are worthless now.
 
 If the PC's DPAPI data is lost as well (a new Windows installation), the old
 installation's files in `keys\openbao-retired-<date-time>` cannot be decrypted,
@@ -3041,7 +3260,10 @@ it.
 
 To roll the **same** installation back to an earlier state (same shares), the
 call in step 2 goes to `sys/storage/raft/snapshot` instead, and steps 1 and 3
-are not needed.
+are not needed. (Only if the snapshot is older than OpenBao's SSH CA, the
+scripts report that OpenBao serves another SSH CA: then move the two
+`keys\ssh\openbao-ca.*` files aside as in step 3 and run `Initialize-Lab.ps1`
+before `Deploy-LabVault.ps1`.)
 
 Enterprise equivalent: a written and rehearsed restore procedure, snapshots
 off-site, the key shares (or recovery keys) held by several custodians who
@@ -3072,10 +3294,14 @@ USB stick that is not plugged in) and that it can write there; the folder is
 created, and a relative path is fine. It asks twice for a passphrase (at least
 12 characters), writes `DeployableServer-recovery-<yyyy-MM-dd>.bin` with key
 share B, a new break-glass login, the root CA key (still encrypted) with its
-passphrase and the root certificate, the firewall's passwords and API key, and
-the fingerprint of share C (kept on the PC in `keys\openbao\unseal-c.sha256`),
-decrypts the file again to verify it and shows its SHA-256 (note it next to
-share C). Share C is not shown again: your copy stays valid. A file in
+passphrase and the root certificate, the offline SSH CA key (still encrypted)
+with its passphrase, the firewall's passwords and API key, and the fingerprint
+of share C (kept on the PC in `keys\openbao\unseal-c.sha256`), decrypts the
+file again to verify it and shows its SHA-256 (note it next to share C). It
+also notes which offline SSH CA the file holds (its fingerprint in
+`keys\ssh\offline-ca.in-recovery-kit`), so that `Initialize-Lab.ps1` and
+`Deploy-LabVault.ps1` can tell when the file is out of date. Share C is not
+shown again: your copy stays valid. A file in
 `keys\recovery` does not survive a lost Windows installation; copy it somewhere
 else.
 
@@ -3095,6 +3321,11 @@ Make a new file:
   break-glass login ...`: a file made before that login existed can still
   unseal, but not give the PC its access back. Do it while the PC's DPAPI keys
   still work;
+- when `Initialize-Lab.ps1` or `Deploy-LabVault.ps1` ends with `PENDING: your
+  recovery file has no copy of the current offline SSH CA ...`: the file was
+  made before the offline SSH CA existed, or the CA is new. `-Renew` adds it;
+  without it, a lost Windows profile would also make the SSH CA that every lab
+  machine trusts for break-glass unusable (its passphrase is in DPAPI);
 - after `-Recover` (next section): the break-glass secret has been used;
 - after a restore from a snapshot (previous section);
 - when the passphrase should change, or the file was lost or may have been
@@ -3108,11 +3339,14 @@ clears the screen.
 ### Recover after losing the PC's DPAPI keys
 
 What the PC keeps with DPAPI (key shares A and B, the logins `pc-admin` and
-`pc-deploy`, the root CA key's passphrase, the firewall's passwords and API
-key) can be decrypted only by your Windows account on this PC. After a new
-Windows profile, or a password reset by an administrator (a normal password
-change is fine), the `.dpapi` files are still there but useless: OpenBao can
-neither be unsealed nor administered from the PC, and the root CA cannot sign.
+`pc-deploy`, the root CA key's passphrase, the offline SSH CA key's
+passphrase, the firewall's passwords and API key) can be decrypted only by your
+Windows account on this PC. After a new Windows profile, or a password reset by
+an administrator (a normal password change is fine), the `.dpapi` files are
+still there but useless: OpenBao can neither be unsealed nor administered from
+the PC, the root CA cannot sign, and no SSH certificate can be signed either
+(OpenBao signs them for `pc-deploy`, the offline SSH CA needs its passphrase),
+so SSH into the lab stops once the PC's current certificate expires.
 `-Recover` brings that back from the recovery file and share C. Not yet tried
 in this lab: the steps follow `New-LabRecoveryKit.ps1` but have not been run
 end to end. They assume that the lab's VMs and the project folder with `keys\`
@@ -3136,6 +3370,16 @@ in Hyper-V too, more is needed, and that is not covered here.
      different key, its passphrase is then not replaced either), and the root
      CA key's passphrase and the firewall's passwords and API key back into
      DPAPI;
+   - does the same for the offline SSH CA: `keys\ssh\offline-ca` and
+     `offline-ca.pub` if they are missing, its passphrase back into DPAPI (not
+     when the key on the PC differs from the one in the file). A file made
+     before the offline SSH CA existed holds none, and the script says so
+     (`This file holds no offline SSH CA`). The offline SSH CA on the PC is
+     then unusable (its passphrase was only in DPAPI), and
+     `Initialize-Lab.ps1` stops in its step 2 because the passphrase is
+     missing. No script covers that case yet (the way the code suggests: a new
+     offline SSH CA, and a firewall rebuild so that it is trusted); this is
+     why the scripts ask for `-Renew` as soon as the kit lacks the CA;
    - waits up to 60 seconds for OpenBao and, if it is sealed, unseals it with
      shares B and C;
    - logs in with the break-glass login and creates **new** logins for
@@ -3157,7 +3401,7 @@ in Hyper-V too, more is needed, and that is not covered here.
    ones.
 3. Run `.\scripts\Initialize-Lab.ps1` as after a Windows restart.
 4. Make a new recovery file with `.\scripts\New-LabRecoveryKit.ps1 -Renew`
-   (previous section).
+   (previous section). It also adds the offline SSH CA to a kit that had none.
 
 Enterprise equivalent: the same idea at a larger scale. The secrets manager
 unseals itself through an HSM or a cloud KMS, so losing one administrator's PC
@@ -3232,32 +3476,52 @@ small pool of public addresses, often via a proxy.
 
 Internal machines have no address your PC can reach. You SSH to the bastion,
 and the bastion opens the connection onward. `keys\ssh_config` (written by
-`Initialize-Lab.ps1`) contains `ProxyJump firewall` for every lab VM. Vagrant
-uses the same path through `ssh.proxy_command` in the Vagrantfile. Here the
-bastion is OPNsense's own SSH server: key login only, listening only on LAN and
-HOST, and open only to members of the `admins` group (OPNsense allows only the
-Unix group `wheel` to log in, and only full administrators are put into it).
-OPNsense does not switch off TCP forwarding in sshd, so `ProxyJump` works without
-extra settings. In an enterprise, the bastion is the one place where you
-enforce MFA and log every session, and it is usually a dedicated host in a
-management network rather than the perimeter firewall itself.
+`Initialize-Lab.ps1`, its text from `Get-LabSshConfigText` in
+[scripts/LabSsh.ps1](scripts/LabSsh.ps1)) contains `ProxyJump firewall` for
+every lab VM. Vagrant uses the same path through `ssh.proxy_command` in the
+Vagrantfile. Here the bastion is OPNsense's own SSH server, listening only on
+LAN and HOST, open only to members of the `admins` group (OPNsense allows only
+the Unix group `wheel` to log in, and only full administrators are put into
+it), and locked down to its one job by a drop-in that `New-LabFirewall.ps1`
+installs ([opnsense/sshd_config.d/20-lab-ssh.conf](opnsense/sshd_config.d/20-lab-ssh.conf)):
 
-The first SSH connection trusts whatever host key the bastion presents
-(`accept-new`, see [section 10](#10-security-notes)). You can check it once by
-hand: at the end of its boot, OPNsense prints its SSH host key fingerprints and
-the fingerprint of its GUI certificate on the console, and the first boot is
-saved in the log. Compare them with what ssh learned (`known_hosts` holds one of
-the key types, here ECDSA):
+- **Who**: only `ansible`, only from the PC and from ansible-control
+  (`AllowUsers`), and only with a certificate from a lab SSH CA (the
+  `cert-authority` lines in the authorized keys of `ansible`).
+- **Where to**: forwarding only to port 22 of the lab VMs, by address (Vagrant's
+  `ssh -W <ip>:22`) and by name (`ProxyJump`): `AllowTcpForwarding local` with
+  a `PermitOpen` list rendered from `config/lab.json`. No remote forwarding, no
+  agent forwarding, no tunnels. A login may forward at all only because the
+  PC's certificate carries the extension `permit-port-forwarding`.
+- **Checked twice**: the PC checks the firewall's host certificate on the
+  first hop, and then, end to end through the tunnel, the host certificate of
+  the VM. The bastion never sees the PC's private key.
+
+In an enterprise, the bastion is the one place where you enforce MFA and log
+every session, and it is usually a dedicated host in a management network
+rather than the perimeter firewall itself.
+
+Even the very first connection to a new firewall is verified. At the end of its
+boot, OPNsense prints its SSH host key fingerprints and the fingerprint of its
+GUI certificate on the serial console, and `New-LabFirewall.ps1` reads that
+console during the first boot: it certifies the firewall's host key only after
+comparing it with the printed fingerprint
+([SSH certificates](#ssh-certificates-user-and-host-cas)). The first boot is
+saved in the log, so you can repeat the comparison by hand with the key the PC
+stored:
 
 ```powershell
 Select-String -CaseSensitive -Pattern '^ *(SSH|HTTPS): ' G:\Vagrant\hyperv\firewall\logs\serial-console.log -Context 0,1
-ssh-keygen -l -F 10.10.99.2 -f keys\known_hosts
+ssh-keygen -lf keys\ssh\hosts\firewall.pub
 ```
 
 Checking a fingerprint over a second, trusted channel (here the serial console)
-is out-of-band verification; SSH host certificates automate it.
-Files: [scripts/Initialize-Lab.ps1](scripts/Initialize-Lab.ps1),
-[scripts/Connect-Lab.ps1](scripts/Connect-Lab.ps1), [vagrant/Vagrantfile](vagrant/Vagrantfile).
+is out-of-band verification; the lab automates it and then hands the result to
+every client as a host certificate.
+Files: [scripts/LabSsh.ps1](scripts/LabSsh.ps1),
+[scripts/Initialize-Lab.ps1](scripts/Initialize-Lab.ps1),
+[scripts/Connect-Lab.ps1](scripts/Connect-Lab.ps1), [vagrant/Vagrantfile](vagrant/Vagrantfile),
+[opnsense/sshd_config.d/20-lab-ssh.conf](opnsense/sshd_config.d/20-lab-ssh.conf).
 
 ### Network segmentation with Hyper-V switch types
 
@@ -3682,6 +3946,254 @@ Files: [scripts/LabSecrets.ps1](scripts/LabSecrets.ps1) (`Get-LabMaintenanceDue`
 [matrix-prepare.yml](ansible/playbooks/matrix-prepare.yml),
 [scripts/Deploy-LabMatrix.ps1](scripts/Deploy-LabMatrix.ps1).
 
+### SSH certificates: user and host CAs
+
+SSH has a trust model of its own, separate from the X.509 PKI above. With plain
+keys, trust is managed key by key: every server lists the public keys that may
+log in (`authorized_keys`), and every client lists the host keys it believes
+(`known_hosts`), usually learned on the first connection ("trust on first use":
+whatever answers first is believed). Such a key never expires, and whoever holds
+a copy can use it until someone finds and removes it everywhere. Earlier
+versions of this lab worked exactly like that: one key without a passphrase
+(`keys\ansible_ed25519`) for the PC, ansible-control and every machine, host
+keys accepted on first contact (`StrictHostKeyChecking accept-new`) and not
+checked at all by Ansible (`host_key_checking = False`). Now SSH runs on
+certificates.
+
+**What an SSH certificate is.** A public key signed by an SSH certificate
+authority (CA), together with
+
+- a validity period (here 8 hours for the PC, 2 hours per Ansible run, 1 year
+  for hosts),
+- **principals**, for whom it is valid: role names such as `lab-all` or
+  `host-matrix` in a user certificate, the host's full DNS name in a host
+  certificate,
+- a key ID and a serial number, which every server writes into its log at each
+  login,
+- critical options and extensions: `source-address` (usable only from these
+  addresses), `permit-port-forwarding` (may use the jump host), `permit-pty`
+  (gets a terminal); everything else, agent and X11 forwarding for example,
+  stays off.
+
+It is OpenSSH's own, simple format, not X.509: no chains, no intermediates, no
+URLs for revocation lists; a CA is just a key pair. A **user certificate** lets
+its holder log in, a **host certificate** proves a server's identity, and
+OpenSSH never accepts the one as the other. Servers trust the CA instead of
+single keys (`TrustedUserCAKeys`, or a `cert-authority` line in
+`authorized_keys`), and clients trust the CA for host keys (an
+`@cert-authority` line in `known_hosts`). A rebuilt VM with new host keys
+simply gets a new certificate and is trusted at once: no "REMOTE HOST
+IDENTIFICATION HAS CHANGED", and no blind "yes".
+
+**Two CAs.** As with the X.509 PKI, an offline key on the PC and an online
+issuer in OpenBao, but not as a chain: every machine trusts both side by side.
+
+| | Offline SSH CA | OpenBao's SSH CA |
+|---|---|---|
+| Key | ed25519, `keys\ssh\offline-ca` on the PC, encrypted with a random 48-character passphrase stored with DPAPI ([scripts/New-LabSshCa.ps1](scripts/New-LabSshCa.ps1)); a copy of both in the recovery file | ed25519, generated inside OpenBao (secrets engine `ssh`, [scripts/Deploy-LabVault.ps1](scripts/Deploy-LabVault.ps1) step 6), never exported |
+| Signs | the bootstrap (OpenBao not deployed yet, or its SSH CA not yet trusted everywhere); while OpenBao's own TLS certificate has expired (renewing it needs SSH to the vault VM, so that must not depend on OpenBao); and break-glass, only when you ask for it | everything else: the PC's certificate, each Ansible run's, the host certificates |
+| Recorded | in `keys\ssh\issued.log` on the PC, and in each machine's sshd log at login (key ID `offline-...`) | in OpenBao's audit log, in `keys\ssh\issued.log` and in the sshd logs |
+| Trusted | by every machine, permanently: a firewall rebuild is always a way back in | by every machine, once `Deploy-LabVault.ps1` has pushed it there and proved it |
+
+**Who signs is decided every time** (`Get-LabSshSigner` in
+[scripts/LabSsh.ps1](scripts/LabSsh.ps1)). OpenBao signs once
+`keys\ssh\openbao-ca.trusted` holds the fingerprint of the CA OpenBao serves.
+From then on, an OpenBao that is stopped, cannot be unsealed, serves another SSH
+CA, or answers with a TLS certificate that does not chain to the lab root makes
+the scripts **stop**, with the reason and the ways out, instead of falling back
+to the offline CA: whoever can block or impersonate OpenBao must not be able to
+push the lab into signing outside its audit log. Break-glass is a decision:
+`-BreakGlass` on `Update-LabSshCertificate.ps1`, `Connect-Lab.ps1`,
+`Initialize-Lab.ps1` and `New-LabFirewall.ps1`, or
+`$env:LAB_SSH_BREAKGLASS = '1'` in a window. Such a certificate's key ID starts
+with `offline-breakglass-`, so it stands out in every log. Both CAs sign from
+the same table (`$LabSshRoles` in `LabSsh.ps1`; `Deploy-LabVault.ps1` makes
+OpenBao's roles `pc`, `ansible-control` and `lab-hosts` from it), every
+certificate gets a random serial number, and the PC checks each new certificate
+against what it asked for (type, key, CA, principals, lifetime, options) before
+it uses it, whichever CA signed it.
+
+**The handover to OpenBao** is step 8 of `Deploy-LabVault.ps1`
+(`Enable-LabOpenBaoSshCa`): OpenBao's CA public key is cached as
+`keys\ssh\openbao-ca.pub`, the trust files are rendered with both CAs and pushed
+to every machine, and then a throwaway key gets a 10-minute certificate from
+OpenBao and logs in to every machine, through the jump host, with a temporary
+`ssh_config` that offers only that key. Only when every login works is
+`openbao-ca.trusted` written. A failed rollout locks nobody out: the offline CA
+simply keeps signing.
+
+**The certificates of the lab:**
+
+| Certificate | Its key | Principals | Valid | Options | Renewed |
+|---|---|---|---|---|---|
+| The PC's | `keys\ssh\pc_ed25519`, made once on the PC, no passphrase | `lab-all` | 8 hours | `source-address`: the PC (10.10.99.1) and the firewall's LAN address (every login to a VM arrives from the jump host); `permit-port-forwarding`, `permit-pty` | by `Get-LabSshConfig`, the entry point of every script that uses ssh, scp or vagrant, when fewer than 4 hours are left (longer than any script runs); for `vagrant` commands you type, by the Vagrantfile; by hand: `.\scripts\Update-LabSshCertificate.ps1` |
+| An Ansible run's | ansible-control's own key, made on the VM by [provision/bootstrap-ansible-control.sh](provision/bootstrap-ansible-control.sh); it never leaves the VM | only what the playbook needs (`$sshPrincipals` in `Invoke-LabPlaybook.ps1`, see [Run a playbook](#run-a-playbook-re-run-a-deployment)) | 2 hours, like the run's OpenBao token | `source-address`: ansible-control; `permit-pty` | new for every run: installed next to the key (`~/.ssh/id_ed25519-cert.pub`) and deleted when the run ends. The sockets of Ansible's kept-open connections (ControlPersist) are removed before and after, so a connection of an earlier run with a broader certificate cannot be reused |
+| A host's | the machine's own ed25519 host key | exactly one: its full DNS name | 1 year | none | by `Initialize-Lab.ps1` (VMs) and `New-LabFirewall.ps1` (firewall), 30 days before it expires and at once for a new host key; one from the offline CA is replaced by one from OpenBao once OpenBao signs |
+
+**Principals are roles, not user names.** Every machine accepts, for the
+account `ansible`, the principals `lab-all` and `host-<its own name>`: the
+Ubuntu VMs through `AuthorizedPrincipalsFile` (`/etc/ssh/lab_principals/ansible`,
+written by [provision/harden-ssh.sh](provision/harden-ssh.sh)), the firewall
+through `principals="lab-all,host-firewall"` in its `cert-authority` lines.
+There is no principals file for `root` or `vagrant`, so no certificate logs in
+as them. A certificate for `host-keycloak` opens keycloak and nothing else: the
+same least privilege per run as the run token's policy, so during a Matrix
+deployment, MDAD's third-party code holds a certificate that opens neither vault
+nor the firewall. The PC refuses to sign for an empty list (OpenSSH accepts a
+host certificate without principals for every host name), for wildcards and for
+names that are not in `config/lab.json`.
+
+**What the servers check.**
+
+- **The Ubuntu VMs** (drop-in `/etc/ssh/sshd_config.d/10-lab-hardening.conf`,
+  from `harden-ssh.sh`): `TrustedUserCAKeys` with both CAs, the principals
+  file, their own `HostCertificate`, `AllowUsers` (`ansible` from the
+  firewall's LAN address and from ansible-control, `vagrant` from the firewall's
+  LAN address only), no passwords, no root login, no forwarding of any kind.
+- **The firewall**: the authorized keys of `ansible` are one line per CA,
+  `cert-authority,principals="lab-all,host-firewall",from="<PC>,<ansible-control>" ssh-ed25519 AAAA...`.
+  A new firewall gets them in its `config.xml`; a running one through
+  [opnsense/lab-ssh-trust.php](opnsense/lab-ssh-trust.php), which writes them
+  with OPNsense's own configuration code, as the GUI would. The sshd drop-in
+  that restricts the jump host is described in
+  [Bastion (jump) host](#bastion-jump-host).
+
+A copied user certificate is therefore limited three times: by its lifetime, by
+its `source-address`, and by the server's `from=` and `AllowUsers`.
+
+**What the clients check**: `keys\ssh_config` on the PC, and
+`/etc/ssh/ssh_config.d/20-lab.conf` on ansible-control for every
+`*.lab.internal` name, which applies to the lab's playbooks and to MDAD alike.
+`HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com` asks a server only for its
+certified key, `StrictHostKeyChecking yes` refuses anything else, and
+`known_hosts` holds nothing but `@cert-authority` lines for the exact names of
+the lab's machines (no wildcard: a name that is not in `config/lab.json` is
+never accepted). On ansible-control nothing learned "on first use" counts or is
+stored (`UserKnownHostsFile /dev/null`). Ansible checks host keys again
+(`host_key_checking = True` in [ansible/ansible.cfg](ansible/ansible.cfg)).
+
+**First contact: how the PC learns a host key before it certifies it.** A host
+certificate is only as good as the check of the key it certifies, so the PC
+never takes a host key from the network unverified:
+
+- **The firewall** prints its host key fingerprints on its serial console when
+  it boots. `New-LabFirewall.ps1` reads that console (a Hyper-V named pipe on the
+  PC, which nothing on the network can write to) and compares the fingerprint
+  with the key the firewall then presents (`ssh-keyscan`). An impostor on the
+  LabHost network cannot fake that.
+- **The Ubuntu VMs**: `harden-ssh.sh` publishes the VM's host key through
+  Hyper-V KVP ("key-value pair exchange", part of Hyper-V's integration
+  services: items exchanged over VMBus, the VM's private channel to its host,
+  which only root inside that VM can write). The PC reads it from Hyper-V
+  (`Get-LabKvpHostKey`, which needs an elevated shell). No other VM can write
+  there.
+
+The PC keeps the verified keys in `keys\ssh\hosts\`, refuses a key that another
+machine already has (two VMs made from the same image), and installs each
+certificate over a connection pinned to exactly that stored key, so this also
+repairs a machine whose certificate is missing or expired; `sshd -t` checks the
+configuration before sshd reloads. Enterprise equivalent: clouds print host key
+fingerprints to the instance's console output (AWS `get-console-output`), or an
+agent that proves the instance's identity gets its host certificate at boot.
+
+**Revocation.** User certificates are not revoked: they expire within hours.
+Host keys that must never be accepted again go into a key revocation list
+(KRL, made with `ssh-keygen -k`), `keys\ssh\revoked_host_keys`: the old key of a
+rebuilt firewall, of a VM that publishes a different key, and of every machine
+`Remove-Lab.ps1` deletes. ssh on the PC and on ansible-control refuses such a
+key even with a valid certificate, so a copy from a checkpoint or an old disk
+cannot pass for the machine. ansible-control, when it is running, usually gets
+the new list right away from the script that revoked the key, and in any case
+at its next provisioning.
+
+**Audit.** Every login names its certificate in the target's sshd log: key ID,
+serial number and signing CA. OpenBao's audit log normally stores every request
+value only as an HMAC; for the `ssh` mount the principals, the certificate
+type, the lifetime and the serial number are logged in plain text, so a login
+can be traced to its signing request. `keys\ssh\issued.log` on the PC lists
+every certificate either CA signed (time, signer, role, key ID, serial,
+principals, expiry, key fingerprint), and nothing secret. To look:
+
+```powershell
+.\scripts\Update-LabSshCertificate.ps1                   # the PC's certificate: signer, valid until, key ID, serial
+ssh-keygen -L -f keys\ssh\pc_ed25519-cert.pub            # all of it: principals, critical options, extensions
+.\scripts\Connect-Lab.ps1 matrix 'sudo journalctl -u ssh -n 20 --no-pager | grep Accepted'   # logins with key ID and serial
+```
+
+**What remains, honestly:**
+
+- **Code that runs as you on the PC** can do what the scripts do: decrypt
+  DPAPI, sign with the offline CA, log in to OpenBao as `pc-deploy` and get a
+  certificate for every machine. That is the power the old lab key gave, but
+  now every login names its certificate, and every certificate expires.
+- **The offline CA's passphrase is on `ssh-keygen`'s command line** while it
+  signs (`-P`: OpenSSH 8.1 reads passphrases only from the console, never from
+  stdin, so there is no other unattended way). It is a deliberate exception to
+  the lab's rule "no secrets on command lines". The process is started through
+  .NET, so PowerShell's own logging never sees the value, but programs running
+  as you or as an administrator can read it while `ssh-keygen` runs, and
+  Windows writes it into the Security event log if "Include command line in
+  process creation events" is switched on (`New-LabSshCa.ps1` warns about that
+  setting). Without the encrypted key file it is useless.
+- **Vagrant's own last hop** (user `vagrant`, Vagrant's per-VM key) does not
+  check the VM's host key. Nothing depends on it: the PC never takes a host key
+  from there, and that hop carries no secret of the lab.
+- **Per-run principals rest on one shared account.** Every run on
+  ansible-control uses the same user `ansible` with the same key and
+  passwordless sudo. Code that runs during one run and plants something on
+  ansible-control could pick up the certificate of a later run (`ping.yml`
+  gets `lab-all`). The scoping protects against mistakes and short-lived
+  misuse, not against a persistent compromise of ansible-control; that would
+  need one account per automation, for example MDAD in an account of its own
+  without sudo ([roadmap](#11-roadmap)).
+- **Only the PC and ansible-control check the revocation list.** They are the
+  only SSH clients in the lab that matter, but a revoked key is refused only
+  there.
+- **Offline signatures are recorded only on the PC**, in
+  `keys\ssh\issued.log` (and in the sshd logs of the machines they are used
+  on), not in OpenBao's audit log.
+- **The recovery file now also opens SSH**: with its passphrase, the offline
+  SSH CA in it can sign a certificate for every machine (usable from the PC's
+  addresses). Guard it like the break-glass login it already held.
+
+**Moving an existing lab over** happens once and in steps, so that it can never
+lock itself out (TRANSITION in the code): while the old key
+`keys\ansible_ed25519` exists, ssh still offers it and every machine still
+accepts it. `Initialize-Lab.ps1` installs the CAs and the host certificates,
+`Deploy-LabVault.ps1` hands signing to OpenBao, and
+[scripts/Complete-LabSshMigration.ps1](scripts/Complete-LabSshMigration.ps1)
+retires the old key: first it proves that the PC's certificate alone logs in
+everywhere and that `ping.yml` works from ansible-control (nothing is changed if
+not), then, after you confirm, it deletes the Hyper-V checkpoints of the lab VMs
+(they still contain the old key), moves the key files to
+`keys\lab-key-retired-<date-time>` (moved, not deleted: once the script is done
+the key opens nothing, and you delete that folder yourself), removes the key's
+public half from the firewall and every VM, and checks that no machine lists it
+any more. It can be run again if it stops half-way. The
+commands are in the [roadmap](#11-roadmap).
+
+Enterprise equivalent: the same split exists everywhere, an offline or
+HSM-held root of trust plus an online issuer (HashiCorp Vault's or OpenBao's
+SSH secrets engine, Smallstep, Teleport, AWS EC2 Instance Connect). People get
+a certificate for their own identity after an SSO login with MFA, with
+principals from their IdP groups; automation gets one per job; hosts get theirs
+at boot from an agent that proves the instance's identity; logins and
+issuance go to a SIEM.
+Files: [scripts/LabSsh.ps1](scripts/LabSsh.ps1) (read its header first),
+[scripts/New-LabSshCa.ps1](scripts/New-LabSshCa.ps1),
+[scripts/Update-LabSshCertificate.ps1](scripts/Update-LabSshCertificate.ps1),
+[scripts/Deploy-LabVault.ps1](scripts/Deploy-LabVault.ps1) (steps 6 and 8),
+[scripts/Invoke-LabPlaybook.ps1](scripts/Invoke-LabPlaybook.ps1) (`$sshPrincipals`),
+[scripts/New-LabFirewall.ps1](scripts/New-LabFirewall.ps1) (`Update-FirewallSsh`),
+[provision/harden-ssh.sh](provision/harden-ssh.sh),
+[provision/bootstrap-ansible-control.sh](provision/bootstrap-ansible-control.sh),
+[opnsense/lab-ssh-trust.php](opnsense/lab-ssh-trust.php),
+[opnsense/lab-sshd-files.sh](opnsense/lab-sshd-files.sh),
+[opnsense/sshd_config.d/20-lab-ssh.conf](opnsense/sshd_config.d/20-lab-ssh.conf),
+[scripts/Complete-LabSshMigration.ps1](scripts/Complete-LabSshMigration.ps1),
+[tests/Test-LabSshCa.ps1](tests/Test-LabSshCa.ps1),
+[tests/Test-LabSshCertificates.ps1](tests/Test-LabSshCertificates.ps1).
+
 ### Secrets management with OpenBao
 
 A **secrets manager** is a server that keeps secrets encrypted, hands each one
@@ -3701,8 +4213,10 @@ too. OpenBao also holds the lab's intermediate CA
 configures it over its API from the PC.
 
 Before OpenBao, the generated secrets were plain YAML files on ansible-control,
-with backups on the PC. Now no secret is stored in plain text anywhere, with one
-known exception, the lab SSH key. A service secret exists in OpenBao (and in
+with backups on the PC. Now no secret that opens anything on its own is stored
+in plain text anywhere: the PC's and ansible-control's SSH keys have no
+passphrase, but without a certificate that lasts a few hours they open nothing
+([SSH certificates](#ssh-certificates-user-and-host-cas)). A service secret exists in OpenBao (and in
 its encrypted snapshots), in memory during a deployment, and in the
 configuration of the running service that uses it. Which secret is kept where,
 and what creates it, is listed in
@@ -3711,9 +4225,10 @@ What protects each place: OpenBao's encryption, policies and audit log for the
 services' secrets (KV mount `lab`); DPAPI, that is your Windows account, for the
 PC's own secrets (`keys\<area>\<name>.dpapi`); you, for key share C; the
 passphrase, for the recovery file and the break-glass login in it; AES-256 with
-a passphrase in DPAPI, for the root CA key; OpenBao itself, which never exports
-them, for the intermediate CAs' keys; and only file permissions for the lab SSH
-key (a lab shortcut, [section 10](#10-security-notes)).
+a passphrase in DPAPI, for the root CA key and the offline SSH CA key; OpenBao
+itself, which never exports them, for the intermediate CAs' keys and its SSH
+CA's key; and file permissions plus the certificates' short lifetimes and
+source addresses for the two SSH keys without a passphrase.
 
 Why the firewall's secrets are not in OpenBao: the firewall exists before
 OpenBao, and the vault VM depends on it (its address, DNS, the only way in from
@@ -3812,7 +4327,7 @@ policy allows is denied. Each consumer has its own:
 | Policy | Held by | Allows |
 |---|---|---|
 | `openbao-admin` | AppRoles `pc-admin` (the PC) and `recovery` (break-glass) | everything: administration, reading secrets by hand |
-| `pc-deploy` | AppRole `pc-deploy` (the PC) | creating run tokens through the token role `ansible-run`; taking raft snapshots |
+| `pc-deploy` | AppRole `pc-deploy` (the PC) | creating run tokens through the token role `ansible-run`; taking raft snapshots; signing SSH certificates with the SSH roles `pc`, `ansible-control` and `lab-hosts` (only signing: the SSH CA and its roles are `pc-admin`'s) |
 | `ansible-keycloak` | run token of `keycloak.yml` | create and read `keycloak/...`; generate with `lab-alnum-24` and `-48`; sign with the PKI role `keycloak` |
 | `ansible-matrix` | run token of `matrix-prepare.yml` and of MDAD | create and read `matrix/...`; read (not create) the MAS client secret; generate with `lab-alnum-64` |
 | `ansible-web` | run token of `hello-nginx.yml` | sign with the PKI role `web`, nothing else |
@@ -4008,7 +4523,8 @@ prepared in advance, kept apart from daily use, and used rarely and on purpose
 
 In this lab the normal way runs through DPAPI, that is, through your Windows
 account: OpenBao's key shares A and B, the PC's OpenBao logins, the root CA
-key's passphrase, the firewall's passwords. If that account's keys are lost
+key's passphrase, the offline SSH CA key's passphrase, the firewall's passwords.
+If that account's keys are lost
 (Windows reinstalled, the profile damaged, the password reset by an
 administrator), OpenBao could neither be unsealed nor administered again (every
 secret in it lost, and with them the existing Keycloak and Matrix
@@ -4019,16 +4535,18 @@ daily setup. It has two parts, kept in different places:
 | Part | Holds | Protected by |
 |---|---|---|
 | Key share C | one of OpenBao's three key shares | where you keep it: on paper or in your password manager |
-| The recovery file, `DeployableServer-recovery-<date>.bin` | key share B; the break-glass login (below); the root CA key (still encrypted with its own passphrase), that passphrase and the root certificate; the firewall's passwords and API key; a fingerprint (SHA-256) of share C | a passphrase you choose: AES-256 against reading, an HMAC-SHA256 against changes, both keys derived from the passphrase with PBKDF2 (600,000 iterations), which makes guessing it slow |
+| The recovery file, `DeployableServer-recovery-<date>.bin` | key share B; the break-glass login (below); the root CA key (still encrypted with its own passphrase), that passphrase and the root certificate; the offline SSH CA key (still encrypted) and its passphrase; the firewall's passwords and API key; a fingerprint (SHA-256) of share C | a passphrase you choose: AES-256 against reading, an HMAC-SHA256 against changes, both keys derived from the passphrase with PBKDF2 (600,000 iterations), which makes guessing it slow |
 
 Any two key shares unseal OpenBao: normally A + B from DPAPI, after a loss B from
 the file and C from your copy. Neither part alone unseals OpenBao, and the file
 is useless without its passphrase. That is the point of keeping the pieces
 apart: whoever finds only one of them, without the passphrase, has nothing.
 With its passphrase, the file alone is also an administrator login for an
-unsealed OpenBao, from the PC's address (the break-glass login), so guard the
-passphrase as well as the file. The fingerprint of share C in the file
-lets the recovery catch a typing error in the share you type in, and it reveals
+unsealed OpenBao, from the PC's address (the break-glass login), and SSH
+access to every lab machine (the offline SSH CA in it signs a certificate for
+any of them), so guard the passphrase as well as the file. The fingerprint of
+share C in the file lets the recovery catch a typing error in the share you
+type in, and it reveals
 nothing about the share: a random 256-bit value cannot be guessed back from its
 hash. After a recovery the PC keeps B and C (A is gone), and the next recovery
 file holds B again, so the file and your copy of C stay two different shares.
@@ -4050,6 +4568,12 @@ still help to unseal (it holds share B), nothing more. A used break-glass
 login is replaced, like a password after an emergency: after a recovery the
 script asks for a new file (`-Renew`).
 
+SSH has a break-glass path of its own: when OpenBao cannot sign SSH
+certificates, the offline SSH CA on the PC can, but only when you ask for it
+(`-BreakGlass`), and every such certificate is marked as such in the logs
+([SSH certificates](#ssh-certificates-user-and-host-cas)). The recovery file
+keeps a copy of that CA, so the path survives a lost Windows profile too.
+
 **Using the kit.** `New-LabRecoveryKit.ps1` makes the kit once, right after
 OpenBao was initialised ([Step 5](#step-5-make-the-recovery-kit-once-you-run-it-yourself));
 `-Renew` writes a new recovery file later and `-Open` shows what a person may
@@ -4062,10 +4586,12 @@ for the PC's scripts
 The script shows secrets, so it runs only in a console window you type into
 yourself.
 
-The kit restores what DPAPI protected, plus the root CA's files. It is not a
-backup of the whole `keys\` folder (the lab SSH key, for example, is a plain
-file there, and OpenBao's snapshots are in `keys\openbao\snapshots`). A full
-recovery on a new Windows installation has not been rehearsed in this lab yet.
+The kit restores what DPAPI protected, plus the files of the root CA and of the
+offline SSH CA. It is not a backup of the whole `keys\` folder (this PC's SSH
+key, for example, is not in it: a lost one is simply made again by
+`New-LabSshCa.ps1`, and the CAs certify the new one; OpenBao's snapshots are in
+`keys\openbao\snapshots`). A full recovery on a new Windows installation has
+not been rehearsed in this lab yet.
 
 The lab is pragmatic here: one person holds all three shares, a password manager
 or a sheet of paper is a fine place for share C, and a NAS share or a USB stick
@@ -4674,10 +5200,12 @@ The Vagrantfile describes the Ubuntu VMs, their network and their provisioning;
 their names, MACs, IPs and sizes come from `config/lab.json`, which the firewall
 build reads too. Every provisioning script is idempotent ("safe to run again"),
 so `Initialize-Lab.ps1` simply re-applies everything on each run.
-Bootstrapping (user, SSH key and host keys, shell) is done by Vagrant shell
-provisioners. Application deployment is done by Ansible. This split is common: a
-minimal bootstrap creates a machine that configuration management can reach,
-and configuration management does the rest.
+Bootstrapping (user, SSH host keys and the SSH CAs to trust, ansible-control's
+own SSH key, shell) is done by Vagrant shell provisioners; the host
+certificates come afterwards from `Initialize-Lab.ps1`, which can read each
+VM's host key from Hyper-V. Application deployment is done by Ansible. This
+split is common: a minimal bootstrap creates a machine that configuration
+management can reach, and configuration management does the rest.
 Files: [vagrant/Vagrantfile](vagrant/Vagrantfile), [provision/](provision/),
 [scripts/Initialize-Lab.ps1](scripts/Initialize-Lab.ps1).
 
@@ -4813,6 +5341,13 @@ DeployableServer/
 |   |                                 VIPs, port forwards and host entries are generated from lab.json
 |   |-- lab-gui-cert.php              run as root on the firewall by New-LabFirewall.ps1: puts a
 |   |                                 renewed GUI certificate into the running config.xml
+|   |-- lab-ssh-trust.php             run as root on the firewall (LabSsh.ps1): the SSH CAs user
+|   |                                 ansible accepts (cert-authority lines) into the running config.xml
+|   |-- lab-sshd-files.sh             run as root on the firewall by New-LabFirewall.ps1: installs the
+|   |                                 SSH host certificate and the sshd drop-in, only if sshd -t passes
+|   |-- sshd_config.d/
+|   |   `-- 20-lab-ssh.conf           sshd drop-in: host certificate, AllowUsers, forwarding only to
+|   |                                 port 22 of the lab VMs (PermitOpen, rendered from lab.json)
 |   `-- dnsmasq.conf.d/
 |       `-- 10-lab.conf               dnsmasq drop-in: localise-queries (split horizon)
 |-- vagrant/
@@ -4820,14 +5355,20 @@ DeployableServer/
 |   |                                 checkpoints, provisioners
 |   `-- .vagrant                      junction to G:\Vagrant\machines\... (VM disks, Vagrant state)
 |-- provision/                        shell provisioners run by Vagrant as root on the Ubuntu VMs (all idempotent)
-|   |-- bootstrap-ansible-user.sh     user "ansible", passwordless sudo, lab key in authorized_keys
-|   |-- harden-ssh.sh                 own SSH host keys per VM, SSH logins with keys only
-|   |-- bootstrap-ansible-control.sh  Ansible pinned (ANSIBLE_VERSION) via pipx, lab private key, git
-|   |                                 (for Update-LabMdad.ps1)
+|   |-- bootstrap-ansible-user.sh     user "ansible", passwordless sudo (it logs in with SSH
+|   |                                 certificates; removes the old lab key once it is retired)
+|   |-- harden-ssh.sh                 own SSH host keys per VM, published to the PC through Hyper-V
+|   |                                 KVP; trust in the lab's SSH CAs, principals, AllowUsers;
+|   |                                 certificate logins only, no forwarding, no root login
+|   |-- bootstrap-ansible-control.sh  ansible-control's own SSH key, host key checking against the
+|   |                                 lab's SSH CAs (ssh_known_hosts, revocation list,
+|   |                                 ssh_config.d/20-lab.conf), Ansible pinned (ANSIBLE_VERSION) via
+|   |                                 pipx, git (for Update-LabMdad.ps1)
 |   |-- setup-zsh.sh                  zsh, fzf history search, prompt without blue
 |   `-- setup-console-autologin.sh    tty1 autologin for the Hyper-V console (--remove: off, for vault)
 |-- ansible/                          Ansible project (copied to ~/lab on ansible-control per run)
-|   |-- ansible.cfg                   inventory, remote user, SSH key, host key checking, pipelining
+|   |-- ansible.cfg                   inventory, remote user, ansible-control's own SSH key (with the
+|   |                                 run's certificate next to it), host key checking on, pipelining
 |   |                                 (modules and their arguments go to Python on stdin, not into
 |   |                                 temporary files), colours
 |   |-- bin/
@@ -4892,24 +5433,30 @@ DeployableServer/
 |                                     no integrations
 |-- scripts/                          PowerShell entry points, run from the project root
 |   |-- Install-LabHostNetwork.ps1    once, by you: LabHost switch, 10.10.99.1, NRPT rule (-Remove)
-|   |-- Initialize-Lab.ps1            build/update/start firewall and VMs in the right order, unseal
-|   |                                 OpenBao, test, then renew what is due (step 7: runs
-|   |                                 Deploy-LabVault.ps1 and/or Deploy-LabKeycloak.ps1)
-|   |-- New-LabFirewall.ps1           build (or start and check) the OPNsense firewall VM, renew its
-|   |                                 GUI certificate in place when due; -Rebuild
+|   |-- Initialize-Lab.ps1            build/update/start firewall and VMs in the right order (firewall
+|   |                                 and vault first, OpenBao unsealed before any SSH), SSH CA and
+|   |                                 host certificates, test, then renew what is due (step 7: runs
+|   |                                 Deploy-LabVault.ps1 and/or Deploy-LabKeycloak.ps1); -BreakGlass
+|   |-- New-LabFirewall.ps1           build (or start and check) the OPNsense firewall VM: its SSH
+|   |                                 host key checked against the serial console, host certificate,
+|   |                                 sshd drop-in; renew its GUI certificate in place when due;
+|   |                                 -Rebuild, -BreakGlass
 |   |-- New-LabRootCA.ps1             the offline root CA in keys\pki: created once, CRL kept current
 |   |                                 (-RenewCrl), signs CSRs (-SignCsr, -Kind, -DnsName, -OutFile)
 |   |-- Deploy-LabVault.ps1           deploy OpenBao (openbao.yml), initialise and unseal it, configure
 |   |                                 it over its API: KV, policies, AppRoles (pc-admin, pc-deploy,
 |   |                                 the break-glass login "recovery"), intermediate CA (a new one
-|   |                                 400 days before expiry, or -RotateIntermediate), ACME; renews
-|   |                                 OpenBao's TLS certificate and the root CRL when due
+|   |                                 400 days before expiry, or -RotateIntermediate), ACME, the SSH
+|   |                                 secrets engine and its roles; renews OpenBao's TLS certificate
+|   |                                 and the root CRL when due; step 8 (once): every machine trusts
+|   |                                 OpenBao's SSH CA, proved by a test login, then OpenBao signs
 |   |-- Install-LabRootCA.ps1         once, by you: trust the 2026 root CA for your Windows user
 |   |                                 (-Remove; -RemoveRetired drops the retired first CA)
 |   |-- New-LabRecoveryKit.ps1        by you, in your own window: key share C to write down and a
-|   |                                 passphrase-encrypted recovery file with share B and the
-|   |                                 break-glass login (-Destination); -Renew: a new file later;
-|   |                                 -Open <file>; -Recover <file> after losing the PC's DPAPI keys
+|   |                                 passphrase-encrypted recovery file with share B, the
+|   |                                 break-glass login, the root CA and the offline SSH CA
+|   |                                 (-Destination); -Renew: a new file later; -Open <file>;
+|   |                                 -Recover <file> after losing the PC's DPAPI keys
 |   |-- Deploy-LabKeycloak.ps1        deploy Keycloak (keycloak.yml with a run token), then an
 |   |                                 OpenBao snapshot
 |   |-- Deploy-LabMatrix.ps1          deploy the Matrix stack (vendor\mdad copied to ~/mdad,
@@ -4926,10 +5473,18 @@ DeployableServer/
 |   |-- Show-LabSecret.ps1            copy a secret to the clipboard (-Show prints it, -List names,
 |   |                                 -Pc a DPAPI secret on the PC, also one in a retired folder)
 |   |-- Open-LabVaultUi.ps1           open OpenBao's web UI, a 1-hour login token on the clipboard
-|   |-- Connect-Lab.ps1               SSH as "ansible" to a VM through the jump host
+|   |-- Connect-Lab.ps1               SSH as "ansible" to a VM through the jump host, with the PC's
+|   |                                 SSH certificate (renewed first when due; -BreakGlass)
 |   |-- Invoke-LabPlaybook.ps1        sync ansible/ and the public PKI files to ansible-control and
-|   |                                 run a playbook, with a run token if it needs OpenBao
-|   |-- New-LabSshKey.ps1             create/rotate the lab SSH key, lock down the key and keys\
+|   |                                 run a playbook, with an SSH certificate for only the hosts it
+|   |                                 needs ($sshPrincipals) and a run token if it needs OpenBao
+|   |-- New-LabSshCa.ps1              once (Initialize-Lab.ps1 step 2): the offline SSH CA, this PC's
+|   |                                 SSH key and the empty revocation list in keys\ssh; locks down
+|   |                                 keys\ and the keys (icacls)
+|   |-- Update-LabSshCertificate.ps1  this PC's SSH certificate: renew it when due and show signer and
+|   |                                 validity (-Force: now; -BreakGlass: the offline CA signs)
+|   |-- Complete-LabSshMigration.ps1  one-time (TRANSITION): retires the old shared lab key
+|   |                                 keys\ansible_ed25519 once SSH certificates work everywhere
 |   |-- Import-LabSecrets.ps1         one-time migration of the old secrets.yml files into OpenBao
 |   |                                 (-RemovePlaintext)
 |   |-- LabSecrets.ps1                shared helpers, dot-sourced by the others: DPAPI, OpenBao API
@@ -4937,10 +5492,15 @@ DeployableServer/
 |   |                                 tokens (Invoke-LabRunToken, with console colours switched on by
 |   |                                 Enable-LabConsoleColors), new AppRole logins
 |   |                                 (New-LabAppRoleSecret, then Remove-LabAppRoleSecretIds), the
-|   |                                 maintenance check (Get-LabMaintenanceDue)
+|   |                                 maintenance check (Get-LabMaintenanceDue); loads LabSsh.ps1
+|   |-- LabSsh.ps1                    SSH certificates (loaded by LabSecrets.ps1): the two SSH CAs and
+|   |                                 who signs, the PC's certificate (Get-LabSshConfig), a run's
+|   |                                 certificate, host keys from KVP and host certificates, the trust
+|   |                                 files, keys\ssh_config, the revocation list
 |   `-- Remove-Lab.ps1                delete all or one VM (vagrant destroy + Hyper-V folder; the
-|                                     firewall via Hyper-V); with vault: an OpenBao snapshot first,
-|                                     then keys\openbao moved aside
+|                                     firewall via Hyper-V) and revoke their SSH host keys; with
+|                                     vault: an OpenBao snapshot first, then keys\openbao and
+|                                     OpenBao's SSH CA files moved aside
 |-- tests/                            checks of the running lab, run from the project root
 |   |                                 (tests\README.md; see "Run the tests")
 |   |-- README.md                     what each test checks and whether it changes anything
@@ -4954,11 +5514,17 @@ DeployableServer/
 |   |-- Test-LabRetiredDpapi.ps1      DPAPI secrets in keys\openbao-retired-* readable under new names
 |   |-- Test-LabRunToken.ps1          a run token: policies, lifetime, bound to ansible-control, cleanup
 |   |-- Test-LabSecretCreation.ps1    a missing secret: generated by OpenBao once, not under --check
-|   |-- Test-LabFirewallRender.ps1    the firewall's build path (config.xml, seed ISO) in a temp folder
+|   |-- Test-LabFirewallRender.ps1    the firewall's build path (config.xml with the SSH CA lines,
+|   |                                 seed ISO) in a temp folder
+|   |-- Test-LabSshCa.ps1             the SSH certificate code on the PC: offline signing, contents,
+|   |                                 refused principals, revocation list, trust files (local only)
+|   |-- Test-LabSshCertificates.ps1   SSH in the running lab: strict logins, refused keys and CAs,
+|   |                                 principals, source-address, revocation, sshd settings
 |   |-- Test-LabRecoveryLogin.ps1     CHANGES STATE: break-glass login and new PC logins (asks first)
 |   `-- remote/                       run on ansible-control by the tests
 |       |-- run-token-check.sh        for Test-LabRunToken.ps1
-|       `-- secret-creation.yml       for Test-LabSecretCreation.ps1
+|       |-- secret-creation.yml       for Test-LabSecretCreation.ps1
+|       `-- ssh-cert-check.sh         for Test-LabSshCertificates.ps1
 |-- vendor/                           third-party code the lab runs, unchanged, at a pinned version
 |   |-- README.md                     what is vendored, from where, which version, licence, upgrade
 |   `-- mdad/                         MDAD at the pinned commit with its 32 roles (roles\galaxy\),
@@ -4966,9 +5532,32 @@ DeployableServer/
 `-- keys/                             generated, never commit (in .gitignore), readable only by you and
                                       SYSTEM; secrets in it are DPAPI-encrypted (*.dpapi: only your
                                       Windows account on this PC can decrypt them)
-    |-- ansible_ed25519(.pub)         lab SSH key pair (the one secret that is still a plain file)
-    |-- ssh_config                    generated SSH client config (jump host)
-    |-- known_hosts                   host keys of the current VMs (reset by Initialize-Lab.ps1)
+    |-- ssh_config                    generated SSH client config: jump host, the PC's key and
+    |                                 certificate, host keys only with a host certificate
+    |-- ssh/                          SSH certificates (New-LabSshCa.ps1, LabSsh.ps1)
+    |   |-- offline-ca, offline-ca.pub
+    |   |                             the offline SSH CA; its key encrypted with the passphrase in
+    |   |                             offline-ca-passphrase.dpapi
+    |   |-- offline-ca.in-recovery-kit
+    |   |                             the fingerprint of the offline SSH CA the newest recovery file
+    |   |                             holds (not secret)
+    |   |-- pc_ed25519(.pub)          this PC's SSH key, no passphrase; opens nothing without:
+    |   |-- pc_ed25519-cert.pub       its current certificate (8 hours); pc_ed25519-cert.valid-until:
+    |   |                             its expiry and CA, read without starting ssh-keygen
+    |   |-- openbao-ca.pub            OpenBao's SSH CA public key, cached by Deploy-LabVault.ps1
+    |   |-- openbao-ca.trusted        its fingerprint, written once every machine accepted a test
+    |   |                             login: from then on OpenBao signs
+    |   |-- lab_user_ca.pub           rendered: the CAs for logins (TrustedUserCAKeys on the VMs)
+    |   |-- known_hosts               rendered: @cert-authority lines for the lab's exact host names
+    |   |-- firewall_authorized_keys  rendered: the cert-authority lines of user ansible on the firewall
+    |   |-- revoked_host_keys         the revocation list (KRL) of retired host keys
+    |   |-- hosts/                    <name>.pub: each machine's verified host key; <name>-cert.pub:
+    |   |                             its host certificate; retired/: replaced and revoked keys
+    |   |-- issued.log                one line per certificate signed: time, signer, role, key ID,
+    |   |                             serial, principals, expiry (no secrets)
+    |   `-- tmp/                      short-lived work folders (public material only)
+    |-- ansible_ed25519(.pub)         only on a lab built before SSH certificates: the old shared
+    |                                 key, until Complete-LabSshMigration.ps1 retires it
     |-- pki/                          the offline root CA (New-LabRootCA.ps1)
     |   |-- root-ca.crt               "DeployableServer Lab Root CA 2026" (PEM)
     |   |-- root-ca.key               its private key, PKCS#8, AES-256 encrypted
@@ -4995,12 +5584,13 @@ DeployableServer/
     |   |                             exists only in the recovery file)
     |   `-- snapshots/                vault-<date-time>.snap (Backup-LabVault.ps1, the newest 10)
     |-- openbao-retired-<date-time>/  keys\openbao of a deleted vault VM, moved aside by Remove-Lab.ps1
-    |                                 with a last snapshot; its DPAPI files still open under the new
-    |                                 name (Show-LabSecret.ps1 -Pc openbao-retired-<date-time>/unseal-a)
+    |                                 with a last snapshot (and, in ssh\, the public files of its SSH
+    |                                 CA); its DPAPI files still open under the new name
+    |                                 (Show-LabSecret.ps1 -Pc openbao-retired-<date-time>/unseal-a)
     |-- opnsense/                     the firewall's secrets (DPAPI: the firewall exists before OpenBao)
     |   |-- root-password.dpapi       GUI login of "root"
     |   |-- ansible-password.dpapi    password of "ansible", a full administrator (unused by the
-    |   |                             scripts; SSH takes only the key)
+    |   |                             scripts; SSH takes only certificates)
     |   `-- api-ansible.dpapi         REST API key and secret of "ansible"
     |-- recovery/                     DeployableServer-recovery-<date>.bin, the recovery file of
     |                                 New-LabRecoveryKit.ps1 without -Destination (copy it off the PC)
@@ -5008,10 +5598,16 @@ DeployableServer/
                                       Install-LabRootCA.ps1 -RemoveRetired
 ```
 
-And on the VMs (created by the deployments, never edited by hand):
+And on the VMs (created by the provisioning and the deployments, never edited by
+hand):
 
 ```
-ansible-control  ~/lab                  copy of ansible/ (replaced on every Invoke-LabPlaybook.ps1 run)
+ansible-control  ~/.ssh/id_ed25519      its own SSH key (made on the VM); id_ed25519-cert.pub only
+                                        during a run (the run's certificate)
+                 /etc/ssh/ssh_known_hosts, /etc/ssh/lab_revoked_host_keys
+                                        the lab's SSH CAs for host certificates, the revocation list
+                 /etc/ssh/ssh_config.d/20-lab.conf      host certificates required for *.lab.internal
+                 ~/lab                  copy of ansible/ (replaced on every Invoke-LabPlaybook.ps1 run)
                  ~/lab-pki              public files from keys\pki: root-ca.crt, pub/root-ca.{crt,crl}
                  ~/mdad                 a copy of vendor\mdad (replaced on every Deploy-LabMatrix.ps1
                                         run), plus the lab's inventory and lab-setup.yml;
@@ -5031,6 +5627,12 @@ vault            /etc/openbao/openbao.hcl               OpenBao's configuration
                  /var/log/openbao/audit.log             audit log (values HMAC-hashed), rotated daily
                  /var/www/pki           root-ca.crt and root-ca.crl (DER), served by nginx on port 80
 every Ubuntu VM  /usr/local/share/ca-certificates/lab-root-ca-2026.crt   the root in the trust store
+                 /etc/ssh/lab_user_ca.pub               the lab's SSH CAs for logins (TrustedUserCAKeys)
+                 /etc/ssh/lab_principals/ansible        lab-all and host-<vm>: the principals that log in
+                 /etc/ssh/ssh_host_ed25519_key-cert.pub the VM's host certificate (installed by the PC)
+                 /etc/ssh/sshd_config.d/10-lab-hardening.conf   certificate logins only, AllowUsers
+firewall         /conf/sshd/ssh_host_ed25519_key-cert.pub       the firewall's host certificate
+                 /usr/local/etc/ssh/sshd_config.d/20-lab-ssh.conf   the jump host's sshd drop-in
 ```
 
 ---
@@ -5060,6 +5662,7 @@ curl.exe -s https://vault.lab.internal:8200/v1/sys/health         # expected: "i
 .\scripts\Unlock-LabVault.ps1                                     # unseals OpenBao, or says it already is
 .\scripts\Show-LabSecret.ps1 -List                                # secrets in OpenBao and on the PC (names only)
 . .\scripts\LabSecrets.ps1; Get-LabMaintenanceDue                 # renewals due now (none: empty); Initialize-Lab.ps1 step 7 runs them
+.\scripts\Update-LabSshCertificate.ps1                            # the PC's SSH certificate: renewed if due, signer and validity
 .\scripts\Connect-Lab.ps1 firewall 'sudo pfctl -sr'               # filter rules pf runs
 .\scripts\Connect-Lab.ps1 firewall 'sudo pfctl -s nat'            # port forwards and outbound NAT
 .\scripts\Invoke-LabPlaybook.ps1 ping.yml
@@ -5087,8 +5690,8 @@ certificates (P18-P19), Ansible (P20-P23), Keycloak and containers (P24-P26),
 login (P27-P32), MDAD's checks (P33-P34), calls (P35), OpenBao (P36-P39), run
 tokens and secrets in the playbooks (P40-P43), ACME (P44), the scripts that
 show secrets (P45), recovery and the deletion of the vault VM (P46-P47),
-Ansible's pipelining and check mode (P48-P49), and the Windows console, Windows
-path lengths and the vendored MDAD (P50-P52).
+Ansible's pipelining and check mode (P48-P49), the Windows console, Windows
+path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
 
 ### P1. The OPNsense image does not boot in a Generation 2 VM
 
@@ -5267,10 +5870,14 @@ path lengths and the vendored MDAD (P50-P52).
   outside `keys\`, where `.gitignore` does not protect it. The scripts write
   files with `[IO.File]::WriteAllText`/`WriteAllLines` instead (the DPAPI files
   and OpenSSL's configuration too), which is also the way to get UTF-8 without a
-  BOM (as for `keys\ssh_config` and the `config.xml` in the seed ISO).
+  BOM (as for `keys\ssh_config`, the SSH trust files and the `config.xml` in the
+  seed ISO).
 - **Empty-string arguments are dropped**. `ssh-keygen -N ''` would lose the empty
-  passphrase, so [scripts/New-LabSshKey.ps1](scripts/New-LabSshKey.ps1) passes
-  `'""'` (PowerShell 7.3+ gets `''`).
+  passphrase, so [scripts/New-LabSshCa.ps1](scripts/New-LabSshCa.ps1) (and
+  `LabSsh.ps1` for its throwaway test key) passes `'""'` (PowerShell 7.3+ gets
+  `''`). The same would make `ssh-keygen -n ''` take the next argument as its
+  principals, which is one reason why `LabSsh.ps1` refuses to sign for an empty
+  list of principals.
 - **stderr becomes a terminating error**: with `$ErrorActionPreference = 'Stop'`
   and redirected output (`*> log`), any line a native program writes to stderr
   stops the script. Therefore ssh and scp run with `-o LogLevel=ERROR` (no
@@ -5323,21 +5930,29 @@ path lengths and the vendored MDAD (P50-P52).
 - **"Unprotected private key file" / key ignored**: Windows OpenSSH refuses a
   private key that other users can read. Here, the project folder passes read
   access on to every file inside it (inherited permissions, e.g. for a group
-  like `CodexSandboxUsers`). `New-LabSshKey.ps1` uses `icacls` to remove
-  inheritance and grant access only to you (the key and the `keys\` folder);
-  `LabSecrets.ps1` does the same for every DPAPI file it writes,
-  `New-LabRootCA.ps1` for the root CA key, and `New-LabFirewall.ps1` for the
-  staged `config.xml` and the seed ISO. `New-LabSshKey.ps1` also locks the
+  like `CodexSandboxUsers`). `New-LabSshCa.ps1` uses `icacls` to remove
+  inheritance and grant access only to you (the offline SSH CA key and this PC's
+  SSH key, on every run); `LabSecrets.ps1` does the same for every DPAPI file it
+  writes, `New-LabRootCA.ps1` for the root CA key, and `New-LabFirewall.ps1` for
+  the staged `config.xml` and the seed ISO. `New-LabSshCa.ps1` also locks the
   `keys\` folder itself (only you and SYSTEM, inherited by everything inside), so
   new files such as the OpenBao snapshots and the recovery file in
   `keys\recovery` are protected from the start.
+- **`ssh-keygen` reads passphrases only from the console**, not from stdin, so a
+  script cannot hand it the offline SSH CA's passphrase there; `LabSsh.ps1` uses
+  `-P` instead and accepts the price
+  ([SSH certificates](#ssh-certificates-user-and-host-cas), "What remains").
+- **`ssh-keygen -L` prints a certificate's validity in local time**, which is
+  ambiguous for an hour every autumn. `LabSsh.ps1` runs it with `TZ=UTC0`, so it
+  prints UTC.
 - **scp with two remote sources fails**: Windows scp refuses to copy several
   remote files in one call. The scripts fetch one remote file per call (the
   firewall's certificate request); several local files to one remote folder
   work (the public PKI files, the GUI certificate with the root and
   `lab-gui-cert.php`).
 - **ssh_config with a UTF-8 BOM breaks**: ssh cannot parse the first line.
-  `Initialize-Lab.ps1` writes the file without a BOM and with LF line endings.
+  `Initialize-Lab.ps1` writes the file without a BOM and with LF line endings
+  (`Write-LabSshConfig` in `LabSsh.ps1`), like every SSH file the lab renders.
 - **Paths**: forward slashes in `ssh_config` paths are the safest choice.
 
 ### P13. Later vagrant commands hit the lab unexpectedly
@@ -5372,9 +5987,10 @@ path lengths and the vendored MDAD (P50-P52).
 - **What the project does**: the PC uses only the fixed LabHost network
   (10.10.99.1 <-> 10.10.99.2, .3, .4 and .5); nothing in the lab depends on a
   Default Switch address. `keys\ssh_config` addresses the firewall by IP, so SSH
-  works even when its DNS is down. The firewall VM is shut down (not saved)
-  together with Windows, so it boots fresh and gets a new WAN lease in the new
-  subnet.
+  works even when its DNS is down (`HostKeyAlias firewall.lab.internal` makes
+  ssh check its host certificate for its name all the same). The firewall VM is
+  shut down (not saved) together with Windows, so it boots fresh and gets a new
+  WAN lease in the new subnet.
 
 ### P16. The Ubuntu VMs all have the same SSH host keys, and `vagrant`/`vagrant` works over SSH
 
@@ -5386,16 +6002,17 @@ path lengths and the vendored MDAD (P50-P52).
   copy, and anyone who downloads the public box has the same keys.
 - **What the project does**: [provision/harden-ssh.sh](provision/harden-ssh.sh)
   generates new host keys once per VM (a marker file stops it from doing that on
-  every run) and switches SSH to key-only logins with a drop-in in
-  `/etc/ssh/sshd_config.d/`. The console in Hyper-V Manager is not affected. The
-  firewall is not made from the box; a newly built firewall has new host keys,
-  and SSH on it accepts only keys.
+  every run), publishes the new ed25519 key to the PC through Hyper-V KVP (never
+  the box's shared keys), and switches SSH to certificate logins only, without
+  passwords, with a drop-in in `/etc/ssh/sshd_config.d/`. The console in
+  Hyper-V Manager is not affected. The firewall is not made from the box; a newly
+  built firewall has new host keys, and SSH on it accepts only certificates.
 
 ### P17. `ssh matrix.lab.internal` does not reach the VM
 
 - **Symptom**: SSH to the full name without the lab's jump-host setting hangs
   and then times out, although `.\scripts\Connect-Lab.ps1 matrix` works. For
-  example `ssh -i keys\ansible_ed25519 ansible@matrix.lab.internal` (without
+  example `ssh -i keys\ssh\pc_ed25519 ansible@matrix.lab.internal` (without
   `-F keys\ssh_config`), or another SSH client set up with the full name
   (PuTTY, VS Code Remote-SSH).
 - **Cause**: split-horizon DNS. Without a jump host, your PC resolves
@@ -5407,8 +6024,11 @@ path lengths and the vendored MDAD (P50-P52).
   `*.lab.internal` name except the firewall's through `ProxyJump firewall`, so the
   firewall resolves the name to the lab address, and
   `ssh -F keys\ssh_config matrix.lab.internal` works as well. For your own SSH
-  client, copy the `Host` blocks from `keys\ssh_config`, or call ssh with
-  `-F keys\ssh_config`.
+  client, copy the `Host` blocks from `keys\ssh_config` (the `Host *` block names
+  the PC's certificate and the lab's `known_hosts`), or call ssh with
+  `-F keys\ssh_config`. The certificate lasts 8 hours, and only the lab's
+  scripts renew it: run `.\scripts\Update-LabSshCertificate.ps1` first
+  ([P53](#p53-ssh-host-key-verification-failed-or-permission-denied-publickey)).
 
 ### P18. The browser or OpenSSL rejects the certificate, or Windows stops trusting it
 
@@ -5706,10 +6326,13 @@ path lengths and the vendored MDAD (P50-P52).
   `systemctl restart openbao`, a package upgrade) it is "sealed": it needs 2 of
   the 3 key shares to rebuild the key that unlocks its data (Shamir's secret
   sharing). The lab has no auto-unseal ([section 10](#10-security-notes)).
-- **What the project does**: `Initialize-Lab.ps1` unseals OpenBao after it has
-  started the VMs (once `Deploy-LabVault.ps1` has initialised it),
-  `Invoke-LabPlaybook.ps1` before every playbook that needs OpenBao, and
-  `Deploy-LabVault.ps1` in its step 5. `Show-LabSecret.ps1`,
+- **What the project does**: `Initialize-Lab.ps1` unseals OpenBao right after
+  it has started the firewall and the vault VM, before any SSH, because OpenBao
+  signs the SSH certificates (once `Deploy-LabVault.ps1` has initialised it),
+  `Invoke-LabPlaybook.ps1` before
+  every playbook that needs OpenBao, the renewal of the PC's SSH certificate
+  when it finds OpenBao sealed, and `Deploy-LabVault.ps1` in its step 5.
+  `Show-LabSecret.ps1`,
   `Backup-LabVault.ps1` and Traefik do not unseal. After any other restart of
   the vault VM, run `.\scripts\Unlock-LabVault.ps1`: it sends the two shares
   stored with DPAPI and needs no input; on an unsealed OpenBao it does nothing.
@@ -5820,12 +6443,16 @@ path lengths and the vendored MDAD (P50-P52).
 
   ```powershell
   . .\scripts\LabSecrets.ps1
-  Invoke-LabRunToken 'cd ~/mdad && ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory/hosts lab-setup.yml --tags=self-check' @('ansible-matrix') 'mdad'
+  Invoke-LabRunToken 'cd ~/mdad && ansible-playbook -i inventory/hosts lab-setup.yml --tags=self-check' @('ansible-matrix') 'mdad' @('host-matrix')
   ```
 
-  A new playbook that needs OpenBao needs an entry in `$openBaoPolicies` in
-  `Invoke-LabPlaybook.ps1`, and its policy in `Deploy-LabVault.ps1` (also in the
-  token role's `allowed_policies`); then run `.\scripts\Deploy-LabVault.ps1`.
+  The fourth argument is the SSH principals of the run's certificate
+  (`host-matrix`: matrix only); without it, ansible-control gets no certificate
+  and can reach no other machine. A new playbook that needs OpenBao needs an
+  entry in `$openBaoPolicies` in `Invoke-LabPlaybook.ps1`, and its policy in
+  `Deploy-LabVault.ps1` (also in the token role's `allowed_policies`); then run
+  `.\scripts\Deploy-LabVault.ps1`. Its SSH principals go into `$sshPrincipals`
+  in the same script.
 
 ### P41. A deployment refuses to generate a missing secret
 
@@ -6140,6 +6767,67 @@ path lengths and the vendored MDAD (P50-P52).
   of the same role stays on: MDAD still keeps a copy of `vars.yml` on the
   server (`/matrix/vars.yml`), which shows how a server was configured.
 
+### P53. SSH: "Host key verification failed" or "Permission denied (publickey)"
+
+- **Symptom**: `Connect-Lab.ps1`, a deployment, `Initialize-Lab.ps1` or a
+  `vagrant` command stops with `Host key verification failed.` or
+  `Permission denied (publickey)`, or with the lab's own message `... Start and
+  unseal OpenBao with .\scripts\Initialize-Lab.ps1, or let the offline CA sign
+  (break-glass) ...`; the Vagrantfile stops with `The PC's SSH certificate could
+  not be renewed (see above)`.
+- **Causes and what to do** (how the certificates work:
+  [SSH certificates](#ssh-certificates-user-and-host-cas)):
+  - **The PC's certificate has expired, and OpenBao cannot sign a new one.** It
+    is valid for 8 hours, so after a Windows restart it has always expired, and
+    the vault VM is off then. The scripts do not fall back to the offline SSH CA
+    by themselves. Run `.\scripts\Initialize-Lab.ps1`: it starts the firewall
+    and the vault VM in Hyper-V and unseals OpenBao before any SSH. If OpenBao
+    stays broken, let the offline SSH CA sign, on purpose: `-BreakGlass` on
+    `Update-LabSshCertificate.ps1` or `Connect-Lab.ps1` (the PC's certificate),
+    `Initialize-Lab.ps1` or `New-LabFirewall.ps1` (host certificates too), or
+    `$env:LAB_SSH_BREAKGLASS = '1'` for every command in this window, `vagrant`
+    included (`Remove-Item Env:LAB_SSH_BREAKGLASS` ends it). A break-glass
+    certificate lasts as long as a normal one; once OpenBao works again, the
+    next renewal comes from it. `.\scripts\Update-LabSshCertificate.ps1` shows
+    which CA signed the current certificate and until when. The message
+    `OpenBao serves another SSH CA than the one the machines trust` means a
+    restored snapshot: see
+    [Restore OpenBao from a snapshot](#restore-openbao-from-a-snapshot), step 3.
+  - **The machine has no valid host certificate**: a VM created or rebuilt by
+    `vagrant` alone, a host certificate that expired (the PC renews them 30 days
+    ahead, but only when `Initialize-Lab.ps1` or `New-LabFirewall.ps1` runs), or
+    one from a CA the PC no longer trusts. The PC accepts host keys only with a
+    certificate (`HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com`,
+    `StrictHostKeyChecking yes`), so ssh answers `Host key verification failed.`
+    Run `.\scripts\Initialize-Lab.ps1` (elevated: it reads the VM's host key from
+    Hyper-V) or, for the firewall, `.\scripts\New-LabFirewall.ps1`; both install
+    the certificate over a connection pinned to the verified key, which works
+    whatever certificate the machine has. If ssh reports the host key as
+    **revoked**, the machine presents a key that was retired (a restored
+    checkpoint, an old disk): that is the revocation list doing its job, and the
+    way out is a rebuild.
+  - **Another ssh than Windows' own.** Vagrant puts an OpenSSH of its own (an
+    MSYS2 build) first in `PATH` for the programs it starts, and Git for Windows
+    brings one too. The lab is built and tested with Windows' client: the
+    Vagrantfile names `C:\Windows\System32\OpenSSH\ssh.exe` in its proxy
+    command, and the scripts call `ssh-keygen` and `ssh-keyscan` from that
+    folder by their full path.
+    If ssh by hand behaves differently from `Connect-Lab.ps1`, check which one
+    runs: `(Get-Command ssh).Source`.
+  - **`Permission denied (publickey)` in a playbook run**: the run's certificate
+    lacks the principal for that host (a playbook that touches a machine it is
+    not listed for in `$sshPrincipals` in `Invoke-LabPlaybook.ps1`), or SSH comes
+    from an address the certificate and the server do not allow (a VM-to-VM
+    login other than from ansible-control, or the PC's certificate used from
+    ansible-control). On a lab moved over from the old shared key,
+    `ansible-control still uses the old lab key` means its provisioning has not
+    run since: `.\scripts\Initialize-Lab.ps1`.
+- **What the project does**: it fails closed and says why. Every script renews
+  the PC's certificate when fewer than 4 hours are left, so a certificate never
+  expires in the middle of a run, and an OpenBao that is down, sealed or not
+  genuine never moves signing to the offline CA without a `-BreakGlass` from
+  you.
+
 ### Other design decisions you will meet in the code
 
 - The box `gusztavvargadr/ubuntu-server-2404-lts` is used because
@@ -6150,10 +6838,16 @@ path lengths and the vendored MDAD (P50-P52).
   provisioners and `Invoke-LabPlaybook.ps1` (tar + scp).
 - After a rebuild, VMs have new SSH host keys (each Ubuntu VM generates its own,
   see [P16](#p16-the-ubuntu-vms-all-have-the-same-ssh-host-keys-and-vagrantvagrant-works-over-ssh)).
-  `Initialize-Lab.ps1` deletes `keys\known_hosts` (and `New-LabFirewall.ps1`
-  does so after building a new firewall), and `StrictHostKeyChecking accept-new`
-  learns the new keys. MDAD runs with `ANSIBLE_HOST_KEY_CHECKING=False` for the
-  same reason.
+  Nobody has to learn them: the PC verifies each new key out of band (serial
+  console, Hyper-V KVP), signs a host certificate for it and revokes the old
+  key, and every client trusts the CA, not the key
+  ([SSH certificates](#ssh-certificates-user-and-host-cas)). So host key
+  checking stays on everywhere, for MDAD too.
+- Two SSH CAs instead of one: OpenBao signs every day and records it in its
+  audit log, but OpenBao runs on a VM that is reached over SSH; the offline SSH
+  CA on the PC is the way in that does not depend on it (the bootstrap,
+  OpenBao's expired TLS certificate, and break-glass on request). The scripts
+  never switch to it silently when OpenBao fails.
 - The firewall uses OPNsense's dnsmasq for both DHCP and DNS; Unbound, its
   other DNS server, stays off: one DNS server is simpler to follow.
 - WAN has no "block private networks" setting, because the Default Switch
@@ -6240,14 +6934,16 @@ copy them to production.
 |---|---|---|
 | Passwordless sudo for `ansible`, a local account created on each Ubuntu VM; on the firewall, `ansible` is a full administrator with passwordless sudo too (`sudo_allow_wheel`) | `bootstrap-ansible-user.sh`, `config.xml.template` | Personal admin accounts from a directory (LDAP, FreeIPA, Active Directory), sudo with a password or narrowly scoped rules, privileged access management (PAM), Ansible become passwords from a vault, sudo use logged centrally |
 | Console autologin on tty1 (the Ubuntu VMs except vault) | `setup-console-autologin.sh`, `config/lab.json` | Console login with credentials (ideally MFA); out-of-band console access is restricted and audited; a break-glass account whose password is kept in a vault |
-| `host_key_checking = False` in Ansible and for MDAD; `accept-new` on the PC, and `keys\known_hosts` deleted on every `Initialize-Lab.ps1` run and after every new firewall | `ansible.cfg`, `Deploy-LabMatrix.ps1`, `ssh_config`, `Initialize-Lab.ps1`, `New-LabFirewall.ps1` | SSH host certificates signed by an SSH CA, or known_hosts distributed by configuration management, so even the first connection is verified |
-| SSH key without passphrase, the one secret that is still a plain file (`keys\ansible_ed25519`, and a copy on ansible-control) | `New-LabSshKey.ps1`, `bootstrap-ansible-control.sh` | Passphrase-protected keys or hardware keys (FIDO2) in an ssh-agent, short-lived SSH certificates from an SSH CA (for example OpenBao's or Vault's SSH secrets engine) |
-| One key shared by the whole lab (PC, control node, all VMs including the firewall) | `keys/`, Vagrantfile, `config.xml.template` | One key per person and one per automation identity, with limited scope and regular rotation |
-| "Secret zero" on the PC: two of OpenBao's key shares, the PC's two AppRole logins and the root CA key's passphrase are DPAPI files that your Windows account can decrypt, so the PC unseals and administers OpenBao without any input. Every program that runs as you can do the same | `LabSecrets.ps1`, `Unlock-LabVault.ps1`, `keys\openbao`, `keys\pki` | Auto-unseal through an HSM or a cloud KMS; unseal and recovery keys split among several people; administrators log in through SSO with MFA; automation authenticates with an identity the platform vouches for (cloud instance identity, Kubernetes service accounts) instead of a stored credential |
+| The PC signs its own SSH certificates: an 8-hour certificate for every machine (principal `lab-all`), requested from OpenBao with the AppRole `pc-deploy` from DPAPI; the PC's SSH key has no passphrase. No personal identity, no MFA, and every program that runs as you can get such a certificate | `LabSsh.ps1`, `Deploy-LabVault.ps1`, `keys\ssh` | People log in to the SSH CA with SSO and MFA (OIDC to Vault or OpenBao, Teleport, Smallstep) and get a short certificate for their own identity, with principals from their IdP groups; keys on hardware tokens (FIDO2) |
+| The offline SSH CA lives on your everyday PC: its encrypted key next to its passphrase in DPAPI, every machine trusts it permanently, and the recovery file holds a copy. While it signs, its passphrase is on `ssh-keygen`'s command line (`-P`; OpenSSH 8.1 has no other unattended way), readable for programs running as you or as an administrator and written to the Security event log if process command lines are audited. Its signatures are recorded only in `keys\ssh\issued.log` (and in the sshd logs), not in OpenBao's audit log | `New-LabSshCa.ps1`, `LabSsh.ps1`, `New-LabRecoveryKit.ps1` | The SSH root of trust in an HSM or on an air-gapped machine, used only in a documented ceremony; break-glass certificates issued by two people, with an alert and central logging |
+| Per-run SSH principals on ansible-control (`host-matrix` for MDAD, `lab-all` for `ping.yml`) share one account `ansible`, one key and passwordless sudo: code that runs during one run and stays on ansible-control could pick up the certificate of a later run. The scoping protects against mistakes and short-lived misuse, not against a persistent compromise of ansible-control | `Invoke-LabPlaybook.ps1`, `LabSsh.ps1`, `bootstrap-ansible-control.sh` | One identity per automation: each CI/CD or AWX job gets its own short certificate in an ephemeral runner; third-party code such as MDAD in an account of its own without sudo |
+| Vagrant's own last hop to each VM (user `vagrant`, Vagrant's per-VM key) does not check the VM's host key; nothing of the lab's trust depends on it | Vagrantfile | Provisioning only over channels whose host identity is known (host keys or certificates from the image build or an attested agent) |
+| The SSH host key revocation list is checked only by the clients that matter here, the PC and ansible-control; host certificates are valid for a year | `LabSsh.ps1`, `Remove-Lab.ps1`, `bootstrap-ansible-control.sh` | Short-lived host certificates renewed by an agent on every server, so revocation is rarely needed; where it is, the list distributed to every client by configuration management |
+| "Secret zero" on the PC: two of OpenBao's key shares, the PC's two AppRole logins and the passphrases of the root CA key and of the offline SSH CA key are DPAPI files that your Windows account can decrypt, so the PC unseals and administers OpenBao, and signs SSH certificates, without any input. Every program that runs as you can do the same | `LabSecrets.ps1`, `Unlock-LabVault.ps1`, `keys\openbao`, `keys\pki`, `keys\ssh` | Auto-unseal through an HSM or a cloud KMS; unseal and recovery keys split among several people; administrators log in through SSO with MFA; automation authenticates with an identity the platform vouches for (cloud instance identity, Kubernetes service accounts) instead of a stored credential |
 | One OpenBao node, sealed after every restart of the vault VM until the PC unseals it; snapshots after every deployment of Keycloak and Matrix, before the vault VM is deleted and when you run `Backup-LabVault.ps1`, kept on the PC (the newest 10); nothing copies them elsewhere unless you use `-Destination` | `Deploy-LabVault.ps1`, `Unlock-LabVault.ps1`, `Backup-LabVault.ps1`, `Deploy-LabKeycloak.ps1`, `Deploy-LabMatrix.ps1`, `Remove-Lab.ps1` | A 3-5 node raft cluster across failure domains with auto-unseal, scheduled snapshots stored off-site and restore drills, disaster-recovery replication to a second site, monitoring of seal status and leadership |
 | OpenBao is administered through AppRoles whose policy `openbao-admin` allows everything, bound only to the PC's address: `pc-admin` for the scripts, and the break-glass login `recovery`, whose secret is only in the recovery file. No personal administrator accounts and no MFA (no login method for people at all). The bootstrap root token is revoked, and key shares alone no longer make a new one (OpenBao 2.5.3 switched the unauthenticated generate-root endpoints off) | `Deploy-LabVault.ps1`, `Show-LabSecret.ps1`, `New-LabRecoveryKit.ps1` | Personal administrators through OIDC (SSO with MFA) with narrowly scoped policies; break-glass credentials sealed and split among several custodians, every use alerted on and followed by a rotation; root tokens only generated in an emergency, by several key holders together, and revoked right after |
 | Service secrets in plain text where the services read them: during an Ansible run they are only in memory (pipelining, temporary files in RAM), but on the VMs they are in environment and configuration files (0600 in `/opt/keycloak-stack`; on the matrix VM MDAD's files are readable by the `matrix` user, inside 0750 folders) and in the services' databases. They are static: the policies grant `create` but not `update`, and nothing rotates them | `keycloak.yml`, `lab-setup.yml`, `tasks/openbao-secrets.yml`, MDAD | Services fetch their secrets themselves at start (Vault Agent, a CSI driver, the application's own Vault integration); dynamic, short-lived database credentials (a database secrets engine); rotation on a schedule |
-| Recovery kit: you keep key share C (password manager or paper), and one passphrase-encrypted file holds share B, the break-glass login for OpenBao, the encrypted root CA key with its passphrase, the root certificate and the firewall's passwords and API key, typically on a NAS or USB stick. One person holds everything and can use it alone (`New-LabRecoveryKit.ps1 -Recover`) | `New-LabRecoveryKit.ps1` | Unseal and recovery shares handed to several key holders (each share encrypted for one person, for example with PGP), kept in separate safes; a documented break-glass procedure that is practised, needs two people and raises an alert; the root CA key backed up in HSMs |
+| Recovery kit: you keep key share C (password manager or paper), and one passphrase-encrypted file holds share B, the break-glass login for OpenBao, the encrypted root CA key with its passphrase, the root certificate, the encrypted offline SSH CA key with its passphrase and the firewall's passwords and API key, typically on a NAS or USB stick. With its passphrase, the file alone is administrator access to OpenBao and SSH access to every lab machine (from the PC's address). One person holds everything and can use it alone (`New-LabRecoveryKit.ps1 -Recover`) | `New-LabRecoveryKit.ps1` | Unseal and recovery shares handed to several key holders (each share encrypted for one person, for example with PGP), kept in separate safes; a documented break-glass procedure that is practised, needs two people and raises an alert; the root CA key backed up in HSMs |
 | Keycloak's bootstrap admin `admin` and bootstrap service-account client `lab-ansible` are kept, although Keycloak marks both "temporary"; `lab-ansible` has full admin rights in the `master` realm | `keycloak.env.j2`, `keycloak.yml` | Permanent personal admin accounts with MFA and a dedicated, least-privilege automation client, all created as code; the temporary bootstrap accounts deleted afterwards |
 | Keycloak's admin console is on the same host name as the login pages, reachable from the PC | `keycloak.env.j2`, `config/lab.json` | The admin console on a separate host name reachable only from a management network |
 | Lab users with generated passwords, no MFA, Keycloak's default password policy (brute-force protection is on, self-registration off) | `keycloak.yml` | MFA (WebAuthn, OTP) and a password policy in the IdP, users from the HR process or a directory, joiners/movers/leavers automated |
@@ -6258,8 +6954,8 @@ copy them to production.
 | Offline root CA on your everyday PC: its key is an encrypted file (PKCS#8, AES-256) on the same disk as its passphrase (DPAPI); the root also signs OpenBao's own and the firewall's GUI certificates directly, because both must work before or without OpenBao | `New-LabRootCA.ps1`, `keys\pki`, `Deploy-LabVault.ps1`, `New-LabFirewall.ps1` | The root on an air-gapped machine or in an HSM, used in a documented key ceremony with several people present, signing only intermediate CAs; intermediate keys in HSMs; servers get certificates from an intermediate through ACME or CSR signing (as here) |
 | Revocation through CRLs only (no OCSP), and no procedure that ever revokes a certificate. Renewals happen only when a script runs, not on a schedule: `Initialize-Lab.ps1` (after every Windows restart) checks what is due and runs the script that renews it: OpenBao's own certificate (397 days, renewed 30 days before it expires), the root's CRL (400 days, 60 days before) and the intermediate CA (3 years; a new one 400 days before it expires) through `Deploy-LabVault.ps1`, Keycloak's certificate (1 year, 30 days before) through `Deploy-LabKeycloak.ps1`, the firewall's GUI certificate (397 days) through `New-LabFirewall.ps1`, which it runs every time. Only the Matrix certificates (90 days, ACME) renew themselves. No rollover procedure yet for the root (10 years) | `Initialize-Lab.ps1`, `LabSecrets.ps1`, `New-LabRootCA.ps1`, `Deploy-LabVault.ps1`, `tasks/openbao-certificate.yml`, `New-LabFirewall.ps1` | OCSP or short-lived CRLs published automatically, a revocation process, expiry monitoring with alerts, every certificate renewed automatically on a schedule by an agent or ACME client (cert-manager, certmonger, Vault Agent), planned and rehearsed CA rollovers |
 | ACME without external account binding: anything that reaches port 8200 can register an ACME account; only the HTTP-01 challenge (answered on port 80 of the name's lab address) and the three names of the role `acme-matrix` stand between it and a certificate | `Deploy-LabVault.ps1` | External account binding (EAB), so that only registered clients can order; the ACME directory reachable only from the server networks |
-| Self-built SSH bastion without MFA or session recording, running on the perimeter firewall itself | `keys\ssh_config`, `Connect-Lab.ps1`, `config.xml.template` | MFA on the bastion, session recording, often a managed product (e.g. Azure Bastion, AWS Systems Manager Session Manager, Teleport); the bastion is a separate host in a management network |
-| Firewall administration: the GUI user `root` with a random password; one full-admin account `ansible` serves as SSH jump account and REST API user. These passwords and the API key and secret are DPAPI files on the PC (`keys\opnsense\*.dpapi`, with copies in the recovery file), not in OpenBao, because the firewall exists before OpenBao | `New-LabFirewall.ps1`, `config.xml.template`, `keys\opnsense\` | Personal admin accounts from central authentication (RADIUS, LDAP) with MFA; the local root password only as a break-glass credential in a vault; a restricted jump account (for example an sshd `Match` block with `PermitOpen`) and a separate least-privilege API user per automation tool, with secrets in a vault |
+| Self-built SSH bastion without MFA or session recording, running on the perimeter firewall itself (restricted to certificate logins of `ansible` from the PC and ansible-control, and to forwarding to port 22 of the lab VMs) | `keys\ssh_config`, `Connect-Lab.ps1`, `config.xml.template`, `opnsense/sshd_config.d/20-lab-ssh.conf` | MFA on the bastion, session recording, often a managed product (e.g. Azure Bastion, AWS Systems Manager Session Manager, Teleport); the bastion is a separate host in a management network |
+| Firewall administration: the GUI user `root` with a random password; one full-admin account `ansible` serves as SSH jump account and REST API user. These passwords and the API key and secret are DPAPI files on the PC (`keys\opnsense\*.dpapi`, with copies in the recovery file), not in OpenBao, because the firewall exists before OpenBao | `New-LabFirewall.ps1`, `config.xml.template`, `keys\opnsense\` | Personal admin accounts from central authentication (RADIUS, LDAP) with MFA; the local root password only as a break-glass credential in a vault; a separate, restricted jump account (the lab restricts forwarding with `PermitOpen`, but for its one full-admin account) and a separate least-privilege API user per automation tool, with secrets in a vault |
 | Firewall management (GUI, API, SSH, DNS) open to the whole lab network, and on the PC side to 10.10.99.1, your everyday workstation, which also browses the internet | `config.xml.template` | Management interfaces reachable only from a dedicated management network (often out-of-band), never from server networks; administration only from privileged access workstations (PAW) or a management jump host |
 | GUI changes on the firewall are not written back to the repository; a permanent change needs a repository edit and a rebuild | `config.xml.template`, `config/lab.json`, `New-LabFirewall.ps1` | Changes through the firewall's API from reviewed automation code, the GUI used read-only, configuration backups in version control, drift detection |
 | The Ansible project and the vendored MDAD are pushed from the PC as archives, from the working folder as it is, not from a reviewed commit (the repository is in Git, github.com/masterries/HomeLab, but nothing enforces that what runs is committed); MDAD and its roles were fetched from GitHub by `git subtree` / `Update-LabMdad.ps1` and are trusted as GitHub delivered them (no signature check), the review is the diff you read yourself | `Invoke-LabPlaybook.ps1`, `Deploy-LabMatrix.ps1`, `Update-LabMdad.ps1` | The control node, AWX / Ansible Automation Platform or a CI/CD runner checks out a reviewed Git commit before every run; third-party code from an internal mirror or Ansible Automation Hub, in approved versions, upgrades reviewed as pull requests |
@@ -6272,13 +6968,27 @@ copy them to production.
 
 Some precautions are taken even in the lab:
 
-- `keys/` (the private SSH key, the encrypted root CA key, the DPAPI files, the
-  OpenBao snapshots and a recovery file kept on the PC) is in `.gitignore`. The
-  folder itself is readable only by you and SYSTEM (`New-LabSshKey.ps1`), and
-  the most sensitive files are locked down individually (`icacls`). Apart from
-  the SSH key, no secret on the PC is plain text: DPAPI binds each `.dpapi` file
-  to your Windows account (and to its own name), and the root CA key is
-  encrypted with a passphrase (PKCS#8, AES-256, 600,000 PBKDF2 iterations).
+- `keys/` (the encrypted offline SSH CA key and the PC's SSH key, the encrypted
+  root CA key, the DPAPI files, the OpenBao snapshots and a recovery file kept on
+  the PC) is in `.gitignore`. The folder itself is readable only by you and
+  SYSTEM (`New-LabSshCa.ps1`), and the most sensitive files are locked down
+  individually (`icacls`). No secret on the PC that opens anything on its own is
+  plain text: DPAPI binds each `.dpapi` file to your Windows account (and to its
+  own name), the root CA key is encrypted with a passphrase (PKCS#8, AES-256,
+  600,000 PBKDF2 iterations), and so is the offline SSH CA key (OpenSSH's own
+  format, 100 bcrypt rounds); the PC's SSH key has no passphrase, but opens
+  nothing without its 8-hour certificate, which works only from the PC's
+  addresses.
+- SSH runs on certificates: short-lived user certificates (8 hours for the PC,
+  2 hours per Ansible run for only the hosts that run needs), each with the
+  addresses it may be used from, and host certificates for every machine. No
+  host key is trusted on first use: the PC verifies each one out of band (the
+  firewall's serial console, Hyper-V KVP for the VMs) before it certifies it,
+  and every client accepts host keys only with a certificate. Once OpenBao
+  signs, every certificate is in its audit log; the offline SSH CA takes over
+  only for the bootstrap, while OpenBao's TLS certificate has expired, or when
+  you ask for it (`-BreakGlass`)
+  ([SSH certificates](#ssh-certificates-user-and-host-cas)).
 - No service secret is stored on ansible-control's disk: the playbooks read
   them from OpenBao into memory for one run (`tasks/openbao-secrets.yml`). With
   pipelining (`ansible.cfg`), modules and their arguments (the run token, secret
@@ -6299,7 +7009,8 @@ Some precautions are taken even in the lab:
 - OpenBao's bootstrap root token is revoked at the end of `Deploy-LabVault.ps1`.
   The PC's AppRoles accept logins only from the PC's address (10.10.99.1/32),
   and their tokens work only from there: `pc-deploy` may do nothing but mint run
-  tokens and take snapshots; `pc-admin` and the break-glass login `recovery` are
+  tokens, take snapshots and have SSH certificates signed; `pc-admin` and the
+  break-glass login `recovery` are
   administrators. The break-glass secret is stored nowhere but in the
   passphrase-encrypted recovery file, and every new file replaces it. Whenever
   a login is issued again (`New-LabAppRoleSecret`), all older secret IDs of that
@@ -6363,8 +7074,12 @@ Some precautions are taken even in the lab:
   script was killed). The firewall's network adapters stay disconnected until
   the lab configuration is in place. The rendered file is not kept anywhere
   else.
-- SSH on the firewall accepts keys only, listens only on LAN and HOST, and does
-  not accept `root`. No connection is allowed in on WAN.
+- SSH on the firewall accepts only certificates from the lab's SSH CAs, only
+  for `ansible` and only from the PC and ansible-control, listens only on LAN
+  and HOST, does not accept `root`, and forwards only to port 22 of the lab VMs.
+  On the Ubuntu VMs, sshd accepts `ansible` only with a certificate and only
+  from the jump host and ansible-control, never `root`, and forwards nothing.
+  No connection is allowed in on WAN.
 - No hidden anti-lockout rule: every way into the firewall's management is an
   explicit rule in `config.xml.template`.
 - Changes to Windows (network, DNS rule, trusted root certificates) are never
@@ -6456,11 +7171,37 @@ of the firewall's `ansible` password and API key), so it could unseal OpenBao
 but not give the PC its access back
 ([P46](#p46-after-losing-the-pcs-dpapi-keys-nothing-logs-in-to-openbao)).
 
+A lab built with the shared SSH key `keys\ansible_ed25519` moves to SSH
+certificates once, in this order (why it is safe:
+[SSH certificates](#ssh-certificates-user-and-host-cas), "Moving an existing
+lab over"), in an elevated PowerShell:
+
+```powershell
+.\scripts\Initialize-Lab.ps1              # offline SSH CA, this PC's key, host certificates; the old key still works meanwhile
+.\scripts\Deploy-LabVault.ps1             # OpenBao's SSH CA trusted everywhere (step 8): OpenBao takes over signing
+.\scripts\Complete-LabSshMigration.ps1    # proof first, then it retires keys\ansible_ed25519 (asks before it deletes checkpoints and moves the key aside)
+```
+
+Then, in your own PowerShell window, `.\scripts\New-LabRecoveryKit.ps1 -Renew`:
+it adds the new offline SSH CA to your recovery file (the scripts remind you
+with a `PENDING` line until it does). For an existing firewall,
+`New-LabFirewall.ps1` (step 4 of `Initialize-Lab.ps1`) takes the fingerprint of
+its host key from the serial console log of its first boot
+(`G:\Vagrant\hyperv\firewall\logs\serial-console.log`); if that log is gone,
+it stops and asks for `.\scripts\New-LabFirewall.ps1 -Rebuild`.
+
 Done since the first version of this roadmap:
 
 - **A secrets manager**: OpenBao on its own VM holds every service secret; the
-  playbooks get a short-lived, response-wrapped token per run, and apart from
-  the lab SSH key no secret is a plain file any more.
+  playbooks get a short-lived, response-wrapped token per run, and no secret
+  that opens anything on its own is a plain file any more.
+- **SSH without a shared key and without trust on first use**: SSH
+  certificates from two SSH CAs (an offline one on the PC, OpenBao's SSH
+  secrets engine), 8 hours for the PC, 2 hours per Ansible run for only the
+  hosts it configures, host certificates for every machine whose host keys are
+  verified out of band (serial console, Hyper-V KVP), a revocation list for
+  retired host keys, and host key checking on everywhere, MDAD included
+  ([SSH certificates](#ssh-certificates-user-and-host-cas)).
 - **An internal ACME CA**: OpenBao's intermediate CA below an offline root.
   Traefik requests and renews the Matrix certificates itself, every private key
   is made where it is used, and those certificates are short-lived (90 days).
@@ -6482,7 +7223,7 @@ Done since the first version of this roadmap:
   in `vendor\mdad` (upgraded with `Update-LabMdad.ps1`, never downloaded by a
   deployment), Ansible pinned to a version, and the checks used to verify the
   lab kept as scripts in `tests\` (`Invoke-LabTests.ps1`; the seven tests that
-  change nothing passed on 2026-10-24).
+  changed nothing at the time passed on 2026-10-24).
 
 Natural next steps, each a topic of its own:
 
@@ -6497,16 +7238,18 @@ Natural next steps, each a topic of its own:
   `on_conflict` in MAS could go back to its safe default. The OpenBao snapshots
   themselves should leave the PC on a schedule too (today only
   `Backup-LabVault.ps1 -Destination` copies one, by hand).
-- **SSH without a plain key file**: the lab key with a passphrase in an
-  ssh-agent (Windows has one as a service), or better, SSH certificates from
-  OpenBao's SSH secrets engine: short-lived user certificates for the PC and
-  ansible-control, and host certificates for the VMs, which would also replace
-  `accept-new` and `host_key_checking = False`.
+- **One SSH identity per automation**: MDAD (third-party code) in an account of
+  its own on ansible-control, without sudo there and with its own key, so that
+  the per-run SSH principals also hold when something persists on
+  ansible-control (today every run shares the account `ansible`, see
+  [SSH certificates](#ssh-certificates-user-and-host-cas), "What remains").
 - **Single sign-on for OpenBao's web UI**: an OIDC login in OpenBao with
   Keycloak as the identity provider, and a personal administrator with MFA and
   a scoped policy, so that `pc-admin` is left to the scripts and `recovery` to
   emergencies. Until then, `Open-LabVaultUi.ps1` hands out 1-hour tokens
-  ([Open OpenBao's web UI](#open-openbaos-web-ui)).
+  ([Open OpenBao's web UI](#open-openbaos-web-ui)). The same login could then
+  give a person an SSH certificate for their own identity, instead of the PC
+  signing its own.
 - **Auto-unseal**: OpenBao unseals itself with a key held elsewhere (in an
   enterprise an HSM or a cloud KMS), so a restart of the vault VM no longer needs
   the PC.

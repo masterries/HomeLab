@@ -71,19 +71,18 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = $script:LabProjectRoot
 $domain = $script:LabConfig.domain
 
-if (-not (Test-Path (Join-Path $projectRoot 'keys\ssh_config'))) {
-    throw 'No SSH configuration found (keys\ssh_config). Run .\scripts\Initialize-Lab.ps1 first.'
-}
 
 # Runs MDAD's playbook through the lab's entry point lab-setup.yml, with the given tags, with a
 # run token for the policy ansible-matrix (Invoke-LabRunToken, LabSecrets.ps1). The tags are
 # those of MDAD's "just" recipes (see vendor\mdad\justfile), which would run setup.yml directly.
 # Running it in ~/mdad makes Ansible use MDAD's own ansible.cfg (not the lab's in ~/lab).
-# ANSIBLE_HOST_KEY_CHECKING=False: the same LAB SHORTCUT as host_key_checking in the lab's
-# ansible.cfg (rebuilt VMs get new SSH host keys). ANSIBLE_COLOR_VERBOSE=magenta: no blue text on
-# the blue background of Windows PowerShell.
+# SSH: ansible-control gets a certificate for matrix only (principal host-matrix): MDAD and its
+# roles are third-party code, and during this run its certificate opens no other machine (see the
+# limit in LabSsh.ps1, Get-LabSshUserPrincipals). Host keys are checked against the lab's SSH CAs
+# (/etc/ssh/ssh_config.d/20-lab.conf on ansible-control).
+# ANSIBLE_COLOR_VERBOSE=magenta: no blue text on the blue background of Windows PowerShell.
 function Invoke-Mdad([string]$Tags, [string]$What) {
-    Invoke-LabRunToken "cd ~/mdad && ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_COLOR_VERBOSE=magenta ansible-playbook -i inventory/hosts lab-setup.yml --tags=$Tags" @('ansible-matrix') 'mdad'
+    Invoke-LabRunToken "cd ~/mdad && ANSIBLE_COLOR_VERBOSE=magenta ansible-playbook -i inventory/hosts lab-setup.yml --tags=$Tags" @('ansible-matrix') 'mdad' @('host-matrix')
     if ($LASTEXITCODE -ne 0) { throw "$What failed on ansible-control (exit code $LASTEXITCODE)." }
 }
 
@@ -123,7 +122,7 @@ if ($vendoredCommit -ne $pinnedCommit) {
     throw "vendor\mdad holds MDAD $vendoredCommit, but matrix-prepare.yml pins $pinnedCommit. Make them the same (see vendor\README.md, Upgrade)."
 }
 Write-Host "== 2/5 MDAD $($vendoredCommit.Substring(0, 7)) from the repository (vendor\mdad) to ~/mdad on ansible-control =="
-$sshConfig = Join-Path $projectRoot 'keys\ssh_config'
+$sshConfig = Get-LabSshConfig
 $archive = Join-Path ([IO.Path]::GetTempPath()) 'lab-mdad.tgz'
 & tar -czf $archive -C $vendorDir .
 if ($LASTEXITCODE -ne 0) { throw "tar failed (exit code $LASTEXITCODE)." }

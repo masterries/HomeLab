@@ -6,10 +6,10 @@
 # Windows host when the lab is set up.
 
 # The lab's local secrets and SSH files (private keys!):
-#   ansible_ed25519, ansible_ed25519.pub  the lab SSH key pair (scripts/New-LabSshKey.ps1)
+#   ssh/                                  the offline SSH CA (key encrypted, passphrase in DPAPI),
+#                                         the PC's SSH key and certificate, the SSH trust files
+#                                         and the lab's verified host keys (scripts/LabSsh.ps1)
 #   ssh_config                            SSH client settings (scripts/Initialize-Lab.ps1)
-#   known_hosts                           the VMs' SSH host keys, recorded by ssh on first contact
-#                                         (accept-new); Initialize-Lab.ps1 resets it on each run
 #   pki/                                  the offline root CA: its key (encrypted), certificate,
 #                                         revocation list, issued certificates (New-LabRootCA.ps1)
 #   openbao/                              OpenBao's key shares and the PC's logins (DPAPI) and

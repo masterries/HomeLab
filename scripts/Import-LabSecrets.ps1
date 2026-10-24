@@ -53,7 +53,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'LabSecrets.ps1')
 
-$sshConfig = Join-Path $script:LabKeysDir 'ssh_config'
+$sshConfig = Get-LabSshConfig
 $sources = @(
     @{
         File = Join-Path $script:LabKeysDir 'keycloak\secrets.yml'; Remote = 'keycloak-secrets/secrets.yml'

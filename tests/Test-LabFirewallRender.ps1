@@ -57,6 +57,13 @@ try {
     Assert-LabTest 'root password stored as SHA-512-crypt hash' ($xml.opnsense.system.user[0].password -like '$6$*')
     Assert-LabTest 'seed ISO written' ((Test-Path $seedIso) -and (Get-Item $seedIso).Length -gt 0)
     Assert-LabTest 'staging folder with the plain config.xml removed' (-not (Test-Path (Join-Path $vmDir 'seed\content')))
+    # SSH: user ansible accepts the lab's SSH CAs (cert-authority lines with principals and from=),
+    # including the offline CA, from the very first boot.
+    $authorized = @(([Text.Encoding]::ASCII.GetString([Convert]::FromBase64String(($xml.opnsense.system.user | Where-Object { $_.name -eq 'ansible' }).authorizedkeys))) -split "`n" | Where-Object { $_ })
+    $caLines = @($authorized | Where-Object { $_ -like 'cert-authority,principals="lab-all,host-firewall",from="*" ssh-ed25519 *' })
+    $offlineCa = (([IO.File]::ReadAllText("$($script:LabSshOfflineCa).pub").Trim() -split '\s+')[1])
+    Assert-LabTest 'ansible accepts the lab SSH CAs (cert-authority, principals, from)' ($caLines.Count -ge 1 -and ($caLines -join "`n").Contains($offlineCa)) "$($caLines.Count) CA line(s)"
+    Assert-LabTest 'no other key lines than the CAs (and the old lab key while it exists)' (@($authorized | Where-Object { $caLines -notcontains $_ -and $_ -notlike '* ansible@deployableserver-lab' }).Count -eq 0)
     $nonDpapi = @(Get-ChildItem (Join-Path $script:LabKeysDir 'opnsense') -File | Where-Object { $_.Extension -ne '.dpapi' })
     Assert-LabTest 'keys\opnsense holds only DPAPI files' ($nonDpapi.Count -eq 0) (($nonDpapi | ForEach-Object Name) -join ', ')
 }

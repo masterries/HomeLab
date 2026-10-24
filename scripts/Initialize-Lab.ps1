@@ -47,34 +47,41 @@
          keeps the virtual disks, becomes a junction (directory link) to -StorageRoot.
          Hyper-V's own files (configuration, checkpoints) are moved in step 5 as soon as
          each Linux VM exists; New-LabFirewall.ps1 creates the firewall there directly.
-      2. SSH key and keys\ssh_config. New-LabSshKey.ps1 creates the lab key pair if it is
-         missing; the firewall build puts the public key into OPNsense's configuration, and
-         Vagrant's provisioners copy it to every Linux VM. The ssh_config says how to reach
-         each VM: the firewall directly at its fixed LabHost address, every other VM through
-         the firewall as jump host. New-LabFirewall.ps1 configures the firewall over SSH
-         with this file, and Vagrant uses it to reach the lab VMs (ssh.proxy_command in the
-         Vagrantfile), so it has to exist before steps 4 and 5.
+      2. SSH CA and keys\ssh_config. New-LabSshCa.ps1 creates the offline SSH CA and this
+         PC's SSH key if they are missing (keys\ssh). SSH logins in the lab use short-lived
+         certificates instead of a shared key, and host keys are checked against host
+         certificates instead of being trusted on first use (scripts\LabSsh.ps1 explains it).
+         The files that say which CAs to trust are rendered here; the firewall build and
+         Vagrant's provisioners copy them. The ssh_config says how to reach each VM: the
+         firewall directly at its fixed LabHost address, every other VM through the firewall
+         as jump host. New-LabFirewall.ps1 configures the firewall over SSH with this file,
+         and Vagrant uses it to reach the lab VMs (ssh.proxy_command in the Vagrantfile), so
+         it has to exist before steps 4 and 5.
       3. LabNet. The private Hyper-V switch for the lab network behind the firewall. It
          must exist before the firewall is built, because the firewall's LAN adapter is
          attached to it.
-      4. Firewall (OPNsense, New-LabFirewall.ps1). Built or started before any other VM,
-         because the lab VMs depend on its services: DHCP (dnsmasq hands each lab VM its
+      4. Firewall (OPNsense, New-LabFirewall.ps1). First, if they exist, the firewall and the
+         vault VM are started directly in Hyper-V and OpenBao is unsealed: once deployed,
+         OpenBao signs the SSH certificates, and after a Windows restart the PC's certificate
+         has expired. Then the firewall is built or checked (its SSH host certificate first),
+         before any other VM, because the lab VMs depend on its services: DHCP (dnsmasq hands each lab VM its
          reserved address; without it a lab VM gets no IPv4 address, and Vagrant, which
          reads the guest IP from Hyper-V, has no usable address to connect to), DNS for
          *.lab.internal, NAT to the internet (package installs during provisioning) and
          SSH: Vagrant reaches the lab VMs only through the firewall as jump host, logged in
-         as "ansible" with the lab key. A DNS lookup from the PC then checks that the
+         as "ansible" with the PC's certificate. A DNS lookup from the PC then checks that the
          firewall answers on the LabHost network.
       5. Lab VMs (ansible-control, matrix, keycloak, vault; the list comes from
-         config\lab.json). Started on LabNet only, then provisioned: user "ansible", console
-         autologin (not on vault) and zsh on all; ansible-control also gets the lab private key
-         and Ansible. The services on them are deployed afterwards with their own scripts
-         (Deploy-LabVault.ps1, Deploy-LabKeycloak.ps1, Deploy-LabMatrix.ps1). OpenBao, once
-         deployed, is unsealed here.
+         config\lab.json). Started on LabNet only, then provisioned: user "ansible", SSH
+         (own host keys, published to the PC through Hyper-V KVP, trust in the lab's SSH CAs,
+         certificate logins only), console autologin (not on vault) and zsh on all;
+         ansible-control also gets its own SSH key and Ansible. Then every VM gets its host
+         certificate. The services on them are deployed afterwards with their own scripts
+         (Deploy-LabVault.ps1, Deploy-LabKeycloak.ps1, Deploy-LabMatrix.ps1).
       6. Tests. Name resolution from the PC, an SSH login to every VM through
-         keys\ssh_config, and the Ansible playbook ping.yml, which shows that
-         ansible-control reaches the other VMs by their DNS names with the lab key and that
-         sudo works on every VM.
+         keys\ssh_config (with the PC's certificate, checking every host certificate), and
+         the Ansible playbook ping.yml, which shows that ansible-control reaches the other VMs
+         by their DNS names with a certificate of its own and that sudo works on every VM.
       7. Maintenance (once OpenBao is deployed): renewals that are due - OpenBao's TLS
          certificate, the root CA's revocation list, the intermediate CA (Deploy-LabVault.ps1)
          and Keycloak's certificate (Deploy-LabKeycloak.ps1); see Get-LabMaintenanceDue in
@@ -86,7 +93,8 @@
     LabHost address and DNS names). Each step looks at the current state first and only
     changes what is missing: an existing key is kept, the switch is created only once, an
     existing firewall is only started and checked, only VMs that are not running are
-    started, Hyper-V files are moved only if they are somewhere else. keys\ssh_config is
+    started, Hyper-V files are moved only if they are somewhere else, host certificates are
+    signed only when they are due (30 days before they expire). keys\ssh_config is
     rewritten on every run. Provisioning of the Linux VMs also runs on every run ("vagrant
     up" alone runs it only when a VM is first created), so changes to provision\ are
     applied by running this script again. The provisioning scripts are written so that they
@@ -104,6 +112,12 @@
     An existing VAGRANT_HOME and an existing .vagrant junction are kept. Once both are in
     place, changing this value only moves the Hyper-V files.
 
+.PARAMETER BreakGlass
+    When OpenBao cannot sign SSH certificates (the vault VM is broken), let the offline SSH CA
+    sign them for this run instead (LabSsh.ps1, Get-LabSshSigner). Without it the script stops
+    with the reason, so that OpenBao being unavailable never moves signing outside its audit
+    log by accident.
+
 .EXAMPLE
     .\scripts\Initialize-Lab.ps1
 
@@ -112,15 +126,14 @@
 
 .NOTES
     Lab-only shortcuts in this script, and what an enterprise setup does instead:
-      - One SSH key without a passphrase for the whole lab (New-LabSshKey.ps1).
-        Enterprise: a personal key per administrator, protected by a passphrase or a
-        hardware token, or short-lived SSH certificates from an SSH certificate authority.
-      - SSH host keys are trusted on first use (StrictHostKeyChecking accept-new), and
-        keys\known_hosts is deleted on every run because rebuilt VMs have new host keys
-        (each VM generates its own on first provisioning, provision/harden-ssh.sh).
-        Enterprise: host keys are verified on the first connection too, for example with
-        SSH host certificates or known_hosts entries distributed by configuration
-        management.
+      - The PC's SSH key has no passphrase (it opens nothing without its 8-hour certificate),
+        and the PC signs its certificates itself with an AppRole stored with DPAPI.
+        Enterprise: people log in to the SSH CA with SSO and MFA (OIDC to Vault/OpenBao,
+        Teleport, Smallstep) and get a certificate for their own identity.
+      - Vagrant's own last hop to each VM (user "vagrant", Vagrant's per-VM key) does not
+        check the VM's host key. Nothing of the lab's trust depends on it: VMs publish their
+        host keys through Hyper-V KVP, and certificates are installed over connections pinned
+        to those keys.
 
     Related scripts: Install-LabHostNetwork.ps1 (once, before this script),
     Install-LabRootCA.ps1 (make Windows trust the lab root CA), Deploy-LabVault.ps1 (OpenBao:
@@ -131,7 +144,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$StorageRoot = 'G:\Vagrant'
+    [string]$StorageRoot = 'G:\Vagrant',
+    [switch]$BreakGlass
 )
 
 # Stop at the first failing cmdlet. A native program (vagrant, ssh) that ends with a non-zero
@@ -146,9 +160,8 @@ $dotVagrant = Join-Path $vagrantDir '.vagrant'
 # projects in differently named folders do not share one machine store.
 $machineStore = Join-Path $StorageRoot "machines\$(Split-Path -Leaf $projectRoot)\vagrant"
 $keyDir = Join-Path $projectRoot 'keys'
-$keyFile = Join-Path $keyDir 'ansible_ed25519'
 $sshConfig = Join-Path $keyDir 'ssh_config'
-$knownHosts = Join-Path $keyDir 'known_hosts'
+$legacyKnownHosts = Join-Path $keyDir 'known_hosts'
 # Addresses and the domain come from config\lab.json, the lab's main source for this data
 # (also read by the Vagrantfile and New-LabFirewall.ps1). The switch names must match
 # vagrant\Vagrantfile, New-LabFirewall.ps1 and Install-LabHostNetwork.ps1 (which also creates
@@ -244,6 +257,10 @@ if (-not $hostNetworkReady) {
 # vagrant command (even "destroy" in another project's folder) act on these VMs.
 $previousVagrantCwd = $env:VAGRANT_CWD
 $env:VAGRANT_CWD = $vagrantDir
+# -BreakGlass reaches every script and Vagrant's certificate check through the environment
+# (LAB_SSH_BREAKGLASS, read by Get-LabSshSigner), for this run only.
+$previousBreakGlass = $env:LAB_SSH_BREAKGLASS
+if ($BreakGlass) { $env:LAB_SSH_BREAKGLASS = '1' }
 try {
     # --- Step 1: storage. This comes first: once VMs exist, their disks can no longer be
     # moved by this script; that needs a rebuild (Remove-Lab.ps1, then this script).
@@ -293,22 +310,22 @@ try {
         Write-Host "VM disks: $dotVagrant -> $machineStore"
     }
 
-    # --- Step 2: the lab SSH key and the SSH client configuration.
-    Write-Host '== 2/7 SSH key and SSH configuration =='
-    # Creates keys\ansible_ed25519 if it is missing; an existing key is kept. Vagrant's
-    # provisioners copy the public key to every VM and the private key to ansible-control.
-    & (Join-Path $PSScriptRoot 'New-LabSshKey.ps1')
-    # The Linux VM names come from the Vagrantfile, so the ssh_config below covers every VM
-    # it defines; all of them are lab VMs behind the firewall. (The filter only matters if
-    # the Vagrantfile ever defines a VM called "firewall" again.)
-    $states = Get-VagrantMachineStates
-    $labMachines = @($states.Keys | Where-Object { $_ -ne $firewallName })
+    # --- Step 2: the SSH CA, the PC's SSH key and the SSH client configuration.
+    Write-Host '== 2/7 SSH CA, SSH key and SSH configuration =='
+    # Creates the offline SSH CA and this PC's key in keys\ssh if they are missing; existing
+    # ones are kept (New-LabSshCa.ps1). LabSsh.ps1 (loaded with LabSecrets.ps1) explains the
+    # certificates.
+    & (Join-Path $PSScriptRoot 'New-LabSshCa.ps1')
+    . (Join-Path $PSScriptRoot 'LabSecrets.ps1')
+    # The files that tell every machine which SSH CAs to trust: rendered here from the CA public
+    # keys and config\lab.json; Vagrant's provisioners and New-LabFirewall.ps1 copy them.
+    if (Write-LabSshTrustFiles) { Write-Host 'Written: keys\ssh\lab_user_ca.pub, known_hosts, firewall_authorized_keys' }
     # keys\ssh_config is used by Connect-Lab.ps1, Invoke-LabPlaybook.ps1, the tests in step 6
     # and by Vagrant itself: the Vagrantfile's ssh.proxy_command reaches the lab VMs through
     # the firewall with this file, so it must be written before step 5 starts them.
     # The firewall is addressed by its fixed LabHost IP rather than its name, so SSH to it
-    # still works when its DNS is not running. (Its Default Switch address is no option: it
-    # changes on every Windows reboot.)
+    # still works when its DNS is not running (its Default Switch address changes on every
+    # Windows reboot); HostKeyAlias tells ssh to check its host certificate for its name.
     # The other VMs use ProxyJump: ssh first connects to the firewall and opens the onward
     # connection from there, so the name in HostName is resolved by the firewall and gets
     # the lab-side address (split-horizon DNS). This is the bastion host (jump host)
@@ -319,43 +336,18 @@ try {
     # (split DNS), where only the published ports (80, 443, 7881, udp 7882) are forwarded, so
     # SSH would time out instead of reaching the VM. With ProxyJump the firewall resolves it
     # to the lab VM.
-    # ssh uses the first value it finds for each option, so the firewall's own block comes
-    # first and the pattern excludes the firewall's name.
-    # Paths use forward slashes, the safest form for Windows OpenSSH.
-    $configText = @"
-# Generated by scripts/Initialize-Lab.ps1 and rewritten on every run: edit the script,
-# not this file. Only the firewall is reachable directly from the PC (fixed IP on the
-# LabHost network); all other VMs are reached through it as jump host, and their names
-# are resolved by the firewall's DNS.
-Host $firewallName $firewallName.$labDomain
-    HostName $firewallHostIp
-
-Host $($labMachines -join ' ')
-    HostName %h.$labDomain
-    ProxyJump $firewallName
-
-Host *.$labDomain !$firewallName.$labDomain
-    ProxyJump $firewallName
-
-Host *
-    User ansible
-    IdentityFile "$($keyFile -replace '\\', '/')"
-    IdentitiesOnly yes
-    UserKnownHostsFile "$($knownHosts -replace '\\', '/')"
-    StrictHostKeyChecking accept-new
-"@
-    # Written without a BOM and with LF line endings: Windows OpenSSH fails on the first
-    # line of an ssh_config that starts with a UTF-8 byte order mark. Out-File and
-    # Set-Content in Windows PowerShell 5.1 cannot write UTF-8 without a BOM, hence the
-    # .NET call with UTF8Encoding($false).
-    [IO.File]::WriteAllText($sshConfig, ($configText -replace "`r`n", "`n") + "`n", (New-Object Text.UTF8Encoding $false))
+    # Host keys: accepted only with a certificate from a lab SSH CA (keys\ssh\known_hosts,
+    # StrictHostKeyChecking yes), never "on first use". The text comes from Get-LabSshConfigText
+    # (LabSsh.ps1).
+    Write-LabSshConfig
     Write-Host "Written: $sshConfig"
-    # Rebuilt VMs have new host keys (every VM generates its own on its first provisioning,
-    # see provision/harden-ssh.sh), which ssh would reject as a possible
-    # man-in-the-middle attack. This file only holds the lab VMs, so it is simply discarded;
-    # the connections below record the current keys (StrictHostKeyChecking accept-new).
-    # Lab shortcut; see .NOTES in the help above for the enterprise approach.
-    Remove-Item -Force -ErrorAction SilentlyContinue $knownHosts
+    # Earlier versions learned host keys on first use into keys\known_hosts; the certificates
+    # replace that file.
+    Remove-Item -Force -ErrorAction SilentlyContinue $legacyKnownHosts
+    # The Linux VM names come from the Vagrantfile (all of them are lab VMs behind the
+    # firewall; the filter only matters if the Vagrantfile ever defines a VM called "firewall").
+    $states = Get-VagrantMachineStates
+    $labMachines = @($states.Keys | Where-Object { $_ -ne $firewallName })
 
     # --- Step 3: the lab network. Hyper-V has three switch types: External (VMs share a
     # physical network adapter of the PC), Internal (VMs plus a virtual adapter on the PC;
@@ -374,6 +366,21 @@ Host *
 
     # --- Step 4: the firewall, before every other VM (see the build order in the help).
     Write-Host "== 4/7 Firewall (OPNsense) =="
+    # Every SSH login needs a valid certificate, and once OpenBao is deployed it is OpenBao that
+    # signs them - reached through the firewall's port forward. After a Windows restart the
+    # firewall and the vault VM are off and the PC's certificate (8 hours) has expired; "vagrant
+    # up" cannot start vault, because it would need SSH. So both VMs are started directly in
+    # Hyper-V and OpenBao is unsealed over HTTPS first - no SSH involved.
+    $firewallVm = Get-VM -Name $firewallName -ErrorAction SilentlyContinue
+    if ($firewallVm -and $firewallVm.State -ne 'Running') { Start-VM -VM $firewallVm; Write-Host "Started:     $firewallName" }
+    if ($states.Contains('vault') -and $states['vault'] -notin 'running', 'not_created') {
+        Start-VM -VM (Get-LabVM 'vault')
+        Write-Host 'Started:     vault (Hyper-V; OpenBao signs the SSH certificates)'
+    }
+    if ($states.Contains('vault') -and $states['vault'] -ne 'not_created' -and (Test-LabSshOpenBaoTrusted)) {
+        try { Unlock-LabVault -TimeoutSeconds 240 }
+        catch { Write-Warning "OpenBao is not usable yet ($($_.Exception.Message)). SSH certificates need it; if it stays broken, run this script with -BreakGlass." }
+    }
     # The firewall is an OPNsense VM. There is no Vagrant box for OPNsense on Hyper-V, so
     # New-LabFirewall.ps1 builds it: official nano image, configuration rendered from
     # opnsense\config.xml.template, first boot driven over the serial console, update to the
@@ -397,13 +404,21 @@ Host *
     # Hyper-V and connects through the firewall (ssh.proxy_command with keys\ssh_config).
     # Only VMs that are not running are started, all of them in one vagrant call.
     Write-Host "== 5/7 Lab VMs: $($labMachines -join ', ') =="
+    # Vagrant logs in through the firewall with the PC's SSH certificate: renewed here when it
+    # expires within 4 hours, so it lasts through "vagrant up" and "vagrant provision".
+    [void](Get-LabSshConfig)
     $toStart = @($labMachines | Where-Object { $states[$_] -ne 'running' })
     if ($toStart.Count -gt 0) {
         Invoke-Vagrant up @toStart --provider=hyperv --no-provision
     }
     foreach ($name in $labMachines) { Move-LabVMConfig $name }
     # Provisioning runs for every lab VM, also for VMs that were already running.
+    [void](Get-LabSshConfig)
     Invoke-Vagrant provision @labMachines
+    # Host certificates: each VM published its host key through Hyper-V KVP during provisioning
+    # (provision/harden-ssh.sh); a certificate is signed for exactly that key when one is due and
+    # installed over a connection pinned to it (LabSsh.ps1, Update-LabVmHostCertificates).
+    Update-LabVmHostCertificates $labMachines
 
     # OpenBao is sealed after every start of the vault VM. Once it has been initialised
     # (Deploy-LabVault.ps1 stored key shares A and B with DPAPI), unseal it here, so certificate
@@ -412,7 +427,6 @@ Host *
     # first: the unseal itself would be refused by the pinned TLS check. Deploy-LabVault.ps1
     # renews it over SSH before any API call, then unseals.
     if (Test-Path (Join-Path $keyDir 'openbao\unseal-a.dpapi')) {
-        . (Join-Path $PSScriptRoot 'LabSecrets.ps1')
         $vaultUri = [Uri]$script:LabVaultUrl
         $vaultCert = Get-LabServedCertificate $vaultUri.Host $vaultUri.Port
         if ($vaultCert -and $vaultCert.NotAfter -lt (Get-Date).AddDays(30)) {
@@ -434,9 +448,11 @@ Host *
     foreach ($name in $labMachines) {
         Write-Host "DNS from the PC: $name.$labDomain -> $((Resolve-LabName "$name.$labDomain") -join ', ')"
     }
+    $sshConfig = Get-LabSshConfig
     foreach ($name in @($firewallName) + $labMachines) {
         # SSH to every VM the way a user would (the firewall directly, the others through
-        # it): tests the lab key, the user "ansible" and the jump host. The command is in
+        # it): tests the PC's certificate, every host certificate (keys\ssh_config accepts host
+        # keys only with one), the user "ansible" and the jump host. The command is in
         # single quotes, so PowerShell passes it on unchanged and the $(...) parts run in
         # the VM's shell. The firewall runs FreeBSD (OPNsense), whose hostname command has no
         # -I option, so it reports its OPNsense version instead.
@@ -450,16 +466,17 @@ Host *
         if ($LASTEXITCODE -ne 0) { throw "SSH to $name failed (exit code $LASTEXITCODE)." }
     }
     # The Ansible check runs on the control node: ping.yml connects from ansible-control to
-    # the other VMs by their DNS names (lab-side addresses) with the lab key and checks
-    # Python and sudo. Invoke-LabPlaybook.ps1 ends with "exit <code>", so its result
-    # arrives in $LASTEXITCODE.
+    # the other VMs by their DNS names (lab-side addresses) with ansible-control's own key and
+    # a certificate for this run, checks their host certificates, and checks Python and sudo.
+    # Invoke-LabPlaybook.ps1 ends with "exit <code>", so its result arrives in $LASTEXITCODE.
     & (Join-Path $PSScriptRoot 'Invoke-LabPlaybook.ps1') ping.yml
     if ($LASTEXITCODE -ne 0) { throw "ping.yml failed (exit code $LASTEXITCODE)." }
 }
 finally {
-    # Restores the caller's value. If VAGRANT_CWD was not set before, assigning $null
-    # removes the variable again.
+    # Restores the caller's values. If a variable was not set before, assigning $null
+    # removes it again.
     $env:VAGRANT_CWD = $previousVagrantCwd
+    $env:LAB_SSH_BREAKGLASS = $previousBreakGlass
 }
 
 # --- Step 7: maintenance - renewals that are due ------------------------------------------------
@@ -483,6 +500,9 @@ if (Test-Path (Join-Path $keyDir 'openbao\unseal-a.dpapi')) {
 
 Write-Host ''
 Write-Host 'Done. Log in with:  .\scripts\Connect-Lab.ps1  (or: .\scripts\Connect-Lab.ps1 matrix / keycloak / vault / firewall)'
+if ((Test-Path (Join-Path $keyDir 'openbao\unseal-c.sha256')) -and -not (Test-LabSshCaInRecoveryKit)) {
+    Write-Host 'PENDING: your recovery file has no copy of the current offline SSH CA. In your own PowerShell window:  .\scripts\New-LabRecoveryKit.ps1 -Renew'
+}
 if (-not $maintenanceDone) {
     Write-Host 'Next: .\scripts\Deploy-LabVault.ps1 (OpenBao), .\scripts\Install-LabRootCA.ps1 (once per PC), .\scripts\New-LabRecoveryKit.ps1 (in your own window),'
     Write-Host '      then .\scripts\Deploy-LabKeycloak.ps1 and .\scripts\Deploy-LabMatrix.ps1 (Element: https://element.lab.internal)'

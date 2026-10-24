@@ -352,14 +352,24 @@ function New-LabRunToken([string[]]$Policies, [string]$Name = 'ansible') {
 # but only when this console can show it (Enable-LabConsoleColors). No double quotes and no
 # single quotes in $Command: it is put in single quotes for the remote shell, and Windows
 # PowerShell 5.1 does not pass embedded double quotes correctly to native programs.
-function Invoke-LabRunToken([string]$Command, [string[]]$Policies, [string]$Name = 'ansible') {
+# $Principals: the SSH principals the run needs on the other machines (host-matrix, lab-all, ...);
+# ansible-control gets a certificate for exactly these, valid 2 hours, deleted when the run ends
+# (Get-LabControlCertificateCommand in LabSsh.ps1). None for runs that stay on ansible-control.
+function Invoke-LabRunToken([string]$Command, [string[]]$Policies, [string]$Name = 'ansible', [string[]]$Principals) {
     if ($Command -match "[`"']") { throw 'Invoke-LabRunToken: the command must not contain quotes.' }
-    $sshConfig = Join-Path $script:LabKeysDir 'ssh_config'
+    $sshConfig = Get-LabSshConfig
     $color = ''
     if (Enable-LabConsoleColors) { $color = 'ANSIBLE_FORCE_COLOR=1 ' }
+    $install = ''; $cleanup = ''
+    if ($Principals) {
+        $certificate = Get-LabControlCertificateCommand $Principals
+        $install = "$($certificate.Install) && "
+        $cleanup = "; rc=`$?; $($certificate.Remove); exit `$rc"
+    }
+    # The certificate is signed first: the wrapping token below is valid for 120 seconds only.
     $wrapped = New-LabRunToken $Policies $Name
     $ErrorActionPreference = 'Continue'
-    $wrapped | & ssh -F $sshConfig -o LogLevel=ERROR ansible-control "{ ${color}VAULT_ADDR=$script:LabVaultUrl bash ~/lab/bin/openbao-run '$Command'; } 2>&1"
+    $wrapped | & ssh -F $sshConfig -o LogLevel=ERROR ansible-control "{ $install${color}VAULT_ADDR=$script:LabVaultUrl bash ~/lab/bin/openbao-run '$Command'$cleanup; } 2>&1"
     $wrapped = $null
 }
 
@@ -447,3 +457,7 @@ function Use-LabRootCaPassphrase([scriptblock]$Script) {
     try { & $Script }
     finally { Remove-Item Env:LAB_CA_PASS -ErrorAction SilentlyContinue }
 }
+
+# --- SSH certificates -----------------------------------------------------------------------------
+# The SSH CAs, certificates and trust files (Get-LabSshConfig and friends) live in LabSsh.ps1.
+. (Join-Path $PSScriptRoot 'LabSsh.ps1')

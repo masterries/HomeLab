@@ -81,21 +81,52 @@ require "json"
 # the current directory)
 # ---------------------------------------------------------------------------------------------
 
-# Key pair from scripts/New-LabSshKey.ps1.
-# LAB-ONLY SHORTCUT: one key without a passphrase is shared by the whole lab (your PC,
-# ansible-control, the "ansible" user on every VM). In an enterprise every person and every
-# automation system has its own key, ideally short-lived SSH certificates issued by an SSH CA,
-# or keys kept in a secrets manager or on a hardware token.
+# SSH certificates (scripts/LabSsh.ps1): the lab's SSH CAs sign short-lived certificates; every
+# machine trusts the CAs, not individual keys. keys/ssh holds the files the VMs need:
+#   lab_user_ca.pub     the CAs a login certificate must come from (TrustedUserCAKeys)
+#   known_hosts         the CAs a host certificate must come from (for ansible-control)
+#   revoked_host_keys   host keys of rebuilt machines that must not be accepted any more
+SSH_DIR = File.expand_path("../keys/ssh", __dir__)
+# TRANSITION: the old shared lab key. While keys/ansible_ed25519.pub exists, it is still uploaded
+# and accepted; scripts/Complete-LabSshMigration.ps1 retires it.
 LAB_KEY = File.expand_path("../keys/ansible_ed25519", __dir__)
 # Written by Initialize-Lab.ps1; contains the jump host "firewall" (used by proxy_command below).
 # It is used without quotes in the proxy command below, so the path must not contain spaces.
 SSH_CONFIG = File.expand_path("../keys/ssh_config", __dir__)
+# Windows' own OpenSSH client for the jump. Vagrant puts its own ssh (OpenSSH 10, an MSYS2 build)
+# first in PATH, so a plain "ssh" in proxy_command would be that one; the lab is built and tested
+# with Windows' ssh (the same that the scripts use).
+SYSTEM_SSH = File.join(ENV.fetch("SystemRoot", "C:/Windows"), "System32", "OpenSSH", "ssh.exe").tr("\\", "/")
+# The PC's SSH certificate is valid 8 hours. Vagrant logs in through the firewall with it, so
+# before a command that connects to the VMs it must still be valid for a while: if it expires
+# within 4 hours (or does not exist), scripts/Update-LabSshCertificate.ps1 renews it first (it
+# asks OpenBao, or uses the offline SSH CA before OpenBao is deployed). Initialize-Lab.ps1 and the
+# other scripts renew it themselves, so this only does something for "vagrant ..." typed by hand.
+SSH_CERT_INFO = File.join(SSH_DIR, "pc_ed25519-cert.valid-until")
+if %w[up provision reload ssh ssh-config halt resume].include?(ARGV.first)
+  require "time"
+  fresh = begin
+    (Time.iso8601(File.read(SSH_CERT_INFO).split.first) - Time.now) > 4 * 3600
+  rescue StandardError
+    false
+  end
+  unless fresh
+    renew = File.expand_path("../scripts/Update-LabSshCertificate.ps1", __dir__)
+    unless system("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", renew)
+      abort "The PC's SSH certificate could not be renewed (see above). Run .\\scripts\\Initialize-Lab.ps1."
+    end
+  end
+  if %w[up provision reload].include?(ARGV.first) && !File.exist?(File.join(SSH_DIR, "lab_user_ca.pub"))
+    abort "keys/ssh/lab_user_ca.pub is missing: run .\\scripts\\Initialize-Lab.ps1 (it creates the SSH CA)."
+  end
+end
 # Provisioning scripts shared by all lab VMs
 PROVISION_DIR = File.expand_path("../provision", __dir__)
-# Upload folder inside the VMs. The file provisioner copies files as the SSH user "vagrant",
-# which cannot write to other users' home directories. The shell scripts (running as root)
-# install the files from there to their final place and delete the uploaded copies.
+# Upload folders inside the VMs. The file provisioner copies files as the SSH user "vagrant",
+# which cannot write to other users' home directories or /etc. The shell scripts (running as
+# root) install the files from there to their final place and delete the uploaded copies.
 KEY_STAGING = "/home/vagrant/ansible-keys"
+SSH_STAGING = "/home/vagrant/lab-ssh"
 
 # The lab VMs from config/lab.json, e.g.
 #   { "matrix" => { mac: "02000A0A0A1E", ip: "10.10.10.30", cpus: 4, memory: 8192 } }
@@ -167,22 +198,28 @@ Vagrant.configure("2") do |config|
   # "file" provisioners copy files as the SSH user "vagrant"; "shell" provisioners upload a
   # script and run it as root (via sudo).
   #
-  # All VMs: user "ansible", allowed to log in with the lab key. Ansible connects to every VM
-  # as this user; "vagrant" stays Vagrant's own account.
-  # If the key does not exist yet, the upload is skipped and bootstrap-ansible-user.sh aborts
-  # with a hint (unless an earlier run already installed a key); other vagrant commands
-  # (status, halt, destroy) still work.
+  # All VMs: user "ansible", which logs in with SSH certificates. Ansible connects to every VM
+  # as this user; "vagrant" stays Vagrant's own account (with Vagrant's per-VM key).
+  # TRANSITION: the old lab key's public half, only while it exists (see LAB_KEY).
   if File.exist?("#{LAB_KEY}.pub")
     config.vm.provision "lab-key-pub", type: "file",
       source: "#{LAB_KEY}.pub", destination: "#{KEY_STAGING}/ansible_ed25519.pub"
   end
+  # The CAs a login certificate must come from. If keys/ssh does not exist yet, the upload is
+  # skipped and harden-ssh.sh aborts with a hint; other vagrant commands still work.
+  if File.exist?(File.join(SSH_DIR, "lab_user_ca.pub"))
+    config.vm.provision "lab-ssh-ca", type: "file",
+      source: File.join(SSH_DIR, "lab_user_ca.pub"), destination: "#{SSH_STAGING}/lab_user_ca.pub"
+  end
   config.vm.provision "ansible-user", type: "shell",
-    path: File.join(PROVISION_DIR, "bootstrap-ansible-user.sh")
-  # Own SSH host keys per VM (the box ships the same keys for every VM) and SSH logins with
-  # keys only (the box's "vagrant"/"vagrant" password would otherwise work over SSH).
-  # Runs after "ansible-user", so the lab key is in place before passwords are switched off.
+    path: File.join(PROVISION_DIR, "bootstrap-ansible-user.sh"),
+    args: [File.exist?("#{LAB_KEY}.pub") ? "keep-lab-key" : "retire-lab-key"]
+  # Own SSH host keys per VM (the box ships the same keys for every VM), published to the PC
+  # through Hyper-V KVP; trust in the lab's SSH CAs; certificate logins only, from the jump host
+  # and ansible-control only (the addresses come from config/lab.json).
   config.vm.provision "ssh-hardening", type: "shell",
-    path: File.join(PROVISION_DIR, "harden-ssh.sh")
+    path: File.join(PROVISION_DIR, "harden-ssh.sh"),
+    args: [LAB["firewall"]["lanIp"], LAB_VMS.fetch("ansible-control")[:ip]]
   # Hyper-V Manager console: logged in directly as "ansible", without a password.
   # LAB-ONLY SHORTCUT, see setup-console-autologin.sh.
   config.vm.provision "console-autologin", type: "shell",
@@ -191,20 +228,23 @@ Vagrant.configure("2") do |config|
   config.vm.provision "zsh", type: "shell",
     path: File.join(PROVISION_DIR, "setup-zsh.sh"), args: ["vagrant", "ansible"]
 
-  # --- the lab VMs (ansible-control, matrix, keycloak) -----------------------------------------
+  # --- the lab VMs (ansible-control, matrix, keycloak, vault) ----------------------------------
   # The lab VMs are connected only to the private LabNet. Vagrant reads their IP (10.10.10.x)
   # from Hyper-V, but your PC has no adapter in LabNet, so Vagrant reaches them through the
   # firewall as jump host (bastion), like an administrator in an enterprise network:
-  # proxy_command opens an SSH connection to the firewall (as "ansible" with the lab key,
-  # settings from keys/ssh_config), and "-W %h:%p" forwards it to the VM's IP (%h) and SSH
-  # port (%p). Through this tunnel Vagrant then logs in to the VM as "vagrant".
+  # proxy_command opens an SSH connection to the firewall (as "ansible" with the PC's SSH
+  # certificate, settings from keys/ssh_config, the firewall's host certificate checked), and
+  # "-W %h:%p" forwards it to the VM's IP (%h) and SSH port (%p). Through this tunnel Vagrant
+  # then logs in to the VM as "vagrant", with Vagrant's own per-VM key. Vagrant does not check
+  # the VM's host key on that last hop; it carries no secret of the lab, and the PC never takes a
+  # host key from it (the VMs publish theirs through Hyper-V, see provision/harden-ssh.sh).
   # LogLevel=ERROR keeps informational messages (such as "Permanently added ... to the list of
   # known hosts") off stderr: Windows PowerShell 5.1 can turn stderr output of native programs
   # into a terminating error when the output is redirected (e.g. Initialize-Lab.ps1 *> log).
   LAB_VMS.each do |name, vm|
     lab_vm(config, name, switch: LAB_SWITCH, mac: vm[:mac], cpus: vm[:cpus], memory: vm[:memory],
            checkpoints: vm[:checkpoints]) do |m|
-      m.ssh.proxy_command = "ssh -F #{SSH_CONFIG} -o LogLevel=ERROR -W %h:%p firewall"
+      m.ssh.proxy_command = "#{SYSTEM_SSH} -F #{SSH_CONFIG} -o LogLevel=ERROR -W %h:%p firewall"
       # A provisioner with the same name in the machine's own block replaces the shared one:
       # VMs with "consoleAutologin": false in lab.json (vault) get the normal login prompt back.
       unless vm[:console_autologin]
@@ -212,12 +252,14 @@ Vagrant.configure("2") do |config|
           path: File.join(PROVISION_DIR, "setup-console-autologin.sh"), args: ["--remove"]
       end
       if name == "ansible-control"
-        # Only the control VM gets the private key, to reach the other VMs (Ansible connects
-        # over SSH as "ansible"). These provisioners run after the shared ones above, so the
-        # user "ansible" and its ~/.ssh already exist.
-        if File.exist?(LAB_KEY)
-          m.vm.provision "lab-key", type: "file",
-            source: LAB_KEY, destination: "#{KEY_STAGING}/ansible_ed25519"
+        # The control VM checks the other machines' host certificates: it gets the CAs for host
+        # certificates and the revocation list. Its own SSH key is made on the VM itself
+        # (bootstrap-ansible-control.sh). These provisioners run after the shared ones above, so
+        # the user "ansible" and its ~/.ssh already exist.
+        %w[known_hosts revoked_host_keys].each do |file|
+          next unless File.exist?(File.join(SSH_DIR, file))
+          m.vm.provision "lab-ssh-#{file.tr('_', '-')}", type: "file",
+            source: File.join(SSH_DIR, file), destination: "#{SSH_STAGING}/#{file}"
         end
         m.vm.provision "ansible-control", type: "shell",
           path: File.join(PROVISION_DIR, "bootstrap-ansible-control.sh")

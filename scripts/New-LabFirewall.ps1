@@ -35,15 +35,20 @@
          for the login prompt. With the adapters disconnected until our configuration is in,
          OPNsense's factory default (a DHCP server on its first adapter) never reaches a
          real network.
-      7. Over SSH (as ansible, through the new firewall): check the adapter mapping, install
-         the split-horizon DNS drop-in, update OPNsense to the latest 26.7.x (the images are
-         only released for 26.7; the Hyper-V fixes came in 26.7.6/26.7.7), reboot if needed,
-         and renew the GUI certificate in place when it is due (Update-GuiCertificate).
+      7. Over SSH (as ansible): first SSH itself (Update-FirewallSsh). The firewall's host key is
+         checked against the fingerprint it printed on its serial console, the key gets a host
+         certificate from a lab SSH CA, and the sshd drop-in (opnsense\sshd_config.d) limits
+         the jump host to SSH of the lab VMs. From then on every connection checks that
+         certificate. Then: check the adapter mapping, install the split-horizon DNS drop-in,
+         update OPNsense to the latest 26.7.x (the images are only released for 26.7; the
+         Hyper-V fixes came in 26.7.6/26.7.7), reboot if needed, and renew the GUI certificate
+         in place when it is due (Update-GuiCertificate).
       8. Checks: version, interfaces, DNS answers seen from your PC.
 
     RE-RUNS
     If the firewall VM already exists (built by this script, recognised by a tag in its Notes),
-    nothing is rebuilt: the VM is started if it is off, the DNS drop-in is re-applied, a
+    nothing is rebuilt: the VM is started if it is off, its SSH setup (host certificate when
+    due, sshd drop-in, the SSH CAs user ansible accepts) and the DNS drop-in are re-applied, a
     pending update or reboot is finished, the GUI certificate is renewed in place when it
     expires within 30 days or does not come from the lab root CA, and the checks run.
     Changes to opnsense\ or to
@@ -67,6 +72,11 @@
 .PARAMETER Rebuild
     Delete an existing firewall VM and build it again.
 
+.PARAMETER BreakGlass
+    When OpenBao cannot sign the firewall's SSH host certificate (the vault VM is broken), let the
+    offline SSH CA sign it (LabSsh.ps1, Get-LabSshSigner). Without it the script stops with the
+    reason.
+
 .EXAMPLE
     .\scripts\New-LabFirewall.ps1
     .\scripts\New-LabFirewall.ps1 -Rebuild
@@ -75,7 +85,8 @@
 param(
     [string]$StorageRoot = 'G:\Vagrant',
     [string]$TimeZone = 'Europe/Berlin',
-    [switch]$Rebuild
+    [switch]$Rebuild,
+    [switch]$BreakGlass
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,7 +119,6 @@ $vmTag = 'managed-by=DeployableServer/scripts/New-LabFirewall.ps1'
 $keysDir = Join-Path $projectRoot 'keys'
 $secretsDir = Join-Path $keysDir 'opnsense'
 $sshConfig = Join-Path $keysDir 'ssh_config'
-$knownHosts = Join-Path $keysDir 'known_hosts'
 $openssl = Join-Path $env:ProgramFiles 'Git\mingw64\bin\openssl.exe'
 $bzip2 = Join-Path $env:ProgramFiles 'Git\mingw64\bin\bzip2.exe'
 
@@ -206,11 +216,14 @@ function ConvertTo-Base64([string]$Text) {
 
 # Run a command on the firewall over SSH, as user ansible (keys\ssh_config: firewall = the
 # fixed address 10.10.99.2). No double quotes inside $Command: Windows PowerShell 5.1 does not
-# pass them correctly to native programs.
-function Invoke-FirewallSsh([string]$Command, [switch]$AllowFailure) {
+# pass them correctly to native programs. Get-LabSshConfig (LabSsh.ps1) renews the PC's SSH
+# certificate when it is due. $Options: extra ssh options (a connection pinned to the firewall's
+# stored host key, before it has a host certificate).
+function Invoke-FirewallSsh([string]$Command, [switch]$AllowFailure, [string[]]$Options = @()) {
+    $config = Get-LabSshConfig
     # Remote programs may write to stderr; only the exit code decides (see Invoke-OpenSsl).
     $ErrorActionPreference = 'Continue'
-    $output = & ssh -F $sshConfig -o LogLevel=ERROR -o ConnectTimeout=10 firewall $Command
+    $output = & ssh -F $config -o LogLevel=ERROR -o ConnectTimeout=10 @Options firewall $Command
     if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) {
         throw "SSH command on the firewall failed (exit code $LASTEXITCODE): $Command"
     }
@@ -451,6 +464,7 @@ function Get-GuiCertificate {
 # 4a. Render config.xml from the template and check it. Returns the XML text (it holds password
 #     hashes and the GUI key, so it is not written to keys\; New-SeedIso puts it into the ISO).
 function New-FirewallConfig($Secrets, $Certificate) {
+    [void](Write-LabSshTrustFiles)
     $vmIp = @{}
     foreach ($vm in $lab.vms) { $vmIp[$vm.name] = $vm.ip }
     # Text from lab.json that ends up inside XML elements (descriptions) is escaped, so a "&"
@@ -556,7 +570,9 @@ function New-FirewallConfig($Secrets, $Certificate) {
         '{{LAN_POOL_END}}'                = ($lab.firewall.lanIp -replace '\.\d+$', '.199')
         '{{ROOT_PASSWORD_HASH}}'          = Get-PasswordHash $Secrets.RootPassword
         '{{ANSIBLE_PASSWORD_HASH}}'       = Get-PasswordHash $Secrets.AnsiblePassword
-        '{{ANSIBLE_AUTHORIZED_KEYS_B64}}' = ConvertTo-Base64 (Get-Content -Raw (Join-Path $keysDir 'ansible_ed25519.pub')).Trim()
+        # The lab's SSH CAs (keys\ssh\firewall_authorized_keys, LabSsh.ps1), so the PC's and
+        # ansible-control's certificates work from the very first boot.
+        '{{ANSIBLE_AUTHORIZED_KEYS_B64}}' = ConvertTo-Base64 ([IO.File]::ReadAllText($script:LabSshFirewallKeys))
         '{{ANSIBLE_APIKEYS}}'             = "$($Secrets.ApiKey)|$(Get-PasswordHash $Secrets.ApiSecret)"
         '{{CA_REFID}}'                    = New-RefId
         '{{GUI_CERT_REFID}}'              = New-RefId
@@ -664,6 +680,10 @@ function New-FirewallVm {
 }
 
 # 6. First boot: answer the configuration importer, then connect the network adapters.
+#    Returns the fingerprint of the firewall's ed25519 SSH host key as OPNsense prints it on the
+#    console right before the login prompt (" SSH:   SHA256 <fingerprint> (ED25519)"): the
+#    console is a pipe on this PC that nothing on the network can write to, so this is the
+#    trustworthy first sight of the key (Get-FirewallHostKey).
 function Invoke-FirstBoot {
     New-Item -ItemType Directory -Force -Path (Split-Path $serialLog) | Out-Null
     [IO.File]::WriteAllText($serialLog, "=== First boot $(Get-Date -Format s) ===`n")
@@ -688,10 +708,80 @@ function Invoke-FirstBoot {
         }
         # Boot continues with our config.xml. If an interface named in it did not exist,
         # OPNsense would stop at an interactive interface assignment instead.
-        Wait-SerialText 'login:' 600 'Default interfaces not found|Valid interfaces are' | Out-Null
+        $boot = Wait-SerialText 'login:' 600 'Default interfaces not found|Valid interfaces are'
         Write-Host 'Console:     boot finished (login prompt)'
+        $fingerprint = [regex]::Matches($boot, 'SSH:\s+(SHA256) ([A-Za-z0-9+/]{43}) \(ED25519\)') | Select-Object -Last 1
+        if (-not $fingerprint) { return $null }
+        return "SHA256:$($fingerprint.Groups[2].Value)"
     }
     finally { Close-SerialConsole }
+}
+
+# 7. SSH, before anything else is done over it.
+#
+# The firewall's verified host key (keys\ssh\hosts\firewall.pub). On first contact it is the key
+# the firewall presents (ssh-keyscan) - but only if its fingerprint equals the one the firewall
+# printed on its serial console when it booted ($FirstBootFingerprint, or the serial console log
+# of an earlier first boot). An impostor on the LabHost network cannot fake that, so no host key
+# is ever trusted "on first use".
+function Get-FirewallHostKey([string]$FirstBootFingerprint) {
+    if (Test-Path (Get-LabSshHostKeyFile 'firewall')) { return }
+    $expected = $FirstBootFingerprint
+    if (-not $expected -and (Test-Path $serialLog)) {
+        $line = Select-String -Path $serialLog -Pattern 'SSH:\s+SHA256 ([A-Za-z0-9+/]{43}) \(ED25519\)' | Select-Object -Last 1
+        if ($line) { $expected = "SHA256:$($line.Matches[0].Groups[1].Value)" }
+    }
+    if (-not $expected) { throw "The firewall's SSH host key fingerprint is not in its serial console log ($serialLog), so its key cannot be verified. Rebuild it: .\scripts\New-LabFirewall.ps1 -Rebuild" }
+    $ErrorActionPreference = 'Continue'
+    $scan = @(& $script:LabSshKeyscan -t ed25519 $lab.firewall.hostIp 2>$null)
+    $ErrorActionPreference = 'Stop'
+    $line = $scan | Where-Object { $_ -match '^\S+ ssh-ed25519 [A-Za-z0-9+/]+=*$' } | Select-Object -First 1
+    if (-not $line) { throw "ssh-keyscan got no ed25519 host key from $($lab.firewall.hostIp)." }
+    $key = (($line -split ' ')[1..2]) -join ' '
+    $actual = Get-LabSshFingerprint $key
+    if ($actual -ne $expected) { throw "The SSH host key at $($lab.firewall.hostIp) ($actual) is not the one the firewall printed on its console ($expected). Is another machine answering on that address?" }
+    Save-LabSshHostKey 'firewall' $key
+    Write-Host "SSH:         firewall host key $actual (matches its serial console)"
+}
+
+# Everything SSH on the firewall: host key (above), host certificate (signed when due), the sshd
+# drop-in from opnsense\sshd_config.d (jump host limited to SSH of the lab VMs) and the SSH CAs
+# that user ansible accepts (opnsense\lab-ssh-trust.php). It works over a connection pinned to
+# the stored host key, so it also repairs a firewall whose certificate is missing or expired.
+# Ends with a fully checked connection; every later SSH call relies on that.
+function Update-FirewallSsh([string]$FirstBootFingerprint) {
+    Get-FirewallHostKey $FirstBootFingerprint
+    [void](Update-LabSshHostCertificateFile 'firewall')
+    [void](Write-LabSshTrustFiles)
+    $controlIp = ($lab.vms | Where-Object { $_.name -eq 'ansible-control' }).ip
+    $permitOpen = @($lab.vms | ForEach-Object { "$($_.ip):22"; "$($_.name).$($lab.domain):22" })
+    $dropIn = [IO.File]::ReadAllText((Join-Path $projectRoot 'opnsense\sshd_config.d\20-lab-ssh.conf'))
+    $dropIn = $dropIn.Replace('{{ALLOW_USERS}}', "ansible@$($lab.firewall.pcIp) ansible@$controlIp").Replace('{{PERMIT_OPEN}}', ($permitOpen -join ' '))
+    if ($dropIn -match '\{\{[A-Z_]+\}\}') { throw "Unreplaced placeholder in 20-lab-ssh.conf: $($Matches[0])" }
+    $work = New-LabSshTempDir
+    try {
+        $pinned = Get-LabSshPinnedOptions 'firewall' $work
+        [void](Write-LabSshFile (Join-Path $work '20-lab-ssh.conf') $dropIn.Split("`n"))
+        $remote = "$(@(Invoke-FirewallSsh 'mktemp -d /tmp/lab-sshd.XXXXXX' -Options $pinned)[-1])".Trim()
+        if ($remote -notmatch '^/tmp/lab-sshd\.[A-Za-z0-9]+$') { throw "Unexpected answer from the firewall: $remote" }
+        try {
+            Copy-LabSshFile @((Join-Path $script:LabSshHostsDir 'firewall-cert.pub'), (Join-Path $work '20-lab-ssh.conf'), (Join-Path $projectRoot 'opnsense\lab-sshd-files.sh')) "firewall:$remote/" -Options $pinned
+            $answer = Invoke-FirewallSsh "sudo /bin/sh $remote/lab-sshd-files.sh $remote/firewall-cert.pub $remote/20-lab-ssh.conf 2>&1" -Options $pinned
+            if ("$answer" -match 'changed') {
+                # Restarts only the listening sshd (OPNsense's own service command); this session and
+                # all others keep running, and the new certificate and drop-in apply to new logins.
+                Invoke-FirewallSsh 'sudo configctl openssh restart 2>&1' -Options $pinned | Out-Null
+                Start-Sleep -Seconds 2
+                Wait-TcpPort $lab.firewall.hostIp 22 60
+                Write-Host 'SSH:         host certificate and sshd drop-in installed, sshd restarted'
+            }
+        }
+        finally { Invoke-FirewallSsh "rm -rf $remote" -Options $pinned -AllowFailure | Out-Null }
+        Set-LabFirewallSshTrust -Options $pinned
+    }
+    finally { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $work }
+    if (-not (Test-LabSshStrictLogin 'firewall')) { throw 'The firewall does not pass the strict SSH check (host certificate, PC certificate) after its SSH setup.' }
+    Write-Host 'SSH:         firewall checked: host certificate valid, certificate login works'
 }
 
 # 7a. The adapters must have come up as hn0/hn1/hn2 in the order they were added.
@@ -708,6 +798,7 @@ function Test-AdapterMapping {
 
 # 7b. Split-horizon DNS drop-in (not part of config.xml, so it is installed on every run).
 function Install-DnsDropIn {
+    $sshConfig = Get-LabSshConfig
     $dropIn = Join-Path $projectRoot 'opnsense\dnsmasq.conf.d\10-lab.conf'
     & scp -q -F $sshConfig -o LogLevel=ERROR $dropIn 'firewall:/tmp/10-lab.conf'
     if ($LASTEXITCODE -ne 0) { throw 'Copying the DNS drop-in to the firewall failed.' }
@@ -827,6 +918,7 @@ function Test-GuiCertificate {
 #     restarts. The same thing as uploading a certificate under System > Trust in the GUI, as
 #     code. No rebuild needed, for example when the certificate expires (397 days).
 function Update-GuiCertificate {
+    $sshConfig = Get-LabSshConfig
     $name = "firewall.$($lab.domain)"
     # The web GUI starts after sshd (after a boot, the script has only waited for port 22). Only
     # a certificate that is actually served and found wanting is a reason for a new key; a port
@@ -904,6 +996,10 @@ if ($existing -and $existing.Notes -ne $vmTag) {
     # not create), so the way out is a deliberate manual step.
     throw "A VM named '$vmName' exists that this script did not build (an old Vagrant firewall?). Check what it is, then delete it yourself in Hyper-V Manager or with: Remove-VM -Name $vmName -Force (and its disk folder)."
 }
+# -BreakGlass reaches the signing code through the environment, for this run only.
+$previousBreakGlass = $env:LAB_SSH_BREAKGLASS
+if ($BreakGlass) { $env:LAB_SSH_BREAKGLASS = '1' }
+try {
 # Also on re-runs: moves plain-text secrets of earlier versions into DPAPI.
 Move-OldSecrets
 if ($existing -and -not $Rebuild) {
@@ -911,6 +1007,7 @@ if ($existing -and -not $Rebuild) {
     Remove-SeedIso
     if ($existing.State -ne 'Running') { Start-VM -VM $existing; Write-Host "VM:          $vmName started" }
     Wait-TcpPort $lab.firewall.hostIp 22 300
+    Update-FirewallSsh
 }
 else {
     # Everything that depends on the repository's content (image, secrets, certificate, the
@@ -922,22 +1019,34 @@ else {
     $secrets = Get-Secrets
     $certificate = Get-GuiCertificate
     $configXml = New-FirewallConfig $secrets $certificate
+    # Once OpenBao signs the SSH certificates, the new firewall's host certificate comes from it,
+    # through the new firewall's port forward to the vault VM. So the vault VM must run (after a
+    # Windows restart it is off); started here, before the old firewall is deleted.
+    if ((Test-LabSshOpenBaoTrusted) -and -not $BreakGlass -and $env:LAB_SSH_BREAKGLASS -ne '1') {
+        $vaultVm = Get-LabSshHyperVVm 'vault'
+        if (-not $vaultVm) { throw 'OpenBao signs the SSH host certificates, but the vault VM does not exist. Nothing was deleted; rebuild with -BreakGlass to let the offline SSH CA sign.' }
+        if ($vaultVm.State -ne 'Running') { Start-VM -VM $vaultVm; Write-Host 'VM:          vault started (OpenBao signs the new host certificate)' }
+    }
     if ($existing) {
         Write-Host "Rebuild:     removing the existing $vmName VM"
         Stop-VM -VM $existing -TurnOff -Force
         Remove-VM -VM $existing -Force
         if (Test-Path $vmDir) { Remove-Item -Recurse -Force $vmDir }
     }
+    # A new firewall has new SSH host keys: the old key goes into the revocation list, so a copy
+    # of it can never pass for the new firewall (LabSsh.ps1, Revoke-LabSshHostKey).
+    Revoke-LabSshHostKey 'firewall'
     try {
         New-SeedIso $configXml
         $configXml = $null
         New-FirewallVm
-        Invoke-FirstBoot
+        $bootFingerprint = Invoke-FirstBoot
     }
     finally { Remove-SeedIso }
-    # A new firewall has new SSH host keys; this file only records lab hosts, so start fresh.
-    Remove-Item -Force -ErrorAction SilentlyContinue $knownHosts
     Wait-TcpPort $lab.firewall.hostIp 22 300
+    Update-FirewallSsh $bootFingerprint
+    # ansible-control must refuse the old firewall's key at once (LabSsh.ps1, Send-LabSshKrl).
+    Send-LabSshKrl
     Test-AdapterMapping
 }
 Install-DnsDropIn
@@ -950,4 +1059,6 @@ foreach ($old in 'rendered', 'gui.key', 'gui.crt') {
     if (Test-Path $oldPath) { Remove-Item -Recurse -Force $oldPath; Write-Host "Cleanup:     keys\opnsense\$old removed (no longer used)" }
 }
 Test-Firewall
+}
+finally { $env:LAB_SSH_BREAKGLASS = $previousBreakGlass }
 Write-Host "Firewall ready: https://firewall.$($lab.domain) (user root; password to the clipboard: .\scripts\Show-LabSecret.ps1 -Pc opnsense/root-password)"
