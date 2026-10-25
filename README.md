@@ -243,7 +243,9 @@ and OpenBao, tokens and certificates in
 - **Calls**: the call's signalling (who is in the call, access tokens) runs over
   HTTPS and a WebSocket through `10.10.99.3:443` and Traefik. The audio and
   video (WebRTC) go from the browser directly to LiveKit: UDP `10.10.99.3:7882`
-  (or TCP `7881` as fallback), forwarded unchanged to the matrix VM. Details in
+  (or TCP `7881` as fallback), forwarded unchanged to the matrix VM. Step by
+  step in [A call and a chat message](#a-call-and-a-chat-message-step-by-step),
+  the concepts in
   [Calls: MatrixRTC, SFU, ICE and the node IP](#calls-matrixrtc-sfu-ice-and-the-node-ip).
 - **Server to server inside the lab**: MAS on the matrix VM fetches Keycloak's
   discovery document, exchanges login codes for tokens and reads user details;
@@ -368,6 +370,179 @@ ID of its own).
 Logout goes the other way: when a Keycloak session ends, Keycloak tells MAS
 server to server (back-channel logout,
 `https://matrix.lab.internal/auth/upstream/backchannel-logout/<ULID>`).
+
+### A call and a chat message, step by step
+
+Two everyday flows with every token, address and port, as the lab runs them.
+The firewall rules they rely on are in
+[What is allowed where](#what-is-allowed-where).
+
+Every HTTPS request from the browser to the matrix VM below goes the same way,
+which the diagrams do not repeat (the Keycloak login page has its own address,
+`10.10.99.4`): to `10.10.99.3:443` (the published address of the
+matrix VM, what `matrix.lab.internal`, `element.lab.internal` and `lab.internal`
+resolve to for the PC), port forward (DNAT) to `10.10.10.30:443`, Traefik, which
+picks the service by host name and path. The firewall only forwards packets; TLS
+ends at Traefik.
+
+**A call.** Alice starts a call in Element. The browser needs a ticket for the
+call (a LiveKit token) before any audio or video flows:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    box Your PC 10.10.99.1
+        participant B as Element in the browser
+    end
+    box Firewall
+        participant FW as DNS 10.10.99.2, DNAT 10.10.99.3
+    end
+    box matrix VM 10.10.10.30
+        participant T as Traefik 443
+        participant S as Synapse
+        participant J as LiveKit JWT service
+        participant L as LiveKit SFU
+    end
+    B->>FW: DNS query for matrix.lab.internal (UDP 53)
+    FW-->>B: 10.10.99.3, the published address (split horizon)
+    B->>T: GET lab.internal/.well-known/matrix/client
+    T-->>B: rtc_foci names the JWT service (matrix.lab.internal/livekit-jwt-service)
+    B->>S: request an OpenID token, with Alice's Matrix access token (via Traefik)
+    S-->>B: OpenID token, short-lived, proves @alice:lab.internal
+    B->>J: OpenID token and the call's room (via Traefik)
+    J->>S: is this OpenID token valid? (federation port 8448, openid only, inside the VM)
+    S-->>J: yes, @alice:lab.internal
+    J->>L: create the call's room (LiveKit server API, via Traefik to LiveKit's port 7880)
+    J-->>B: LiveKit JWT and the LiveKit URL
+    B->>L: WebSocket to /livekit-server, carrying the JWT (via Traefik)
+    Note over L: checks the JWT's signature with the API secret it shares with the JWT service
+    L-->>B: ICE candidates 10.10.99.3 UDP 7882 and TCP 7881
+    B->>FW: audio and video, DTLS-SRTP, UDP to 10.10.99.3 port 7882
+    FW->>L: DNAT with the same port, to 10.10.10.30 port 7882
+    L-->>B: the other participants' audio and video, the same way back
+```
+
+- 3-4: the call service is announced in `.well-known/matrix/client`
+  (`org.matrix.msc4143.rtc_foci`), a static file that MDAD serves on
+  `lab.internal`. Synapse announces the same URL through its RTC transports API
+  (MSC4143), which needs an access token; MDAD keeps the well-known entry
+  because Element Call inside Element Web runs as a widget without a token of
+  its own. Which of the two the pinned Element Web actually reads has not been
+  checked in this lab.
+- 5-9: the OpenID token is Synapse's own short-lived proof of a user's Matrix
+  ID, not an OIDC token from MAS or Keycloak. The JWT service checks it with the
+  homeserver it names: it reads `https://lab.internal/.well-known/matrix/server`
+  (answer: `matrix.lab.internal:8448`) and asks
+  `/_matrix/federation/v1/openid/userinfo` there. Port 8448 is Traefik's
+  federation entrypoint, which passes the request on to Synapse's federation
+  listener; with federation off, that listener serves only the `openid`
+  resource. Both requests stay on the matrix VM, and 8448 is not published to
+  the PC.
+- 10: LiveKit does not create rooms by itself here (`room.auto_create` is off in
+  MDAD's configuration): the JWT service creates the call's room on LiveKit, and
+  only for users of the homeservers it serves in full (here `lab.internal`). It
+  reaches LiveKit's API through its public URL, so this request also goes
+  through Traefik; both run on the matrix VM, no firewall is involved.
+- 11-12 and the note after them: the LiveKit token is a JWT with a
+  pseudonymous participant ID (a hash, not the Matrix ID in clear), the
+  LiveKit room (also a hash, not the Matrix room ID), what the participant may
+  do (join and subscribe; publish only for users of `lab.internal`; never
+  create rooms) and until when (one hour). The JWT service signs it with
+  HMAC-SHA256 using the API secret it shares with LiveKit; the API key in the
+  token names that secret. MDAD derives key and secret from the master secret
+  (`matrix_homeserver_generic_secret_key`, which the lab keeps in OpenBao as
+  `matrix/generic-secret-key`); on the matrix VM they are written into
+  LiveKit's `config.yaml` and the JWT service's `env` file. The browser carries
+  the token to LiveKit itself; LiveKit checks the signature and never asks the
+  JWT service back. Like a ticket with a stamp
+  that cannot be forged: the box office issues it, the door only checks the
+  stamp. Whoever knows the secret can print tickets, so it is a secret like any
+  other.
+- 13-16: LiveKit announces the published address 10.10.99.3, not its own
+  (`livekit_server_config_rtc_node_ip`), and the firewall forwards 7882/udp and
+  7881/tcp with the same port numbers, so the browser's media reach LiveKit
+  directly. LiveKit, a selective forwarding unit (SFU), passes each stream on to
+  the other participants without mixing it. No TURN server is needed: the PC
+  reaches LiveKit directly
+  ([Calls](#calls-matrixrtc-sfu-ice-and-the-node-ip) explains SFU, ICE and TURN).
+
+**A chat message.** Alice writes to Bob in an encrypted room (Element normally
+turns encryption on for direct messages and private rooms; the server does not
+enforce it, Synapse's `encryption_enabled_by_default_for_room_type` stays
+`off`). The tokens prove *who* sends; the
+end-to-end encryption makes sure that nobody in between can *read* it:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    box Your PC 10.10.99.1
+        participant A as Alice's Element
+        participant Bo as Bob's Element
+    end
+    box matrix VM 10.10.10.30
+        participant M as MAS
+        participant S as Synapse
+    end
+    box keycloak VM 10.10.10.40
+        participant K as Keycloak
+    end
+    Note over A,K: Sign in, in short (every step in The login flow above)
+    A->>M: sign in (via Traefik)
+    M-->>A: redirect to Keycloak
+    A->>K: login form, user name and password (10.10.99.4, DNAT to 10.10.10.40)
+    K-->>A: redirect back to MAS with a one-time code
+    A->>M: the code (via Traefik)
+    M->>K: code, client secret and PKCE verifier (back channel on LabNet, no firewall)
+    K-->>M: tokens (MAS then asks Keycloak's userinfo for the user's details)
+    M-->>A: Matrix access token (valid for a limited time) and refresh token
+    Note over A,Bo: Earlier, Alice's Element sent<br>the room key to each of Bob's<br>devices, encrypted for that<br>device (Olm, to-device<br>messages through Synapse)
+    Note over A: encrypts the message with the room key (Megolm)
+    A->>S: m.room.encrypted event with the access token (via Traefik)
+    S->>M: is this access token valid? (introspection, inside the VM)
+    M-->>S: yes, @alice:lab.internal
+    Bo->>S: sync with Bob's own access token (via Traefik)
+    S-->>Bo: the event, ciphertext only
+    Note over Bo: decrypts it with the room key
+```
+
+- 1-8: only Keycloak sees the password; Keycloak's own tokens stay between
+  Keycloak and MAS. Element gets a Matrix access token from MAS, valid for a
+  limited time (MAS's own default; the lab does not set it and has not checked
+  it), and a refresh token with which it quietly gets the next one.
+  (Lab shortcut: the lab users alice and bob sign in with a password only; MFA
+  is on the roadmap.)
+- Before 9 (the notes): the room key reaches Bob's devices before the message,
+  encrypted for each device (Olm). Whether a device really is Bob's is what
+  device verification (cross-signing) is for. Then Element encrypts on Alice's
+  device (Megolm).
+- 9-11: Synapse checks the access token with MAS, stores the event and passes
+  it on. It cannot read it, but it sees the metadata: that Alice wrote to this
+  room, from which device, when and how much, and the room's unencrypted state
+  (members, name, topic).
+- 12-13 and the last note: Bob's Element asks Synapse for news (sync) and
+  decrypts on Bob's device.
+
+What each place sees:
+
+| Place | Sees | Does not see |
+|---|---|---|
+| Firewall | addresses, ports, sizes, times of what it forwards, and every DNS name the PC and the lab VMs look up (it is their DNS server) | anything inside TLS or the media's DTLS-SRTP |
+| Traefik (matrix VM) | the access tokens (TLS ends here), who writes to which room, when, how much | the message text |
+| Synapse | the same, plus the room's unencrypted state (members, name, topic); stores everything | the message text |
+| MAS | who is signed in, which tokens are valid | messages |
+| Keycloak | the password at sign-in, the sessions | messages, MAS's tokens |
+| LiveKit | the call's media streams (DTLS-SRTP ends here, hop by hop) and, unless Element Call's media encryption is on (see below), their content; pseudonymous participant IDs (hashes made by the JWT service), their addresses and when they join | chat messages |
+| Alice's and Bob's devices | everything | |
+
+Element Call is designed to add end-to-end encryption to the media of calls in
+encrypted rooms too, so that LiveKit forwards frames it cannot read; this has
+not been checked in this lab yet. In the lab, Traefik, Synapse, MAS and LiveKit
+share one VM: whoever is root on the matrix VM sees everything in the Traefik,
+Synapse, MAS and LiveKit rows
+(chat messages still only as ciphertext). An enterprise splits them across zones
+(a reverse proxy and the SFU in a DMZ, Synapse and MAS behind an internal
+firewall, the database and the identity provider further inside), so that taking
+over the part that faces the internet does not open the rest.
 
 ### Where secrets and certificates come from
 
@@ -865,6 +1040,49 @@ Destination NAT (OPNsense 26.7's page for port forwards; older OPNsense versions
 and most tutorials call it Port Forward). Outbound NAT is under Firewall > NAT >
 Source NAT. The rules pf actually runs are shown by
 `.\lab.ps1 connect firewall 'sudo pfctl -sr'`.
+
+The same rules as a picture: who may open a connection to whom, and on which
+ports (the table below has every row). An arrow is the direction a connection
+is opened in; replies to it pass automatically, because pf is stateful. The
+SSH jump is not a pf rule: sshd on the firewall allows forwarding only to port
+22 of the lab VMs (`PermitOpen`), and those connections leave from the
+firewall's LAN address.
+
+```mermaid
+flowchart LR
+    subgraph PC["Your PC, LabHost 10.10.99.1"]
+        browser["Browser, ssh, lab.ps1"]
+    end
+    subgraph FW["Firewall (OPNsense, default deny)"]
+        host["HOST 10.10.99.2<br>web GUI, SSH jump host, DNS"]
+        vip3["10.10.99.3<br>published matrix"]
+        vip4["10.10.99.4<br>published keycloak"]
+        vip5["10.10.99.5<br>published vault"]
+        lan["LAN 10.10.10.1<br>DHCP, DNS, SSH, API"]
+        wan["WAN, Default Switch<br>outbound NAT"]
+    end
+    subgraph LABNET["LabNet 10.10.10.0/24, one switch"]
+        control["ansible-control<br>10.10.10.10"]
+        matrix["matrix 10.10.10.30<br>Traefik 443 and 80, LiveKit 7881 and 7882"]
+        keycloak["keycloak 10.10.10.40<br>Keycloak 443"]
+        vault["vault 10.10.10.50<br>OpenBao 8200, nginx 80"]
+    end
+    internet(("Internet"))
+
+    browser -->|22, 443, 53 tcp and udp, ping| host
+    browser -->|443, 80, 7881 tcp, 7882 udp| vip3
+    browser -->|443| vip4
+    browser -->|8200, 80| vip5
+    vip3 -->|DNAT, same ports| matrix
+    vip4 -->|DNAT 443| keycloak
+    vip5 -->|DNAT 8200 and 80| vault
+    lan -->|SSH jump via sshd, only port 22 of the lab VMs| LABNET
+    LABNET -->|any port| lan
+    LABNET -->|internet only, NAT to the WAN address| wan
+    wan --> internet
+    matrix <-->|same switch, no firewall, as between all lab VMs| keycloak
+    LABNET --x|blocked and logged, the whole HOST network and the Default Switch network| PC
+```
 
 | From | To | Allowed? |
 |---|---|---|
