@@ -65,3 +65,18 @@ lab_mas_keycloak_client_id: matrix-authentication-service
 # every "this Keycloak user is that Matrix user" link under it. NEVER change it after the first
 # login: all links would be lost. Any valid ULID works; this one was generated once for the lab.
 lab_mas_keycloak_provider_id: 01M5MXJ0M87K1Q6HEADGFT47CR
+
+# ---------------------------------------------------------------------------------------------
+# ACME external account binding (EAB) for Traefik on the Matrix VM
+# ---------------------------------------------------------------------------------------------
+# OpenBao's ACME server accepts only accounts bound to a key it handed out beforehand
+# (eab_policy always-required, playbooks/vars/openbao-config.yml). The key's way, in one
+# lab.ps1 deploy matrix:
+#   matrix-prepare.yml   mints a key when Traefik needs a new ACME account and leaves it in
+#                        lab_acme_eab_file, readable by root only, on the Matrix VM
+#   matrix/lab-setup.yml reads it there and puts it into Traefik's ACME configuration (vars.yml)
+#   matrix-check.yml     once Traefik serves certificates from the current CA: removes the used
+#                        key and writes lab_acme_bound_marker ("the account in acme.json is a
+#                        bound one"). The marker lies next to acme.json and goes with it.
+lab_acme_eab_file: /root/lab-acme-eab.json
+lab_acme_bound_marker: /matrix/traefik/ssl/lab-acme-account-bound

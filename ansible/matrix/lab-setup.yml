@@ -14,7 +14,9 @@
 # MDAD's plays, imported afterwards, find vault_matrix_homeserver_generic_secret_key etc. as if
 # they were defined in the inventory - but nothing is written to disk on ansible-control. The
 # values do end up in the services' configuration files on the Matrix VM, where the running
-# services need them.
+# services need them. The second play also picks up the ACME binding key that
+# matrix-prepare.yml leaves on the Matrix VM when Traefik needs a new ACME account (vars.yml,
+# section TLS).
 # Enterprise equivalent: community.hashi_vault lookups in the inventory, or an inventory plugin
 # / Vault Agent that renders the variables at run time.
 #
@@ -51,6 +53,31 @@
         vault_matrix_homeserver_generic_secret_key: "{{ hostvars['localhost'].lab_secrets['matrix/generic-secret-key'] }}"
         vault_postgres_connection_password: "{{ hostvars['localhost'].lab_secrets['matrix/postgres'] }}"
         vault_mas_keycloak_client_secret: "{{ hostvars['localhost'].lab_secrets['keycloak/clients/matrix-authentication-service'] }}"
+      no_log: true
+      tags: [always]
+
+    # ACME external account binding: when matrix-prepare.yml has minted a key for Traefik's next
+    # ACME account, it lies in a root-only file on this VM (lab_acme_eab_file, from
+    # lab-shared.yml). As the fact lab_acme_eab it goes into Traefik's ACME settings (vars.yml,
+    # section TLS) for this run. Without the file, Traefik keeps the account it has.
+    - name: Is there a binding key for Traefik's next ACME account?
+      ansible.builtin.stat:
+        path: "{{ lab_acme_eab_file }}"
+      register: lab_acme_eab_stat
+      tags: [always]
+
+    - name: Read the binding key
+      ansible.builtin.slurp:
+        src: "{{ lab_acme_eab_file }}"
+      register: lab_acme_eab_content
+      when: lab_acme_eab_stat.stat.exists
+      no_log: true
+      tags: [always]
+
+    - name: The binding key as a variable for MDAD
+      ansible.builtin.set_fact:
+        lab_acme_eab: "{{ lab_acme_eab_content.content | b64decode | from_json }}"
+      when: lab_acme_eab_stat.stat.exists
       no_log: true
       tags: [always]
 

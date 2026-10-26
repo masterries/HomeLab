@@ -23,7 +23,9 @@
 #      in OpenBao (created on the very first run), remove the old plain-text secret files.
 #   2. On the Matrix VM: trust the lab root CA, check DNS, check that Keycloak is reachable and
 #      trusted from there (MAS will call it), and that OpenBao's ACME directory is (Traefik will
-#      get its certificates there).
+#      get its certificates there). Traefik starts over with ACME when its certificates come
+#      from an older CA or its account is not bound to a key from OpenBao; then a new binding
+#      key is minted for its next account (ACME external account binding).
 #
 # Secrets: never on disk on ansible-control. This playbook only makes sure they exist in OpenBao;
 # MDAD's run (lab-setup.yml) reads them into memory again.
@@ -145,6 +147,7 @@
           lab_mas_keycloak_provider_id: {{ lab_mas_keycloak_provider_id | to_json }}
           lab_mas_keycloak_client_id: {{ lab_mas_keycloak_client_id | to_json }}
           lab_vault_url: {{ lab_vault_url | to_json }}
+          lab_acme_eab_file: {{ lab_acme_eab_file | to_json }}
 
     # --- Secrets in OpenBao -----------------------------------------------------------------
     # An installation that already exists (MDAD keeps everything below /matrix on the VM) was
@@ -243,13 +246,24 @@
         keycloak_discovery.status != 200
         or keycloak_discovery.json.issuer != lab_keycloak_issuer
 
-    # Traefik (in its container) will ask this directory for certificates.
-    - name: OpenBao's ACME directory is reachable and trusted from the Matrix VM
+    # Traefik (in its container) will ask this directory for certificates. It must also require
+    # external account binding already (lab.ps1 deploy vault applies that): otherwise a new
+    # account Traefik registers below would be an unbound one, and OpenBao would refuse it as
+    # soon as the binding is switched on.
+    - name: OpenBao's ACME directory is reachable and trusted from the Matrix VM, and requires account binding
       ansible.builtin.uri:
         url: "{{ lab_vault_url }}/v1/pki_int/roles/acme-matrix/acme/directory"
         return_content: true
       register: acme_directory
       failed_when: acme_directory.status != 200 or acme_directory.json.newOrder is not defined
+
+    - name: OpenBao's ACME server requires external account binding
+      ansible.builtin.assert:
+        that: acme_directory.json.meta.externalAccountRequired | default(false)
+        fail_msg: >-
+          OpenBao's ACME directory does not require external account binding yet. Apply the
+          OpenBao configuration first (.\lab.ps1 deploy vault), then deploy Matrix again.
+        quiet: true
 
     # The certificate files from before ACME (issued by the old lab CA, copied by MDAD's "aux"
     # role). Removed only once Traefik has its ACME store (acme.json), i.e. from the second
@@ -304,7 +318,124 @@
         - traefik_served_info.issuer is defined
         - (traefik_served_info.issuer.commonName | default('')) is match('DeployableServer Lab Intermediate CA')
         - traefik_served_info.authority_key_identifier != matrix_issuing_ca_info.subject_key_identifier
+      register: traefik_acme_rotated
       notify: restart traefik
+
+    # --- ACME external account binding (EAB) ---------------------------------------------------
+    # OpenBao accepts only ACME accounts bound to a key it handed out (eab_policy always-required)
+    # and refuses older accounts too, at their next order - a renewal about 60 days later. The
+    # marker says that the account in acme.json was registered with such a key (matrix-check.yml
+    # writes it; group_vars/all.yml shows the key's whole way).
+    - name: Is Traefik's ACME account a bound one?
+      ansible.builtin.stat:
+        path: "{{ lab_acme_bound_marker }}"
+      register: traefik_acme_bound
+
+    # An account from before the binding: start over now, not when its renewal fails.
+    - name: Traefik starts over with ACME when its account is not a bound one
+      ansible.builtin.file:
+        path: /matrix/traefik/ssl/acme.json
+        state: absent
+      when:
+        - traefik_acme_store.stat.exists
+        - not traefik_acme_bound.stat.exists
+      register: traefik_acme_unbound
+      notify: restart traefik
+
+    # No acme.json, or one of the two tasks above removed it: Traefik will register a new
+    # account, and it needs a binding key for that.
+    - name: Does Traefik need a new ACME account?
+      ansible.builtin.set_fact:
+        traefik_acme_new_account: >-
+          {{ not traefik_acme_store.stat.exists
+          or traefik_acme_rotated is changed
+          or traefik_acme_unbound is changed }}
+
+    - name: The marker goes with the old account
+      ansible.builtin.file:
+        path: "{{ lab_acme_bound_marker }}"
+        state: absent
+      when: traefik_acme_new_account
+
+    # A key from an earlier run that Traefik never used (the run stopped before Traefik
+    # registered) still opens a registration: it is deleted in OpenBao before a new one is
+    # minted. A key that was used is gone already (OpenBao deletes it when the account is made).
+    - name: A binding key from an earlier run, if any
+      ansible.builtin.slurp:
+        src: "{{ lab_acme_eab_file }}"
+      register: traefik_acme_old_eab
+      failed_when: false
+      no_log: true
+      when: traefik_acme_new_account and not ansible_check_mode
+
+    - name: That key is deleted in OpenBao
+      ansible.builtin.uri:
+        url: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}/v1/pki_int/eab/{{ (traefik_acme_old_eab.content | b64decode | from_json).id }}"
+        method: DELETE
+        headers:
+          X-Vault-Token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+        ca_path: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+        status_code: [200, 204]
+      # From ansible-control: the run token is bound to its address.
+      delegate_to: "{{ groups['control'][0] }}"
+      become: false
+      register: traefik_acme_old_eab_deleted
+      failed_when: false
+      no_log: true
+      when: traefik_acme_old_eab.content is defined
+
+    # 200 with a warning: no such key (it was used). 403: the run token lacks pki_int/eab/*.
+    - name: OpenBao answered the deletion
+      ansible.builtin.assert:
+        that: traefik_acme_old_eab_deleted.status in [200, 204]
+        fail_msg: >-
+          Deleting the old ACME binding key failed (HTTP {{ traefik_acme_old_eab_deleted.status }}).
+          A 403 means the policy ansible-matrix in OpenBao is older than
+          config\openbao\policies\ansible-matrix.hcl: apply it with .\lab.ps1 deploy vault.
+        quiet: true
+      when: traefik_acme_old_eab_deleted is not skipped
+
+    # POST roles/<role>/acme/new-eab: a key ID and an HMAC key (base64url), valid only for this
+    # role's ACME directory, used once.
+    - name: A new binding key from OpenBao
+      ansible.builtin.uri:
+        url: "{{ lookup('ansible.builtin.env', 'VAULT_ADDR') }}/v1/pki_int/roles/acme-matrix/acme/new-eab"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ lookup('ansible.builtin.env', 'VAULT_TOKEN') }}"
+        ca_path: "{{ lookup('ansible.builtin.env', 'VAULT_CACERT') }}"
+        body_format: json
+        body: {}
+      delegate_to: "{{ groups['control'][0] }}"
+      become: false
+      register: traefik_acme_eab
+      failed_when: false
+      no_log: true
+      when: traefik_acme_new_account and not ansible_check_mode
+
+    - name: OpenBao handed out a binding key
+      ansible.builtin.assert:
+        that:
+          - traefik_acme_eab.status == 200
+          - traefik_acme_eab.json.data.id is defined
+          - traefik_acme_eab.json.data.key is defined
+        fail_msg: >-
+          Minting an ACME binding key failed (HTTP {{ traefik_acme_eab.status }}). A 403 means
+          the policy ansible-matrix in OpenBao is older than
+          config\openbao\policies\ansible-matrix.hcl: apply it with .\lab.ps1 deploy vault.
+        quiet: true
+      when: traefik_acme_eab is not skipped
+
+    # Only root reads it (the MDAD run, as root, puts it into Traefik's configuration).
+    - name: The binding key for Traefik's next account, on the Matrix VM
+      ansible.builtin.copy:
+        dest: "{{ lab_acme_eab_file }}"
+        content: "{{ {'id': traefik_acme_eab.json.data.id, 'key': traefik_acme_eab.json.data.key} | to_json }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: traefik_acme_eab is not skipped
 
     - name: Old certificate files of Traefik removed
       ansible.builtin.file:

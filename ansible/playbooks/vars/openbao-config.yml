@@ -88,5 +88,13 @@ openbao_pki_roles:
 
 # ACME (the protocol of Let's Encrypt): clients prove control of a name over HTTP and get a
 # certificate. Only the role acme-matrix may be used; the role-less default directory is closed
-# ("forbid"). No external account binding in the isolated lab.
-openbao_acme: { enabled: true, allowed_roles: [acme-matrix], allowed_issuers: ["*"], default_directory_policy: forbid, eab_policy: not-required }
+# ("forbid").
+# External account binding (EAB, RFC 8555 section 7.3.4): a new ACME account must be signed with
+# a key that OpenBao handed out beforehand, so not everything that reaches port 8200 can register
+# and order. "always-required" also refuses accounts that were created without such a key.
+# Only the policy ansible-matrix may mint a key (pki_int/roles/acme-matrix/acme/new-eab);
+# matrix-prepare.yml hands one to Traefik when Traefik needs a new account. Each key is used once:
+# OpenBao deletes it when an account registers with it.
+# Enterprise equivalent: EAB credentials from the CA's portal (ZeroSSL, Sectigo, Google Trust
+# Services, an internal step-ca or Vault), issued per server or per team.
+openbao_acme: { enabled: true, allowed_roles: [acme-matrix], allowed_issuers: ["*"], default_directory_policy: forbid, eab_policy: always-required }

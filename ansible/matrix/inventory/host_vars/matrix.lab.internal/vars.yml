@@ -115,14 +115,21 @@ traefik_container_additional_volumes_custom:
     src: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
     dst: /etc/traefik-lab/lab-root-ca-2026.crt
     options: readonly
+lab_traefik_acme:
+  caCertificates:
+    - /etc/traefik-lab/lab-root-ca-2026.crt
+  keyType: EC256
+  certificatesDuration: 2160
+# External account binding (EAB): OpenBao registers an ACME account only when the client signs
+# the registration with a key OpenBao handed out beforehand (key ID "kid" plus an HMAC key).
+# lab_acme_eab is set by lab-setup.yml only in the run that follows matrix-prepare.yml minting
+# such a key, i.e. when Traefik needs a new account; the key is used once, at that
+# registration. In later runs eab is left out again: Traefik keeps its registered account in
+# acme.json. (JSON is valid YAML, so the merged settings go in as one JSON object.)
 traefik_configuration_extension_yaml: |
   certificatesResolvers:
     default:
-      acme:
-        caCertificates:
-          - /etc/traefik-lab/lab-root-ca-2026.crt
-        keyType: EC256
-        certificatesDuration: 2160
+      acme: {{ lab_traefik_acme | combine({'eab': {'kid': lab_acme_eab.id, 'hmacEncoded': lab_acme_eab.key}} if lab_acme_eab is defined else {}) | to_json }}
 
 # The "certs dumper" copies ACME certificates out of acme.json for services that need them as
 # files (a TURN server, mail bridges). None of them runs here.

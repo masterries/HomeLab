@@ -1612,7 +1612,8 @@ It runs eight steps, each of which checks first and then acts only if needed:
      and digits, 24 to 64 characters), the intermediate's mount `pki_int`, its
      CRL, its tidying and the URLs it writes into every certificate, and, once
      an intermediate CA exists, the PKI roles `keycloak`, `acme-matrix`,
-     `firewall-gui` and `web` and ACME for the role `acme-matrix` only. Each
+     `firewall-gui` and `web` and ACME for the role `acme-matrix` only (with
+     external account binding: new ACME accounts need a key from OpenBao). Each
      object is read, compared and written only when a value differs (a second
      run reports `changed=0`); nothing is ever deleted. Its token cannot write a
      policy, a login or a CA, so this plane cannot hand out rights.
@@ -2016,6 +2017,10 @@ the matrix VM only and a run token for the policy `ansible-matrix`:
    rotation, or after OpenBao was rebuilt), it deletes Traefik's ACME store
    `/matrix/traefik/ssl/acme.json` and restarts `matrix-traefik`, so Traefik
    registers with OpenBao's ACME server again and orders new certificates.
+   It does the same for an ACME account that is not recorded as bound
+   (external account binding, below). Whenever Traefik needs a new account,
+   it mints a binding key in OpenBao and leaves it, readable by root only, on
+   the matrix VM for the MDAD run.
    After the preparation, also when it failed, the script takes a snapshot of
    OpenBao (`lab.ps1 backup`, line `Snapshot: ...`): on a first run the
    Matrix secrets have just been generated, and OpenBao is the only place they
@@ -2911,7 +2916,7 @@ profile gets which policy is its `policies` in
 | Profile (what it runs) | Policy of its run token | The token may |
 |---|---|---|
 | `keycloak` (`keycloak.yml`) | `ansible-keycloak` | create and read `lab/keycloak/*`, generate passwords (`lab-alnum-24`, `-48`), have OpenBao sign certificates of the PKI role `keycloak` |
-| `matrix-prepare` (`matrix-prepare.yml`), and MDAD's runs: `matrix`, `matrix-setup`, `mdad` | `ansible-matrix` | create and read `lab/matrix/*`, read (only) the MAS client secret `lab/keycloak/clients/matrix-authentication-service`, generate passwords (`lab-alnum-64`) |
+| `matrix-prepare` (`matrix-prepare.yml`), and MDAD's runs: `matrix`, `matrix-setup`, `mdad` | `ansible-matrix` | create and read `lab/matrix/*`, read (only) the MAS client secret `lab/keycloak/clients/matrix-authentication-service`, generate passwords (`lab-alnum-64`), mint ACME binding keys for Traefik (`pki_int/roles/acme-matrix/acme/new-eab`) and delete an unused one (`pki_int/eab/*`) |
 | `firewall` (`firewall.yml`) | `ansible-firewall` | have OpenBao sign certificates of the PKI role `firewall-gui` (only the name `firewall.<domain>`); no secrets |
 | `hello-nginx` (`hello-nginx.yml`) | `ansible-web` | have OpenBao sign certificates of the PKI role `web`; no secrets |
 | `openbao-config` (`openbao-config.yml`) | `openbao-config`, through the token role `ansible-config` | configure the engines: the KV mount `lab` and its settings, the password policies, the `pki_int` mount with its URLs, revocation list, tidying, PKI roles and ACME. Never a policy, a login, a token role, the SSH CA, a CA's import or choice, a certificate or a secret; the playbook stops unless its token has exactly this policy |
@@ -4075,7 +4080,7 @@ unlocked. Renewal never needs a rebuild.
 
 | Certificate | Issued by; where its key is made | Valid | Renewed | Force a renewal now |
 |---|---|---|---|---|
-| Matrix (`matrix`, `element`, `lab.internal`) | intermediate CA through ACME (role `acme-matrix`); key made by Traefik on the matrix VM, kept in `/matrix/traefik/ssl/acme.json` | 90 days | automatically by Traefik after two thirds of its lifetime (about 30 days before it expires); needs an unsealed OpenBao. After a rotation, `matrix-prepare.yml` makes Traefik start over (below) | rarely needed: `.\lab.ps1 connect matrix 'sudo rm /matrix/traefik/ssl/acme.json && sudo systemctl restart matrix-traefik'`, then `.\lab.ps1 deploy matrix`, whose checks wait up to 3 minutes for certificates from the current intermediate CA. This is by hand what `matrix-prepare.yml` does by itself after a rotation |
+| Matrix (`matrix`, `element`, `lab.internal`) | intermediate CA through ACME (role `acme-matrix`); key made by Traefik on the matrix VM, kept in `/matrix/traefik/ssl/acme.json` | 90 days | automatically by Traefik after two thirds of its lifetime (about 30 days before it expires); needs an unsealed OpenBao. After a rotation, `matrix-prepare.yml` makes Traefik start over (below) | rarely needed: `.\lab.ps1 connect matrix 'sudo rm /matrix/traefik/ssl/acme.json && sudo systemctl restart matrix-traefik'`, then `.\lab.ps1 deploy matrix`: it mints the binding key a new ACME account needs (until then OpenBao refuses Traefik's registration) and waits up to 3 minutes for certificates from the current intermediate CA. This is by hand what `matrix-prepare.yml` does by itself after a rotation |
 | Keycloak (`keycloak.lab.internal`) | intermediate CA, CSR signing (role `keycloak`); key made on the keycloak VM, a new one on every renewal | 1 year | by `lab.ps1 deploy keycloak` when less than 30 days are left (`lab.ps1 up` then runs it by itself) or the certificate is not from the current intermediate CA; Keycloak restarts | `.\lab.ps1 run keycloak.yml -e tls_renew_before=+400d` |
 | hello demo (`hello.lab.internal`) | intermediate CA, CSR signing (role `web`); key made on the hello VM | 1 year | by `hello-nginx.yml`, same rule (not by `lab.ps1 up`) | `.\lab.ps1 run hello-nginx.yml -e tls_renew_before=+400d` |
 | OpenBao (`vault.lab.internal`, port 8200) | offline root; key made on the vault VM and kept across renewals | 397 days | by `lab.ps1 deploy vault` when less than 30 days are left (`lab.ps1 up` then runs it by itself). It reloads OpenBao (`systemctl reload`), which reads the new certificate without sealing | no switch; every run checks the 30 days |
@@ -4894,9 +4899,11 @@ certificate instead of ignoring it.
   token and no Ansible run: proving control of the name *is* the authorisation.
   ACME is switched on for the role `acme-matrix` only; OpenBao's role-less
   default directory is closed (`forbid`), and none of the deployment policies
-  allows signing with that role directly. No external account binding (EAB: a
-  key the CA hands to registered clients beforehand) is required in the
-  isolated lab. Step by step in
+  allows signing with that role directly. External account binding (EAB, a
+  key the CA hands to a registered client beforehand) is required for every
+  ACME account (`eab_policy: always-required`): only a Matrix deployment
+  (policy `ansible-matrix`) can mint such a key, and only when Traefik needs a
+  new account. Step by step in
   [Reverse proxy and TLS termination](#reverse-proxy-and-tls-termination).
 
 Why both: Traefik has an ACME client built in, Keycloak has none. ACME is the
@@ -5586,7 +5593,7 @@ everything else. Each consumer has its own:
 | `openbao-admin` | AppRoles `pc-admin` (the PC) and `recovery` (break-glass); the web UI's tokens (token role `ui-admin`, `lab.ps1 ui`) | everything: administration, reading secrets by hand |
 | `pc-deploy` | AppRole `pc-deploy` (the PC) | creating run tokens through the token role `ansible-run`; taking raft snapshots; signing SSH certificates with the SSH roles `pc`, `ansible-control` and `lab-hosts` (only signing: the SSH CA and its roles are `pc-admin`'s) |
 | `ansible-keycloak` | run token of `keycloak.yml` | create and read `keycloak/...`; generate with `lab-alnum-24` and `-48`; sign with the PKI role `keycloak` |
-| `ansible-matrix` | run token of `matrix-prepare.yml` and of MDAD | create and read `matrix/...`; read (not create) the MAS client secret; generate with `lab-alnum-64` |
+| `ansible-matrix` | run token of `matrix-prepare.yml` and of MDAD | create and read `matrix/...`; read (not create) the MAS client secret; generate with `lab-alnum-64`; mint ACME binding keys (EAB) for the role `acme-matrix` and delete unused ones |
 | `ansible-firewall` | run token of `firewall.yml` | sign with the PKI role `firewall-gui` (the firewall's web GUI), nothing else |
 | `ansible-web` | run token of `hello-nginx.yml` | sign with the PKI role `web`, nothing else |
 | `openbao-config` | token of `openbao-config.yml` (token role `ansible-config`) | OpenBao's configuration plane: the mounts `lab` and `pki_int` and their settings, the password policies, the intermediate's URLs, revocation list and tidying, the PKI roles, ACME; no policies, logins, CAs, certificates or secrets (below) |
@@ -6080,6 +6087,35 @@ comes from an older lab intermediate, it deletes `acme.json` and restarts
 `matrix-traefik`, which registers again and orders new certificates from the
 current one
 ([Certificate lifecycle](#certificate-lifecycle-renewal-maintenance-and-rotation)).
+
+**External account binding (EAB).** Without it, anything that reaches port
+8200 could open an ACME account; only the HTTP-01 challenge would stand
+between it and a certificate. OpenBao therefore requires every account to be
+bound to a key it handed out beforehand (`eab_policy: always-required` in
+[vars/openbao-config.yml](ansible/playbooks/vars/openbao-config.yml)); it also
+refuses accounts created without one, at their next order. The key's way
+through one `lab.ps1 deploy matrix`:
+
+1. `matrix-prepare.yml` decides whether Traefik needs a new account: no
+   `acme.json`, one it just removed after a rotation, or one without the marker
+   `/matrix/traefik/ssl/lab-acme-account-bound` (an account from before the
+   binding). Then it mints a key with the run token (`POST
+   pki_int/roles/acme-matrix/acme/new-eab`: a key ID and an HMAC key, valid for
+   this role's directory only) and writes it to `/root/lab-acme-eab.json`
+   (root only) on the matrix VM. A key from an earlier, failed run is deleted in
+   OpenBao first.
+2. [lab-setup.yml](ansible/matrix/lab-setup.yml) reads the file and puts the key
+   into Traefik's ACME settings (`eab: kid, hmacEncoded`, in
+   [vars.yml](ansible/matrix/inventory/host_vars/matrix.lab.internal/vars.yml)).
+   Traefik signs its registration with it; OpenBao deletes the key at that
+   moment, so it is worth nothing afterwards.
+3. `matrix-check.yml` sees certificates from the current intermediate, removes
+   the used key file and writes the marker. The next deployment leaves the key
+   out of Traefik's configuration again and keeps the account.
+
+Enterprise equivalent: EAB credentials from the CA's portal or API (ZeroSSL,
+Sectigo, Google Trust Services, step-ca, Vault), issued per server or team and
+handed to the ACME client by the deployment, as here.
 
 HTTP/3 is switched off: it would need UDP 443, which the firewall does not
 forward.
@@ -6828,7 +6864,8 @@ DeployableServer/
 |       |-- ansible-keycloak.hcl      keycloak.yml: Keycloak's secrets (write-once), password
 |       |                             generation, certificates of the PKI role keycloak
 |       |-- ansible-matrix.hcl        matrix-prepare.yml and MDAD: the Matrix secrets (write-once),
-|       |                             the MAS client secret (read only), password generation
+|       |                             the MAS client secret (read only), password generation,
+|       |                             ACME binding keys for Traefik
 |       |-- ansible-web.hcl           hello-nginx.yml: only certificates of the PKI role web
 |       |-- openbao-admin.hcl         full administration: AppRoles pc-admin and recovery, the UI's
 |       |                             token role ui-admin
@@ -8754,7 +8791,7 @@ copy them to production.
 | Offline root CA on your everyday PC: its key is an encrypted file (PKCS#8, AES-256) on the same disk as its passphrase (DPAPI); the root also signs OpenBao's own TLS certificate directly, because it must work before and without OpenBao, and a new firewall's first GUI certificate, because the firewall is built before OpenBao exists (from then on the firewall's certificates come from the intermediate) | `lib\LabPki.ps1`, `keys\pki`, `lab.ps1 deploy vault`, `lab.ps1 firewall` | The root on an air-gapped machine or in an HSM, used in a documented key ceremony with several people present, signing only intermediate CAs; intermediate keys in HSMs; servers get certificates from an intermediate through ACME or CSR signing (as here) |
 | OpenBao's identity rests on a hand-written pin on the PC: for `vault.lab.internal` the PC's scripts accept only a certificate that the offline root signed directly (a chain of exactly two, `LabTlsPin3`), which is why the root still signs a server certificate. ansible-control (`openbao-run`, the playbooks) and the browser trust the lab root for OpenBao and rely on the intermediates' name constraint, which excludes `vault.lab.internal` only in intermediates made since that exclusion exists | `LabSecrets.ps1`, `lib\LabPki.ps1`, `lab.ps1 deploy vault` | The secrets manager's TLS certificate from a CA of its own that issues nothing else, every client trusting exactly that CA for it (a dedicated trust store rather than a pin in code), often mutual TLS |
 | Revocation through CRLs only (no OCSP), and no procedure that ever revokes a certificate. Renewals happen only when a script runs, not on a schedule: `lab.ps1 up` (after every Windows restart) checks what is due and runs the script that renews it: OpenBao's own certificate (397 days, renewed 30 days before it expires), the root's CRL (400 days, 60 days before) and the intermediate CA (3 years; a new one 400 days before it expires) through `lab.ps1 deploy vault`, Keycloak's certificate (1 year, 30 days before) through `lab.ps1 deploy keycloak`, the firewall's GUI certificate (1 year from the intermediate, 30 days before, and at once while it does not come from the current intermediate, like a new firewall's first one from the root) through `lab.ps1 deploy firewall`. Only the Matrix certificates (90 days, ACME) renew themselves. No rollover procedure yet for the root (10 years) | `lab.ps1 up`, `LabSecrets.ps1`, `lib\LabPki.ps1`, `lab.ps1 deploy vault`, `tasks/openbao-certificate.yml`, `lab.ps1 deploy firewall`, `firewall.yml` | OCSP or short-lived CRLs published automatically, a revocation process, expiry monitoring with alerts, every certificate renewed automatically on a schedule by an agent or ACME client (cert-manager, certmonger, Vault Agent), planned and rehearsed CA rollovers |
-| ACME without external account binding: anything that reaches port 8200 can register an ACME account; only the HTTP-01 challenge (answered on port 80 of the name's lab address) and the three names of the role `acme-matrix` stand between it and a certificate | `vars/openbao-config.yml`, `lab.ps1 deploy vault` | External account binding (EAB), so that only registered clients can order; the ACME directory reachable only from the server networks |
+| ACME with external account binding, but the binding key is minted by the deployment's run token and lies for one run in Traefik's configuration file on the matrix VM (it is single-use and deleted by OpenBao at registration); the ACME directory itself answers anything that reaches port 8200 | `vars/openbao-config.yml`, `matrix-prepare.yml`, `lab-setup.yml`, `lab.ps1 deploy vault` | EAB keys issued per client through an approval in the CA's portal and delivered by a secrets agent; the ACME directory reachable only from the server networks |
 | Self-built SSH bastion without MFA or session recording, running on the perimeter firewall itself (restricted to certificate logins of `ansible` from the PC and ansible-control, and to forwarding to port 22 of the lab VMs) | `keys\ssh_config`, `lab.ps1 connect`, `config.xml.template`, `opnsense/sshd_config.d/20-lab-ssh.conf` | MFA on the bastion, session recording, often a managed product (e.g. Azure Bastion, AWS Systems Manager Session Manager, Teleport); the bastion is a separate host in a management network |
 | Firewall administration: the GUI user `root` with a random password; one full-admin account `ansible` serves as SSH jump account and REST API user. These passwords and the API key and secret are DPAPI files on the PC (`keys\opnsense\*.dpapi`, with copies in the recovery file), not in OpenBao, because the firewall exists before OpenBao | `lab.ps1 firewall`, `config.xml.template`, `keys\opnsense\` | Personal admin accounts from central authentication (RADIUS, LDAP) with MFA; the local root password only as a break-glass credential in a vault; a separate, restricted jump account (the lab restricts forwarding with `PermitOpen`, but for its one full-admin account) and a separate least-privilege API user per automation tool, with secrets in a vault |
 | Firewall management (GUI, API, SSH, DNS) open to the whole lab network, and on the PC side to 10.10.99.1, your everyday workstation, which also browses the internet | `config.xml.template` | Management interfaces reachable only from a dedicated management network (often out-of-band), never from server networks; administration only from privileged access workstations (PAW) or a management jump host |

@@ -1,8 +1,9 @@
 # matrix-check.yml - checks that a Matrix deployment really works, from inside the lab
 #
 # Where it runs: on ansible-control itself (group control, a local connection), at the end of bin/deploy-matrix (profile "matrix",
-# ".\lab.ps1 deploy matrix"). Read-only: it connects to the services and changes nothing, so it can
-# also run alone: .\lab.ps1 run matrix-check.yml
+# ".\lab.ps1 deploy matrix"). It connects to the services and changes nothing there, so it can
+# also run alone: .\lab.ps1 run matrix-check.yml. Its one change: after a deployment that handed
+# Traefik an ACME binding key, it records the bound account on the Matrix VM (after check 1).
 #
 # What it checks (each one fails the run):
 #   1. Traefik on the Matrix VM serves, for matrix, element and the domain itself, a certificate
@@ -57,6 +58,40 @@
       delay: 5
       loop: "{{ matrix_names }}"
       check_mode: false
+
+    # ACME external account binding (group_vars/all.yml shows the key's whole way). A binding key
+    # on the Matrix VM means matrix-prepare.yml removed Traefik's old account and minted the key
+    # for a new one. OpenBao registers no account without such a key, so certificates from the
+    # current CA (above) prove that Traefik registered with it: the key was used, and the account
+    # in acme.json is a bound one. The marker tells later deployments to keep that account.
+    - name: Did this deployment hand Traefik a binding key?
+      ansible.builtin.stat:
+        path: "{{ lab_acme_eab_file }}"
+      delegate_to: "{{ groups['matrix_servers'][0] }}"
+      become: true
+      register: acme_eab_file
+      check_mode: false
+
+    - name: Traefik's ACME account recorded as a bound one
+      ansible.builtin.copy:
+        dest: "{{ lab_acme_bound_marker }}"
+        content: |
+          Traefik's ACME account in acme.json was registered with an external account binding key
+          from OpenBao (written by ansible/playbooks/matrix-check.yml; removed together with acme.json).
+        owner: root
+        group: root
+        mode: "0644"
+      delegate_to: "{{ groups['matrix_servers'][0] }}"
+      become: true
+      when: acme_eab_file.stat.exists
+
+    - name: The used binding key removed from the Matrix VM
+      ansible.builtin.file:
+        path: "{{ lab_acme_eab_file }}"
+        state: absent
+      delegate_to: "{{ groups['matrix_servers'][0] }}"
+      become: true
+      when: acme_eab_file.stat.exists
 
     - name: Synapse delegates logins to MAS
       ansible.builtin.uri:

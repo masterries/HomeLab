@@ -135,6 +135,11 @@
         url: "{{ openbao_url }}/v1/pki_int/roles/acme-matrix/acme/directory"
         ca_path: "{{ openbao_ca }}"
       register: acme_directory
-      failed_when: acme_directory.json.newNonce is not defined
+      # "externalAccountRequired" in the directory's meta: what every ACME client reads before it
+      # registers. It must follow eab_policy above (vars/openbao-config.yml).
+      failed_when: >-
+        acme_directory.json.newNonce is not defined
+        or (acme_directory.json.meta.externalAccountRequired | default(false))
+        != (openbao_acme.eab_policy in ['new-account-required', 'always-required'])
       when: default_issuer.status == 200
       check_mode: false
