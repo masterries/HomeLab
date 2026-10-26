@@ -32,7 +32,7 @@
 # be taken for it. Enterprise equivalent: one CLI with subcommands (az, kubectl, gh).
 param(
     [ValidateSet('help', 'status', 'up', 'down', 'firewall', 'deploy', 'run', 'maintain', 'connect', 'secret', 'ui',
-        'unseal', 'backup', 'ssh-cert', 'breakglass', 'test', 'host-setup', 'trust', 'recovery', 'mdad-upgrade', 'rancher-upgrade')]
+        'unseal', 'backup', 'ssh-cert', 'breakglass', 'test', 'host-setup', 'trust', 'recovery', 'mdad-upgrade', 'rancher-upgrade', 'fleet-upgrade')]
     [string]$_Command = 'help'
 )
 

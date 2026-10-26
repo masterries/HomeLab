@@ -47,7 +47,7 @@ def main():
     parser.add_argument("--ca-file", required=True)
     parser.add_argument("--lab", required=True)
     parser.add_argument("--routes", required=True)
-    parser.add_argument("--denied-source", help="Optional local source IP outside the networks the management routes allow (RustFS, firewall GUI, Rancher, Hubble UI)")
+    parser.add_argument("--denied-source", help="Optional local source IP outside the networks the management routes allow (RustFS, firewall GUI, Rancher, Hubble UI, Airflow)")
     args = parser.parse_args()
     lab = json.loads(Path(args.lab).read_text())
     routes = json.loads(Path(args.routes).read_text())

@@ -1,0 +1,171 @@
+# fleet/airflow/fleet.yaml - a Fleet bundle: Apache Airflow 3.2.2 with the official Helm chart
+# 1.22.0 as the full CeleryExecutor stack (bundle "homelab-fleet-airflow", GitRepo "homelab").
+#
+# The stack: api-server (UI and REST API, https://airflow.lab.internal), scheduler, dag-processor
+# (parses the DAG files), triggerer (deferred tasks), one Celery worker (runs the tasks), Redis (the
+# queue between scheduler and worker), PostgreSQL (the metadata database; its volume from the
+# local-path bundle). DAGs come from this repository too: git-sync pulls fleet/airflow-dags.
+#
+# The chart is vendored in chart/ (version and SHA-256 in .lab-vendored-version, lab.ps1
+# fleet-upgrade). Fleet reads only this folder, so the chart cannot live in vendor/.
+#
+# No secret is in this file: every secret value is a Kubernetes Secret that
+# ansible/kubernetes/fleet.yml creates from OpenBao before Fleet deploys (the lab-airflow-* names
+# below), so this public repository holds only their names.
+defaultNamespace: airflow
+labels:
+  lab.bundle: airflow
+# Install only once the default StorageClass exists (PostgreSQL's volume claim needs it). The
+# selector matches the label of fleet/local-path/fleet.yaml; Fleet waits for that bundle's Ready.
+dependsOn:
+  - selector:
+      matchLabels:
+        lab.bundle: local-path
+helm:
+  chart: ./chart
+  # Fleet would name the release after the bundle; the chart builds service names from the release
+  # name (airflow-postgresql, airflow-redis), and the connection strings in the secrets use them.
+  releaseName: airflow
+  # The chart's subchart (Bitnami PostgreSQL) is vendored in chart/charts/: never fetch it.
+  disableDependencyUpdate: true
+  # No timeoutSeconds, atomic or waitForJobs: Helm does not wait for anything (no hooks remain,
+  # see the two jobs below); Fleet reports the bundle Ready once every resource is ready, and
+  # ansible/kubernetes/fleet.yml waits for that.
+  values:
+    executor: CeleryExecutor
+
+    # --- Secrets: existing Kubernetes secrets (key names as the chart expects them) ---------------
+    fernetKeySecretName: lab-airflow-fernet           # key fernet-key: encrypts connections and variables
+    apiSecretKeySecretName: lab-airflow-api-secret    # key api-secret-key: signs the UI's sessions
+    jwtSecretName: lab-airflow-jwt                    # key jwt-secret: tokens between the components
+    data:
+      metadataSecretName: lab-airflow-metadata        # key connection: postgresql://... to the database
+      brokerUrlSecretName: lab-airflow-broker         # key connection: redis://... to the queue
+    redis:
+      passwordSecretName: lab-airflow-redis           # key password
+      persistence:
+        enabled: false                                # the queue is transient; a restart loses only queued messages
+      resources:
+        requests: {cpu: 50m, memory: 32Mi}
+        limits: {memory: 128Mi}
+    postgresql:
+      auth:
+        existingSecret: lab-airflow-postgres          # key postgres-password
+      primary:
+        persistence:
+          size: 5Gi                                   # local-path: a directory on one agent
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {memory: 512Mi}
+
+    # --- The two jobs: ordinary objects instead of Helm hooks (the chart's advice for GitOps tools) -
+    # As hooks they would run only after Helm considered the release ready, while every Airflow pod
+    # waits for the database migration: a deadlock. Now everything starts at once, the components'
+    # init containers wait for the migration, and the user job retries until it is done.
+    migrateDatabaseJob:
+      useHelmHooks: false
+      applyCustomEnv: false
+      resources:
+        requests: {cpu: 100m, memory: 384Mi}
+        limits: {memory: 1Gi}
+    createUserJob:
+      useHelmHooks: false
+      applyCustomEnv: false
+      # The first admin's password from a secret: Kubernetes puts it into the command line of the
+      # job's container ($(VAR) is expanded by the kubelet), so it never appears in Git or Helm.
+      env:
+        - name: AIRFLOW_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: lab-airflow-admin
+              key: password
+      defaultUser:
+        username: admin
+        password: "$(AIRFLOW_ADMIN_PASSWORD)"
+      resources:
+        requests: {cpu: 100m, memory: 384Mi}
+        limits: {memory: 1Gi}
+
+    # --- Components: sized for agents with 4 GB, the extras off --------------------------------------
+    statsd: {enabled: false}
+    flower: {enabled: false}
+    pgbouncer: {enabled: false}
+    apiServer:
+      resources:
+        requests: {cpu: 100m, memory: 512Mi}
+        limits: {memory: 1Gi}
+    scheduler:
+      resources:
+        requests: {cpu: 100m, memory: 384Mi}
+        limits: {memory: 1Gi}
+    dagProcessor:
+      resources:
+        requests: {cpu: 100m, memory: 384Mi}
+        limits: {memory: 1Gi}
+    triggerer:
+      persistence:
+        enabled: false
+      resources:
+        requests: {cpu: 50m, memory: 256Mi}
+        limits: {memory: 768Mi}
+    workers:
+      celery:
+        persistence:
+          enabled: false                              # a Deployment, no log volume per worker
+        resources:
+          requests: {cpu: 200m, memory: 768Mi}
+          limits: {memory: 1536Mi}
+    config:
+      core:
+        # Each task records the worker's host name; the UI fetches the task's log from there
+        # (port 8793, the triggerer's 8794). The worker and the triggerer are Deployments, whose
+        # pod names are not in DNS, so they report their pod IP instead.
+        hostname_callable: airflow.utils.net.get_host_ip_address
+      celery:
+        worker_concurrency: 4                         # at most 4 tasks at once (default 16)
+      dag_processor:
+        parsing_processes: 1
+        refresh_interval: 60                          # look for new DAG files every minute (default 300 s)
+      api:
+        base_url: "https://airflow.lab.internal/"
+
+    # --- DAGs: git-sync pulls them from this repository (public, no credentials) -----------------
+    dags:
+      gitSync:
+        enabled: true
+        repo: https://github.com/masterries/HomeLab.git
+        branch: main
+        rev: HEAD
+        ref: main
+        depth: 1
+        subPath: fleet/airflow-dags
+        period: 60s
+
+    # --- The UI through the cluster's ingress -------------------------------------------------------
+    # Traefik terminates TLS with tls-airflow-ingress (a certificate from OpenBao, created by
+    # ansible/kubernetes/fleet.yml) and forwards to the service airflow-api-server, port 8080.
+    ingress:
+      apiServer:
+        enabled: true
+        ingressClassName: traefik
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+        path: /
+        pathType: Prefix
+        hosts:
+          - name: airflow.lab.internal
+            tls:
+              enabled: true
+              secretName: tls-airflow-ingress
+
+# The two jobs delete themselves 5 minutes after they finished (their ttlSecondsAfterFinished).
+# Fleet would then report the bundle as "Modified" (objects missing); ignore them in the
+# comparison. The next Helm upgrade creates them again.
+diff:
+  comparePatches:
+    - apiVersion: batch/v1
+      kind: Job
+      namespace: airflow
+      name: "^airflow-(run-airflow-migrations|create-user)$"
+      operations:
+        - op: ignore

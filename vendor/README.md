@@ -32,6 +32,41 @@ the lab did not write itself lives here, unchanged, at one pinned version
 | Used by | `.\lab.ps1 deploy k8s`: the run profiles `k8s` and `k8s-rancher` list it under `vendor` (`config\run-profiles.json`), so `scripts\lib\LabRun.ps1` copies it to `~/lab/vendor/rancher` for that run. `ansible\kubernetes\rancher.yml` checks that `.lab-vendored-version` names `rancher_chart_version` (`ansible\kubernetes\vars\kubernetes.yml`), packs `chart\` reproducibly into a `.tgz` and hands it to RKE2's Helm controller inside a HelmChart object (`chartContent`): no Helm repository is contacted at deployment time |
 | Upgrade | `.\lab.ps1 rancher-upgrade -Version <v> -Sha256 <hash>` (`scripts\dev\Update-LabRancherChart.ps1`): downloads the `.tgz`, refuses it unless its SHA-256 matches, replaces `rancher\chart` and the marker. Then check the chart's `kubeVersion` against RKE2's version, set `rancher_chart_version`, commit, `.\lab.ps1 deploy k8s` |
 
+## fleet\ - vendored sources that Fleet deploys
+
+Two third-party sources live outside this folder, under `fleet\`: Fleet (Rancher's GitOps
+controller, [GitOps with Fleet](../README.md#gitops-with-fleet-apache-airflow-on-the-cluster))
+deploys from this repository on GitHub and reads only the files inside a bundle's own folder, so a
+chart or a manifest must sit next to its `fleet.yaml`. They follow the same rules as everything
+here: unchanged, one pinned version, a `.lab-vendored-version` marker with the hash, one script that
+takes a new version.
+
+### fleet\airflow\chart - the Apache Airflow Helm chart
+
+| | |
+|---|---|
+| What | The official Helm chart of Apache Airflow: api-server, scheduler, dag-processor, triggerer, Celery workers, and as subcharts Bitnami's PostgreSQL (`chart\charts\postgresql`) and Redis as a plain StatefulSet |
+| Upstream | <https://downloads.apache.org/airflow/helm-chart/1.22.0/airflow-1.22.0.tgz> (index: <https://airflow.apache.org/index.yaml>); source <https://github.com/apache/airflow/tree/helm-chart/1.22.0/chart> |
+| Version | chart 1.22.0 (Airflow 3.2.2). `airflow\.lab-vendored-version` names it with the SHA-256 of the `.tgz`, `1f7d1dfe3d58e2c54899950aba907a43625a18c8b6fb3c54760c21592129a5b6`. Apache signs every release: the `.tgz` matches its published `airflow-1.22.0.tgz.sha512`, and `airflow-1.22.0.tgz.asc` verifies with the release managers' keys in <https://downloads.apache.org/airflow/KEYS> (`gpg --import KEYS`, `gpg --verify airflow-1.22.0.tgz.asc airflow-1.22.0.tgz`). Checked when it was vendored: a good signature by Jarek Potiuk (Apache), primary key `8BA8 D21B B4A2 350A 4368 0A74 6618 7A61 A0A7 E894` |
+| How | `airflow\chart\` is the unpacked archive (its folder `airflow`), unchanged, including the subchart in `chart\charts\` (so `fleet.yaml` sets `disableDependencyUpdate`: nothing is fetched) |
+| Licence | Apache-2.0 (`airflow\chart\LICENSE`); the PostgreSQL subchart is Apache-2.0 as well (Bitnami) |
+| Changed | nothing. The lab's settings are the `values` in `fleet\airflow\fleet.yaml` |
+| Used by | Fleet, from GitHub (bundle `fleet/airflow`, the GitRepo of `ansible\kubernetes\fleet.yml`); `.\lab.ps1 deploy fleet` creates the secrets the values name |
+| Upgrade | `.\lab.ps1 fleet-upgrade -Component airflow -Version <v> -Sha256 <hash>` (`scripts\dev\Update-LabFleetSource.ps1`; the hash is the version's `digest` in `index.yaml`): downloads, refuses unless the SHA-256 matches, replaces `airflow\chart` and the marker. Then compare `fleet.yaml`'s values with the new `chart\values.yaml` and the chart's release notes, commit, `git push` |
+
+### fleet\local-path\local-path-storage.yaml - Rancher's local-path-provisioner
+
+| | |
+|---|---|
+| What | A small provisioner that answers a volume claim with a directory on the node the pod runs on (`/opt/local-path-provisioner`): the StorageClass `local-path`, its Deployment, RBAC and configuration |
+| Upstream | <https://github.com/rancher/local-path-provisioner/blob/v0.0.37/deploy/local-path-storage.yaml> |
+| Version | v0.0.37. `local-path\.lab-vendored-version` names it with the SHA-256 of the file, `9781b39c24f3f651bd6d6e41b561e04e4904bbdb6d4f8c7a6009df3a702dcd65` (the release has no signed assets: the tag in Git is the anchor) |
+| How | the manifest as the tag has it, unchanged |
+| Licence | Apache-2.0 (<https://github.com/rancher/local-path-provisioner/blob/v0.0.37/LICENSE>) |
+| Changed | nothing in the file. `local-path\kustomization.yaml` patches it at deployment: no Namespace of its own (Fleet creates `local-path-storage`), the StorageClass as the cluster's default, the provisioner's image and the helper image (busybox) pinned by digest |
+| Used by | Fleet, from GitHub (bundle `fleet/local-path`; Airflow's bundle depends on it) |
+| Upgrade | `.\lab.ps1 fleet-upgrade -Component local-path -Version <tag> -Sha256 <hash>`: then put the new image's digest into `kustomization.yaml`, commit, `git push` |
+
 Why vendored and not cloned at deployment time:
 
 - **Transparency**: the code that runs is the code you can read here.

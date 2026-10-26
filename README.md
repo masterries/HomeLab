@@ -875,6 +875,7 @@ with a warning.
 | `keycloak` | `keycloak.yml` | keycloak | `ansible-keycloak` | `lab.ps1 deploy keycloak` (also `lab.ps1 up` / `lab.ps1 maintain` when its certificate is due) |
 | `matrix-prepare`, `matrix`, `matrix-setup`, `mdad` | `matrix-prepare.yml` (with `syncMdad`: `vendor\mdad` to `~/mdad` first), then `bin/deploy-matrix install-all` (`matrix-setup`: `setup-all`); `mdad` runs an MDAD playbook directly in `~/mdad` | matrix | `ansible-matrix` | `lab.ps1 deploy matrix` (`-Setup`: `matrix-setup`); `mdad` by hand |
 | `k8s`, `k8s-rke2`, `k8s-rancher`, `k8s-check` | `kubernetes/site.yml` (= `rke2.yml`, `rancher.yml`, `check.yml`, each also on its own); `k8s` and `k8s-rancher` also carry `vendor\rancher` (the profile's `vendor` list) to `~/lab/vendor/rancher` | k8s-server and the three agents (`k8s-rancher`, `k8s-check`: k8s-server only) | `ansible-k8s` (`k8s-check`: none) | `lab.ps1 deploy k8s` (also `lab.ps1 up` / `lab.ps1 maintain` when its certificates are due); the others by hand |
+| `k8s-fleet` | `kubernetes/fleet.yml`: Airflow's secrets, certificate, the GitRepo, waiting for Fleet | k8s-server | `ansible-k8s` | `lab.ps1 deploy fleet`; `lab.ps1 up` / `lab.ps1 maintain` run the profile directly when Airflow's certificate is due |
 | `hello-nginx` | `hello-nginx.yml`, the nginx demo | every machine | `ansible-web` | by hand |
 | `syntax`, `test-run-token`, `test-config-token`, `test-secret-creation`, `test-sleep` | `bin/syntax-check` (every playbook), the tests' helpers in `ansible/tests/`, `sleep 20` | none | `test-run-token` and `test-secret-creation`: `ansible-keycloak`; `test-config-token`: `openbao-config` (role `ansible-config`) | `lab.ps1 test` (`test-sleep`: by hand) |
 
@@ -961,7 +962,7 @@ explains why that matters.
 | keycloak | Keycloak 26.8.1 and its PostgreSQL 18.6 as a Docker Compose project in `/opt/keycloak-stack` | 10.10.10.40 (MAC 02:00:0a:0a:0a:28, DHCP reservation) | `keycloak.lab.internal` (published: PC gets 10.10.99.4, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 4 GB |
 | vault | OpenBao 2.7.1 (secrets manager and intermediate CA) with its data in `/opt/openbao/data`; nginx on port 80 for the CA certificates and CRLs | 10.10.10.50 (MAC 02:00:0a:0a:0a:32, DHCP reservation) | `vault.lab.internal` (published: PC gets 10.10.99.5, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 2 GB; Hyper-V checkpoints off, no console autologin |
 | rustfs | RustFS 1.0.3, S3 API and browser console over HTTPS through nginx; persistent objects in `/var/lib/rustfs/data` | 10.10.10.60 (MAC 02:00:0a:0a:0a:3c, DHCP reservation) | `rustfs.lab.internal`, `rustfs-console.lab.internal` (published: PC gets 10.10.99.6, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 4 GB; Hyper-V checkpoints off, no console autologin |
-| k8s-server | Kubernetes control plane (RKE2 server: API server, etcd, scheduler, controller manager), Cilium agent, Traefik (the cluster's ingress, hostPort 443) | 10.10.20.10 in LabK8s (MAC 02:00:0a:0a:14:0a, DHCP reservation) | `k8s-server.lab.internal`; Rancher and Hubble UI are published as `rancher.lab.internal`, `hubble.lab.internal` (PC gets 10.10.99.7, LabNet gets nginx 10.10.10.20) | 2 vCPU, 4 GB; Hyper-V checkpoints off (etcd) |
+| k8s-server | Kubernetes control plane (RKE2 server: API server, etcd, scheduler, controller manager), Cilium agent, Traefik (the cluster's ingress, hostPort 443) | 10.10.20.10 in LabK8s (MAC 02:00:0a:0a:14:0a, DHCP reservation) | `k8s-server.lab.internal`; Rancher, Hubble UI and Airflow are published as `rancher.lab.internal`, `hubble.lab.internal`, `airflow.lab.internal` (PC gets 10.10.99.7, LabNet gets nginx 10.10.10.20) | 2 vCPU, 4 GB; Hyper-V checkpoints off (etcd) |
 | k8s-agent-1..3 | Kubernetes workers (RKE2 agents): Cilium, cilium-operator, Hubble, CoreDNS, Traefik, Rancher Manager and its helpers | 10.10.20.11 to .13 in LabK8s (MACs 02:00:0a:0a:14:0b to :0d) | `k8s-agent-1.lab.internal` ... | 2 vCPU, 4 GB each |
 
 The Matrix stack in detail, as deployed (the versions come with the pinned MDAD
@@ -1128,7 +1129,7 @@ flowchart LR
 | PC (LabHost) | published address 10.10.99.4: TCP 443 | yes, forwarded to central nginx 10.10.10.20, then by SNI to keycloak 10.10.10.40 |
 | PC (LabHost) | published address 10.10.99.5: TCP 8200, TCP 80 | yes, forwarded directly to vault 10.10.10.50 (never through nginx: OpenBao binds logins and tokens to client addresses, which a proxy would hide): HTTPS to OpenBao, HTTP to the CA/CRL allow-list |
 | PC 10.10.99.1 (LabHost) | published address 10.10.99.6: TCP 443 | yes, PC-only forward to central nginx 10.10.10.20, then by SNI to RustFS's local nginx at 10.10.10.60:443 |
-| PC 10.10.99.1 (LabHost) | published address 10.10.99.7: TCP 443 | yes, PC-only forward to central nginx 10.10.10.20, then by SNI (`rancher`, `hubble`) to Traefik on k8s-server 10.10.20.10:443 |
+| PC 10.10.99.1 (LabHost) | published address 10.10.99.7: TCP 443 | yes, PC-only forward to central nginx 10.10.10.20, then by SNI (`rancher`, `hubble`, `airflow`) to Traefik on k8s-server 10.10.20.10:443 |
 | PC (LabHost) | published addresses: anything else, including DNS, SSH and Matrix federation 8448 | no |
 | PC (LabHost) | ansible-control, matrix, keycloak, vault directly | no. Use SSH through the firewall (jump host) |
 | Default Switch (WAN) | firewall | no. There is no pass rule on WAN, so pf's default applies. Vagrant does not use this side |
@@ -1328,7 +1329,9 @@ The order for a new lab:
 
 Steps 5a, 5b, 6, 7 and 7a can also be one command: `.\lab.ps1 deploy all` runs
 `deploy vault`, `deploy firewall`, `deploy nginx`, `deploy keycloak`, `deploy matrix` and `deploy rustfs`, in this
-order, and stops at the first failure. Running `deploy vault` again there is
+order, then the Kubernetes cluster (`deploy k8s`) and what Fleet deploys on it (`deploy fleet`, which
+needs `fleet\` committed and pushed: [GitOps with Fleet](#gitops-with-fleet-apache-airflow-on-the-cluster)),
+and stops at the first failure. Running `deploy vault` again there is
 harmless: each of its steps checks first and acts only if needed. So the
 short form of the whole first build is: `host-setup` (your own window) -> `up` ->
 `deploy vault` -> `trust` (your own window) -> `recovery` (your own window) ->
@@ -2454,7 +2457,7 @@ the policy `ansible-k8s`:
   (masquerading), so the firewall never sees 10.42.x.x. Pods: 10.42.0.0/16,
   Services: 10.43.0.0/16 (RKE2's defaults; they exist only inside the cluster).
 - **The way in.** Your browser -> 10.10.99.7:443 (published, PC only) -> central
-  nginx, which picks the route by SNI (`rancher`, `hubble`: management source
+  nginx, which picks the route by SNI (`rancher`, `hubble`, `airflow`: management source
   policy, as for RustFS) -> Traefik on k8s-server, hostPort 443, which terminates
   TLS with the lab certificate and passes the request to the pod. Traefik
   normally avoids the tainted server; the `rke2-traefik` HelmChartConfig gives it
@@ -2491,6 +2494,111 @@ reachable). Rancher logs in with a local admin, not through Keycloak. RKE2's
 image archives are pinned by hash, Rancher's own images by tag (the chart's
 choice).
 
+### GitOps with Fleet: Apache Airflow on the cluster
+
+**GitOps** means: the desired state of what runs on the cluster lives in Git, and a controller
+*in the cluster* keeps the cluster equal to it, all the time. A change is a commit and a push; the
+cluster follows within a minute or two, and "what runs" can always be read in the repository.
+Rancher's GitOps controller is **Fleet** (its counterpart to Argo CD or Flux); it comes with
+Rancher and runs in `cattle-fleet-system`.
+
+Here Fleet reads the folder [fleet/](fleet/) of this repository **on GitHub**
+(`https://github.com/masterries/HomeLab`, branch `main`, public, no credentials) and deploys two
+bundles, one per subfolder with a `fleet.yaml`:
+
+| Bundle | What | From |
+|---|---|---|
+| `fleet/local-path` | Rancher's local-path-provisioner as the default StorageClass: a volume claim gets a directory on an agent (`/opt/local-path-provisioner`). RKE2 brings no provisioner, and Airflow's PostgreSQL needs a volume | the upstream manifest v0.0.37, unchanged, plus a Kustomize patch ([kustomization.yaml](fleet/local-path/kustomization.yaml): default class, images pinned by digest) |
+| `fleet/airflow` | Apache Airflow 3.2.2 as the full Celery stack: api-server (UI and REST API), scheduler, dag-processor, triggerer, a Celery worker, Redis (the queue), PostgreSQL (the metadata database) | the official Helm chart 1.22.0, vendored in `fleet/airflow/chart`, with the lab's values in [fleet.yaml](fleet/airflow/fleet.yaml) |
+
+Airflow waits for the StorageClass (`dependsOn` in its `fleet.yaml`). Its DAGs come from the same
+repository: git-sync sidecars pull [fleet/airflow-dags/](fleet/airflow-dags/) every 60 seconds
+(the example `lab_hello`: extract, transform, load, hourly).
+
+**Deploying it:**
+
+```powershell
+.\lab.ps1 deploy vault        # PKI role k8s-ingress: also airflow.lab.internal
+.\lab.ps1 firewall -Rebuild   # elevated; only if the firewall was built before "airflow" was in lab.json
+.\lab.ps1 deploy firewall     # after a rebuild: the GUI certificate from OpenBao's intermediate again
+.\lab.ps1 deploy nginx        # nginx's route; the lab's DNS answers nginx for airflow.lab.internal
+git push                      # Fleet sees only what is on GitHub
+.\lab.ps1 deploy fleet
+```
+
+A new name in lab.json's `published` (here `airflow` on k8s-server's entry) reaches the firewall's DNS only
+through a rebuild ([Publish a name or a port](#publish-a-name-or-a-port)); `deploy nginx` refuses while
+the record is missing ("A managed DNS/DHCP record is missing: k8s-server-dns-airflow").
+
+`deploy fleet` refuses while `fleet\` here differs from GitHub's `main`, so it never waits for a
+state Fleet cannot see. It runs [kubernetes/fleet.yml](ansible/kubernetes/fleet.yml) (profile
+`k8s-fleet`), which does only what Git must never hold and what Fleet needs first:
+
+1. **Secrets in OpenBao**, created once: `lab/k8s/airflow/*` (the Fernet key's seed, the API and
+   JWT secrets, the PostgreSQL, Redis and admin passwords). The Fernet key itself is derived from
+   its seed (URL-safe base64 of its SHA-256: 32 bytes, as Fernet requires).
+2. **On k8s-server:** the namespace `airflow`; the certificate of `airflow.lab.internal` (key made
+   there, signed by OpenBao, role `k8s-ingress`); the Kubernetes secrets the chart takes by name
+   (`lab-airflow-fernet`, `-api-secret`, `-jwt`, `-postgres`, `-metadata`, `-redis`, `-broker`,
+   `-admin`, `tls-airflow-ingress`); and the **GitRepo** object
+   ([fleet-gitrepo.yaml.j2](ansible/kubernetes/templates/fleet-gitrepo.yaml.j2)), which points Fleet
+   at the repository.
+3. **Wait** until Fleet's job for the pushed commit has finished (a failed one stops the run with
+   Fleet's message), then until every BundleDeployment (the unit Fleet's agent applies, one per
+   bundle and cluster) carries that commit, is applied, ready and unmodified, and every Airflow
+   rollout is complete (the first time: Airflow's image, about 1 GB, and the database
+   migration). Then ask `https://airflow.lab.internal/api/v2/monitor/health` through nginx, and
+   from the PC. A secret that changed restarts Airflow before these waits, so they cover it.
+
+From then on Fleet polls GitHub every minute: **a change to `fleet/` goes live with `git push`**,
+without any `lab.ps1` command. `deploy fleet` is needed again only for secrets or the GitRepo
+itself. Airflow's certificate is renewed by `lab.ps1 up` / `lab.ps1 maintain` when it is due
+(`.\lab.ps1 run k8s-fleet`: the same playbook, without the push check, so unpushed work in
+`fleet\` does not block it).
+
+**Using it:**
+
+- Airflow: <https://airflow.lab.internal>, user `admin`; the password to the clipboard:
+  `.\lab.ps1 secret k8s/airflow/admin`. The DAG `lab_hello` appears within a minute of the
+  deployment; trigger it, then look at Graph, Logs, and the traffic between the pods in Hubble UI
+  (namespace `airflow`).
+- Fleet: Rancher > Continuous Delivery (Git Repos, Bundles: their state and errors), or
+  `kubectl -n fleet-local get gitrepo,bundles`. "Force Update" there makes Fleet clone again.
+
+**How it fits together, and why:**
+
+- **Secrets never reach Git.** The repository is public, so `fleet.yaml` names secrets only by
+  name; Ansible creates them from OpenBao before Fleet starts the pods. The first admin's password
+  goes into the user job as an environment variable from a secret (`$(AIRFLOW_ADMIN_PASSWORD)`,
+  expanded by the kubelet). Enterprise equivalent: the External Secrets Operator or the Secrets
+  Store CSI driver reading the vault directly (here the pods cannot reach OpenBao: the firewall
+  keeps the cluster's segment out of the lab network).
+- **No Helm hooks.** By default Airflow's migration and user jobs are hooks that run after Helm
+  considers the release ready, while every Airflow pod waits for the migration: under a GitOps tool
+  that deadlocks. With `useHelmHooks: false` (the chart's own advice for Argo CD, Flux and Rancher)
+  they are ordinary objects, everything starts at once, and the pods' init containers wait for the
+  migration. The jobs delete themselves after 5 minutes; `diff.comparePatches` keeps Fleet from
+  reporting them as missing.
+- **The release name is fixed** (`releaseName: airflow`): Fleet would otherwise name the release
+  after the bundle, and the chart builds its service names (`airflow-postgresql`, `airflow-redis`)
+  from it, which the connection secrets use.
+- **Vendored inside the bundle.** Fleet reads only a bundle's own folder, so the chart and the
+  manifest live in `fleet/`, not in `vendor/` (`.lab-vendored-version` beside them; `.\lab.ps1
+  fleet-upgrade` takes a new version, checked against its SHA-256).
+- **Sized for 4 GB agents:** requests and limits on every component, StatsD, Flower and PgBouncer
+  off, Redis, the worker and the triggerer without volumes (only PostgreSQL keeps data), at most
+  four tasks at once. About 2.5 GB in all.
+- **Task logs come from the worker.** The UI fetches a task's log from the worker that ran it
+  (port 8793), by the host name the task recorded. A Deployment's pod names are not in DNS, so
+  the components report their pod IP instead (`hostname_callable` in `fleet.yaml`). Enterprise
+  equivalent: remote logging to object storage (S3, here RustFS could serve), so logs outlive
+  the pods.
+
+**Limits.** PostgreSQL's volume is a directory on one agent: losing that VM loses Airflow's history
+(no replication, no backup). Task logs live in the pods and go with them. Redis keeps its queue in
+memory. Airflow logs in with a local admin, not through Keycloak. Rancher's images, Airflow's and
+PostgreSQL's (`bitnamilegacy/postgresql`, an archive Bitnami no longer updates) are pulled by tag.
+
 ## 5. Everyday operations
 
 ### The lab.ps1 commands
@@ -2510,7 +2618,7 @@ equivalent: one command-line tool with subcommands, like `az`, `kubectl` or `gh`
 | `up` | build or start the lab and bring it up to date, also after every Windows restart ([After a Windows restart](#after-a-windows-restart)) | elevated |
 | `down` | delete the lab VMs, or one (`down matrix`); asks first ([Rebuild one VM or the whole lab](#rebuild-one-vm-or-the-whole-lab)) | elevated |
 | `firewall` | build (`-Rebuild`) or check the OPNsense firewall VM | elevated |
-| `deploy` | deploy `vault`, `firewall`, `nginx`, `keycloak`, `matrix`, `rustfs`, `k8s`, or `all` (these seven in this order, stopping at the first failure) ([Run a playbook, re-run a deployment](#run-a-playbook-re-run-a-deployment), [Kubernetes](#kubernetes-rke2-with-cilium-and-rancher-manager)) | |
+| `deploy` | deploy `vault`, `firewall`, `nginx`, `keycloak`, `matrix`, `rustfs`, `k8s`, `fleet`, or `all` (these eight in this order, stopping at the first failure) ([Run a playbook, re-run a deployment](#run-a-playbook-re-run-a-deployment), [Kubernetes](#kubernetes-rke2-with-cilium-and-rancher-manager), [GitOps with Fleet](#gitops-with-fleet-apache-airflow-on-the-cluster)) | |
 | `run` | one Ansible run on ansible-control: `run <profile>` or `run <playbook.yml>`, then options for `ansible-playbook`; without arguments it lists the run profiles | |
 | `maintain` | renew what is due (certificates, revocation lists); `-List` only shows it | |
 | `connect` | SSH to a lab machine as `ansible`: `connect [vm] [command]` ([Log in to a VM](#log-in-to-a-vm)) | |
@@ -2526,6 +2634,7 @@ equivalent: one command-line tool with subcommands, like `az`, `kubectl` or `gh`
 | `recovery` | the recovery kit (`-Renew`, `-Open <file>`, `-Recover <file>`) ([Step 5](#step-5-make-the-recovery-kit-once-you-run-it-yourself)) | your own window |
 | `mdad-upgrade` | take a new matrix-docker-ansible-deploy commit into `vendor\mdad` ([Upgrade MDAD](#upgrade-mdad-and-with-it-the-matrix-components)) | |
 | `rancher-upgrade` | take another Rancher Manager chart version into `vendor\rancher` (`-Version`, `-Sha256`; [Kubernetes](#kubernetes-rke2-with-cilium-and-rancher-manager)) | |
+| `fleet-upgrade` | take another Airflow chart or local-path-provisioner version into `fleet\` (`-Component`, `-Version`, `-Sha256`; [GitOps with Fleet](#gitops-with-fleet-apache-airflow-on-the-cluster)) | |
 
 An empty "Needs" means any PowerShell window, as your own Windows user, also with the output
 redirected to a file.
@@ -2999,7 +3108,9 @@ without changes changes nothing.
 .\lab.ps1 deploy matrix          # vendor\mdad to ~/mdad + matrix-prepare.yml + MDAD (through lab-setup.yml) + checks
 .\lab.ps1 deploy matrix -Setup   # the same with the tags of "just setup-all", after REMOVING a component
 .\lab.ps1 deploy rustfs          # rustfs.yml (TLS, OpenBao credentials, persistent object storage)
-.\lab.ps1 deploy all             # vault, firewall, nginx, keycloak, matrix, rustfs; stops at the first failure
+.\lab.ps1 deploy k8s             # kubernetes/site.yml: RKE2, Cilium, Rancher, Hubble UI
+.\lab.ps1 deploy fleet           # kubernetes/fleet.yml: Airflow's secrets, the GitRepo; Fleet deploys fleet/ from GitHub
+.\lab.ps1 deploy all             # vault, firewall, nginx, keycloak, matrix, rustfs, k8s, fleet; stops at the first failure
 ```
 
 On a brand-new OpenBao, `deploy vault` runs `openbao-config.yml` twice: first for the mounts
@@ -3087,7 +3198,7 @@ profile gets which policy is its `policies` in
 | `keycloak` (`keycloak.yml`) | `ansible-keycloak` | create and read `lab/keycloak/*`, generate passwords (`lab-alnum-24`, `-48`), have OpenBao sign certificates of the PKI role `keycloak` |
 | `matrix-prepare` (`matrix-prepare.yml`), and MDAD's runs: `matrix`, `matrix-setup`, `mdad` | `ansible-matrix` | create and read `lab/matrix/*`, read (only) the MAS client secret `lab/keycloak/clients/matrix-authentication-service`, generate passwords (`lab-alnum-64`), mint ACME binding keys for Traefik (`pki_int/roles/acme-matrix/acme/new-eab`) and delete an unused one (`pki_int/eab/*`) |
 | `firewall` (`firewall.yml`) | `ansible-firewall` | have OpenBao sign certificates of the PKI role `firewall-gui` (only the name `firewall.<domain>`); no secrets |
-| `k8s`, `k8s-rke2`, `k8s-rancher` (`ansible/kubernetes/`) | `ansible-k8s` | create and read `lab/k8s/*` (RKE2's join tokens, Rancher's first admin password), generate passwords (`lab-alnum-24`, `-64`), have OpenBao sign certificates of the PKI role `k8s-ingress` (`rancher.<domain>`, `hubble.<domain>`) |
+| `k8s`, `k8s-rke2`, `k8s-rancher`, `k8s-fleet` (`ansible/kubernetes/`) | `ansible-k8s` | create and read `lab/k8s/*` (RKE2's join tokens, Rancher's first admin password, Airflow's secrets), generate passwords (`lab-alnum-24`, `-64`), have OpenBao sign certificates of the PKI role `k8s-ingress` (`rancher.<domain>`, `hubble.<domain>`, `airflow.<domain>`) |
 | `hello-nginx` (`hello-nginx.yml`) | `ansible-web` | have OpenBao sign certificates of the PKI role `web`; no secrets |
 | `openbao-config` (`openbao-config.yml`) | `openbao-config`, through the token role `ansible-config` | configure the engines: the KV mount `lab` and its settings, the password policies, the `pki_int` mount with its URLs, revocation list, tidying, PKI roles and ACME. Never a policy, a login, a token role, the SSH CA, a CA's import or choice, a certificate or a secret; the playbook stops unless its token has exactly this policy |
 | `ping`, `base`, `checks`, `openbao`, `nginx`, `firewall-nginx`, `syntax` | none | (they need no token: they do not contact OpenBao, except `openbao.yml`, which only calls the unauthenticated health endpoint `sys/health`) |
@@ -3231,6 +3342,9 @@ own settings for MDAD belong in `ansible\matrix\`.
 | `config/lab.json`: a new lab VM | see [Add a VM](#add-a-vm): firewall rebuild, `.\lab.ps1 deploy vault` (OpenBao's SSH roles learn the new name), then `.\lab.ps1 up` |
 | `config/lab.json`: a new segment (`segments`), or a VM moved to one (`network`) | `.\lab.ps1 deploy vault` (SSH roles; the PC's own certificate renews itself to allow the jump from the firewall's address in the new segment), `.\lab.ps1 firewall -Rebuild` (it creates the switch, and the firewall gets the new adapter; an existing firewall without it is refused), `.\lab.ps1 up`, `.\lab.ps1 deploy nginx` |
 | `ansible/kubernetes/*` (RKE2, Cilium, Rancher, Hubble UI), `config/openbao/policies/ansible-k8s.hcl` | `.\lab.ps1 deploy k8s` (a new policy also needs `.\lab.ps1 deploy vault`). RKE2 cannot change the CNI or the cluster networks of an existing cluster: for those, rebuild the four nodes |
+| `fleet/` (the bundles: `fleet.yaml`, `kustomization.yaml`), `fleet/airflow-dags/` | `git push`: Fleet (and Airflow's git-sync for the DAGs) take it from GitHub within a minute or two, no `lab.ps1` command ([GitOps with Fleet](#gitops-with-fleet-apache-airflow-on-the-cluster)) |
+| `ansible/kubernetes/fleet.yml`, its GitRepo template, Airflow's secrets | `.\lab.ps1 deploy fleet` (after the push it insists on) |
+| A new Airflow chart or local-path-provisioner version (`fleet/airflow/chart`, `fleet/local-path`) | `.\lab.ps1 fleet-upgrade -Component <airflow\|local-path> -Version <v> -Sha256 <hash>`, then adjust `fleet.yaml` / `kustomization.yaml` as its help says, commit, `git push` |
 | A new Rancher chart version (`vendor\rancher`) | `.\lab.ps1 rancher-upgrade -Version <v> -Sha256 <hash>`, then `rancher_chart_version` in `ansible/kubernetes/vars/kubernetes.yml`, then `.\lab.ps1 deploy k8s` (it refuses while the two differ) |
 | `config/lab.json`: an existing VM's `cpus` or `memory` | `vagrant reload <vm>` in the `vagrant` folder (the VM restarts; after a reload of vault, `.\lab.ps1 unseal`) |
 | `config/lab.json`: an existing VM's MAC or IP | `.\lab.ps1 down <vm>`, then `.\lab.ps1 firewall -Rebuild` and `.\lab.ps1 up`. For vault this means a new, empty OpenBao (see [Rebuild one VM or the whole lab](#rebuild-one-vm-or-the-whole-lab)) |
@@ -7126,16 +7240,20 @@ DeployableServer/
 |   |                                 realm, issuer, client IDs, MAS URL, provider ULID),
 |   |                                 keycloak_secrets_dir (only to remove the old folder)
 |   |-- kubernetes/                   the Kubernetes cluster, a stack of its own (profiles k8s,
-|   |   |                             k8s-rke2, k8s-rancher, k8s-check; lab.ps1 deploy k8s)
+|   |   |                             k8s-rke2, k8s-rancher, k8s-check; lab.ps1 deploy k8s;
+|   |   |                             k8s-fleet: lab.ps1 deploy fleet)
 |   |   |-- site.yml                  rke2.yml, rancher.yml, check.yml in this order
 |   |   |-- rke2.yml                  RKE2 with Cilium: join tokens from OpenBao, release files
 |   |   |                             checked against pinned hashes, server first, then the agents
 |   |   |-- rancher.yml               Rancher Manager and Hubble UI: certificates from OpenBao,
 |   |   |                             Kubernetes secrets, the vendored chart as a HelmChart object
 |   |   |-- check.yml                 read-only: nodes, Cilium, Rancher, both names through nginx
+|   |   |-- fleet.yml                 GitOps: Airflow's secrets and certificate, the GitRepo,
+|   |   |                             then waits for Fleet's bundles (lab.ps1 deploy fleet)
 |   |   |-- vars/kubernetes.yml       pinned versions and hashes, networks, names
 |   |   `-- templates/                RKE2's config.yaml (server, agent), the HelmChartConfigs of
-|   |                                 Cilium and Traefik, Rancher's HelmChart, Hubble UI's Ingress
+|   |                                 Cilium and Traefik, Rancher's HelmChart, Hubble UI's Ingress,
+|   |                                 Fleet's GitRepo (fleet-gitrepo.yaml.j2)
 |   |-- playbooks/                    each has a run profile (config/run-profiles.json) or is
 |   |   |                             started by one (matrix-check.yml: bin/deploy-matrix)
 |   |   |-- ping.yml                  reachability and sudo test for all hosts
@@ -7313,9 +7431,12 @@ DeployableServer/
 |       |-- Update-LabMdad.ps1        lab.ps1 mdad-upgrade -Commit <hash>: git subtree pull of
 |       |                             another MDAD commit into vendor\mdad, then its roles (two
 |       |                             commits); the only script that downloads MDAD
-|       `-- Update-LabRancherChart.ps1  lab.ps1 rancher-upgrade -Version -Sha256: the Rancher
-|                                     chart into vendor\rancher, refused unless its SHA-256
-|                                     matches; the only script that downloads it
+|       |-- Update-LabRancherChart.ps1  lab.ps1 rancher-upgrade -Version -Sha256: the Rancher
+|       |                             chart into vendor\rancher, refused unless its SHA-256
+|       |                             matches; the only script that downloads it
+|       `-- Update-LabFleetSource.ps1  lab.ps1 fleet-upgrade -Component -Version -Sha256: the
+|                                     Airflow chart or the local-path manifest into fleet\,
+|                                     refused unless its SHA-256 matches
 |-- tests/                            the lab's tests, run from the project root: .\lab.ps1 test
 |   |                                 (tests\README.md; see "Run the tests")
 |   |-- README.md                     what each test checks and whether it changes anything
@@ -7357,6 +7478,12 @@ DeployableServer/
 |       `-- Export-LabOpenBaoConfig.ps1
 |                                     read-only: OpenBao's configuration (no secret values) as JSON,
 |                                     to compare the state before and after a change
+|-- fleet/                            what Fleet deploys from GitHub (GitOps; lab.ps1 deploy fleet)
+|   |-- local-path/                   bundle: local-path-provisioner v0.0.37 (unchanged) as the
+|   |                                 default StorageClass, Kustomize patches, fleet.yaml
+|   |-- airflow/                      bundle: fleet.yaml (the lab's values) and chart/, the Apache
+|   |                                 Airflow Helm chart 1.22.0 (unchanged)
+|   `-- airflow-dags/                 DAGs, pulled by Airflow's git-sync (not a Fleet bundle)
 |-- vendor/                           third-party code the lab runs, unchanged, at a pinned version
 |   |-- README.md                     what is vendored, from where, which version, licence, upgrade
 |   |-- mdad/                         MDAD at the pinned commit with its 32 roles (roles\galaxy\),
@@ -9018,6 +9145,8 @@ copy them to production.
 | Kubernetes: Rancher Manager signs in with a local admin (its first password from OpenBao, which the chart also copies into Helm's release record, a secret in `cattle-system`); Hubble UI has no login at all, only the PC and LabNet reach it (firewall forward and nginx's management source policy) | `ansible/kubernetes/rancher.yml` | Rancher logins through the IdP (OIDC with Keycloak), the local admin only as break-glass in a vault; an authenticating proxy (OAuth2 Proxy) in front of Hubble UI |
 | Kubernetes: one control-plane node (no high availability), its etcd snapshots on the same VM, 4 GB per node (RKE2's minimum; SUSE sizes Rancher at 16 GB per node, three nodes) | `ansible/kubernetes/`, `config/lab.json` | three servers (etcd quorum), snapshots to object storage off the cluster (S3, e.g. RustFS), nodes sized to the vendor's requirements |
 | Kubernetes nodes may reach the whole internet (RKE2's release files, Rancher's images and catalog data); Rancher's images are pinned by tag, not digest (RKE2's own images come from hash-pinned archives) | `scripts/lib/LabFirewall.ps1` (segment rules), `ansible/kubernetes/` | egress only through a proxy or an allow-list, a private registry mirroring images by digest (Harbor, RKE2's `system-default-registry`), network policies inside the cluster |
+| Fleet deploys whatever is pushed to `fleet/` on the public repository's `main`: whoever can push there changes the cluster, and there is no review gate, signature check or separate environment | `fleet/`, `ansible/kubernetes/templates/fleet-gitrepo.yaml.j2` | Protected branches with required reviews, signed commits verified before deploying, a promotion flow (dev, staging, prod) through separate branches or repositories, Fleet or Argo CD with RBAC per team |
+| Airflow: a local admin (password from OpenBao, also in the create-user job's environment); its secrets are Kubernetes secrets created by Ansible; PostgreSQL on one agent's disk without backup | `ansible/kubernetes/fleet.yml`, `fleet/airflow/fleet.yaml` | Logins through the IdP (OIDC with Keycloak), secrets synchronised from the vault by the External Secrets Operator, a managed or replicated database with backups |
 | Self-built SSH bastion without MFA or session recording, running on the perimeter firewall itself (restricted to certificate logins of `ansible` from the PC and ansible-control, and to forwarding to port 22 of the lab VMs) | `keys\ssh_config`, `lab.ps1 connect`, `config.xml.template`, `opnsense/sshd_config.d/20-lab-ssh.conf` | MFA on the bastion, session recording, often a managed product (e.g. Azure Bastion, AWS Systems Manager Session Manager, Teleport); the bastion is a separate host in a management network |
 | Firewall administration: the GUI user `root` with a random password; one full-admin account `ansible` serves as SSH jump account and REST API user. These passwords and the API key and secret are DPAPI files on the PC (`keys\opnsense\*.dpapi`, with copies in the recovery file), not in OpenBao, because the firewall exists before OpenBao | `lab.ps1 firewall`, `config.xml.template`, `keys\opnsense\` | Personal admin accounts from central authentication (RADIUS, LDAP) with MFA; the local root password only as a break-glass credential in a vault; a separate, restricted jump account (the lab restricts forwarding with `PermitOpen`, but for its one full-admin account) and a separate least-privilege API user per automation tool, with secrets in a vault |
 | Firewall management (GUI, API, SSH, DNS) open to the whole lab network, and on the PC side to 10.10.99.1, your everyday workstation, which also browses the internet | `config.xml.template` | Management interfaces reachable only from a dedicated management network (often out-of-band), never from server networks; administration only from privileged access workstations (PAW) or a management jump host |

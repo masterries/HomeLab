@@ -11,6 +11,7 @@
       rustfs.lab.internal and rustfs-console.lab.internal the current intermediate CA in OpenBao
       rancher.lab.internal and hubble.lab.internal        the current intermediate CA in OpenBao
                                                           (Kubernetes: lab.ps1 deploy k8s)
+      airflow.lab.internal                                the same (lab.ps1 deploy fleet)
     (A newly built firewall starts with a certificate from the root; lab.ps1 up and
     lab.ps1 deploy firewall move it to the intermediate.)
     The "current intermediate" is compared by key identifier (authority key identifier of the
@@ -39,7 +40,8 @@ $endpoints = @(
     @{ Host = "element.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = $domain; Port = 443; Issuer = 'intermediate' },
     @{ Host = "rancher.$domain"; Port = 443; Issuer = 'intermediate' },
-    @{ Host = "hubble.$domain"; Port = 443; Issuer = 'intermediate' }
+    @{ Host = "hubble.$domain"; Port = 443; Issuer = 'intermediate' },
+    @{ Host = "airflow.$domain"; Port = 443; Issuer = 'intermediate' }
 )
 Write-Host "Certificates (current intermediate: $($issuing.Subject -replace '^CN=', ''))"
 foreach ($e in $endpoints) {

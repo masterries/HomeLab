@@ -1,0 +1,338 @@
+# kubernetes/fleet.yml -- GitOps for the lab's Kubernetes cluster: Fleet deploys what fleet/ in
+# this repository on GitHub describes (a default StorageClass and Apache Airflow)
+#
+# Where it runs: on ansible-control, as ".\lab.ps1 deploy fleet" (profile "k8s-fleet": an SSH
+# certificate for k8s-server, an OpenBao token with the policy ansible-k8s). lab.ps1 checks first
+# that fleet\ is pushed (Fleet reads GitHub, not this checkout) and passes the commit it expects as
+# lab_fleet_commit.
+#
+# GitOps, in short: the desired state of the applications lives in Git, and a controller in the
+# cluster (Fleet) makes the cluster match it, continuously. A change is a commit and a push; the
+# cluster follows within a minute or two, and "what runs" can always be read in the repository.
+# Ansible does only what Git must never hold, and what Fleet needs before it can start:
+#   1. ansible-control: Airflow's secrets in OpenBao (lab/k8s/airflow/*, created once).
+#   2. k8s-server: the namespace, the TLS certificate of airflow.<domain> (key made there, signed by
+#      OpenBao), the Kubernetes secrets the chart expects by name (fleet/airflow/fleet.yaml), and the
+#      GitRepo object that points Fleet at the repository.
+#   3. Wait until Fleet has the expected commit and both bundles are Ready, then ask Airflow's health
+#      endpoint through central nginx, the way your browser reaches it.
+# Enterprise equivalent: Fleet or Argo CD reading a Git repository, secrets from a vault through the
+# External Secrets Operator or the Secrets Store CSI driver (here the pods cannot reach OpenBao:
+# the firewall keeps the cluster's segment out of the lab network).
+- name: Fleet - Airflow's secrets in OpenBao
+  hosts: control
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    # PostgreSQL takes its password only when it creates its database: once that exists, new values
+    # would lock Airflow out. The Kubernetes secret of the password tells whether it does. Only
+    # "NotFound" means "never set up": any other error (an API server still starting, say) stops
+    # here, before a missing OpenBao path could be filled with new values.
+    - name: Has Airflow been set up before?
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['-n', airflow_namespace, 'get', 'secret', 'lab-airflow-postgres', '-o', 'name'] }}"
+      delegate_to: "{{ groups['rke2_servers'][0] }}"
+      become: true
+      register: airflow_existing
+      changed_when: false
+      failed_when: airflow_existing.rc != 0 and 'NotFound' not in airflow_existing.stderr
+      check_mode: false
+
+    - name: Airflow's secrets (created on the very first run)
+      ansible.builtin.include_tasks: ../playbooks/tasks/openbao-secrets.yml
+      vars:
+        openbao_secrets:
+          - { path: k8s/airflow/fernet-seed, field: value, policy: lab-alnum-64 }
+          - { path: k8s/airflow/api-secret-key, field: value, policy: lab-alnum-64 }
+          - { path: k8s/airflow/jwt-secret, field: value, policy: lab-alnum-64 }
+          - { path: k8s/airflow/postgres, field: password, policy: lab-alnum-24 }
+          - { path: k8s/airflow/redis, field: password, policy: lab-alnum-24 }
+          - { path: k8s/airflow/admin, field: password, policy: lab-alnum-24 }
+        openbao_existing_state: "{{ airflow_existing.rc == 0 }}"
+
+    # A Fernet key is the URL-safe base64 of exactly 32 random bytes; OpenBao's password policies
+    # make text. So OpenBao holds a 64-character secret, and the key is derived from it: the
+    # base64 of its SHA-256. The same secret always gives the same key (the key encrypts the
+    # connections and variables stored in Airflow's database, so it must never change).
+    - name: Airflow's Fernet key, derived from its secret
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - import sys, hashlib, base64; print(base64.urlsafe_b64encode(hashlib.sha256(sys.stdin.read().encode()).digest()).decode())
+        stdin: "{{ lab_secrets['k8s/airflow/fernet-seed'] }}"
+        stdin_add_newline: false
+      register: airflow_fernet
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+- name: Fleet - namespace, certificate, secrets and the GitRepo on the server
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  vars:
+    airflow_secret_values: "{{ hostvars[groups['control'][0]].lab_secrets }}"
+    # One key per secret, the key the chart reads. The chart's service names: <release>-postgresql
+    # and <release>-redis (release "airflow").
+    airflow_secrets:
+      - {name: lab-airflow-fernet, key: fernet-key, value: "{{ hostvars[groups['control'][0]].airflow_fernet.stdout }}"}
+      - {name: lab-airflow-api-secret, key: api-secret-key, value: "{{ airflow_secret_values['k8s/airflow/api-secret-key'] }}"}
+      - {name: lab-airflow-jwt, key: jwt-secret, value: "{{ airflow_secret_values['k8s/airflow/jwt-secret'] }}"}
+      - {name: lab-airflow-postgres, key: postgres-password, value: "{{ airflow_secret_values['k8s/airflow/postgres'] }}"}
+      - name: lab-airflow-metadata
+        key: connection
+        value: "postgresql://postgres:{{ airflow_secret_values['k8s/airflow/postgres'] }}@airflow-postgresql.{{ airflow_namespace }}:5432/postgres?sslmode=disable"
+      - {name: lab-airflow-redis, key: password, value: "{{ airflow_secret_values['k8s/airflow/redis'] }}"}
+      - {name: lab-airflow-broker, key: connection, value: "redis://:{{ airflow_secret_values['k8s/airflow/redis'] }}@airflow-redis:6379/0"}
+      - {name: lab-airflow-admin, key: password, value: "{{ airflow_secret_values['k8s/airflow/admin'] }}"}
+  tasks:
+    # Created here, not by Fleet, because the secrets must exist before the chart's pods start.
+    # Fleet's Helm install accepts a namespace that exists (the chart renders none).
+    - name: Namespace {{ airflow_namespace }}
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ rke2_kubectl }} create namespace {{ airflow_namespace }} --dry-run=client -o yaml | {{ rke2_kubectl }} apply -f -
+      args:
+        executable: /bin/bash
+      register: airflow_namespace_apply
+      changed_when: "'unchanged' not in airflow_namespace_apply.stdout"
+
+    - name: TLS folder (root only)
+      ansible.builtin.file:
+        path: "{{ k8s_tls_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Certificate for Airflow (key made here, signed by OpenBao)
+      ansible.builtin.include_tasks: ../playbooks/tasks/openbao-certificate.yml
+      vars:
+        openbao_cert_key: "{{ k8s_tls_dir }}/airflow.key"
+        openbao_cert_file: "{{ k8s_tls_dir }}/airflow.crt"
+        openbao_cert_names: ["{{ airflow_hostname }}"]
+        openbao_cert_role: k8s-ingress
+        openbao_cert_notify: k8s certificate renewed
+
+    # The certificate as the secret Traefik serves (fleet/airflow/fleet.yaml names it). Each secret
+    # goes in on stdin, never on a command line; no_log, because kubectl's error message would repeat
+    # the content. The check after it reports failures without it.
+    - name: Kubernetes secrets for Airflow (TLS)
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ rke2_kubectl }} -n {{ airflow_namespace }} create secret tls tls-airflow-ingress
+        --cert={{ k8s_tls_dir }}/airflow.crt --key={{ k8s_tls_dir }}/airflow.key
+        --dry-run=client -o yaml | {{ rke2_kubectl }} apply -f -
+      args:
+        executable: /bin/bash
+      register: airflow_tls_secret
+      changed_when: airflow_tls_secret.rc == 0 and 'unchanged' not in airflow_tls_secret.stdout
+      failed_when: false
+      no_log: true
+      when: not ansible_check_mode
+
+    # "data" (base64), not "stringData": the API server keeps only "data", so kubectl would see
+    # stringData as new on every run, print "configured" and restart Airflow for nothing.
+    - name: Kubernetes secrets for Airflow (values from OpenBao)
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['apply', '-f', '-'] }}"
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+              'metadata': {'name': item.name, 'namespace': airflow_namespace,
+                           'labels': {'app.kubernetes.io/managed-by': 'lab-ansible'}},
+              'data': {item.key: item.value | b64encode}} | to_json }}
+      loop: "{{ airflow_secrets }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: airflow_secret_apply
+      changed_when: airflow_secret_apply.rc == 0 and 'unchanged' not in airflow_secret_apply.stdout
+      failed_when: false
+      no_log: true
+      notify: restart airflow
+      when: not ansible_check_mode
+
+    # One check over all results, without a loop (a looped assert would print each raw result).
+    - name: Every secret is in Kubernetes
+      ansible.builtin.assert:
+        that: airflow_secret_failed | length == 0
+        fail_msg: >-
+          kubectl apply failed for {{ airflow_secret_failed | map(attribute='name') | join(', ') }}:
+          {{ airflow_secret_failed | map(attribute='stderr') | map('regex_replace', '[A-Za-z0-9+/_-]{20,}={0,2}', '(hidden)') | join(' / ') }}
+        quiet: true
+      vars:
+        airflow_secret_failed: >-
+          {%- set ns = namespace(out=[]) -%}
+          {%- if (airflow_tls_secret.rc | default(0)) != 0 -%}
+          {%- set ns.out = ns.out + [{'name': 'tls-airflow-ingress', 'stderr': airflow_tls_secret.stderr | default('')}] -%}
+          {%- endif -%}
+          {%- for r in airflow_secret_apply.results | default([]) if (r.rc | default(0)) != 0 -%}
+          {%- set ns.out = ns.out + [{'name': r.item.name, 'stderr': r.stderr | default('')}] -%}
+          {%- endfor -%}
+          {{ ns.out }}
+      when: not ansible_check_mode
+
+    # A secret that changed restarts Airflow now (handler below), so the waits further down also
+    # cover the restarted pods.
+    - name: Restart Airflow now if a secret changed
+      ansible.builtin.meta: flush_handlers
+
+    # In a dry run (--check) nothing is created: without the GitRepo there is nothing to wait for.
+    - name: Does the GitRepo exist?
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['-n', 'fleet-local', 'get', 'gitrepo', fleet_gitrepo_name, '-o', 'name'] }}"
+      register: fleet_gitrepo_existing
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: The GitRepo (Fleet reads this repository from now on)
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['apply', '-f', '-'] }}"
+        stdin: "{{ lookup('ansible.builtin.template', 'templates/fleet-gitrepo.yaml.j2') }}"
+      register: fleet_gitrepo_apply
+      changed_when: "'unchanged' not in fleet_gitrepo_apply.stdout"
+      when: not ansible_check_mode
+
+    # Fleet polls GitHub every minute; for a new commit it starts a job in fleet-local that clones
+    # the repository and runs "fleet apply", which writes one Bundle per folder, labelled with the
+    # commit. status.commit names the commit as soon as that job exists, and gitJobStatus already
+    # reads "Current" while it runs (and Fleet deletes a job that succeeded): so success shows as
+    # every folder's Bundle carrying the commit, failure as gitJobStatus "Failed".
+    - name: Fleet has processed the pushed commit
+      ansible.builtin.shell: >-
+        {{ rke2_kubectl }} -n fleet-local get gitrepo {{ fleet_gitrepo_name }}
+        -o 'jsonpath={.status.commit}|{.status.gitJobStatus}{"\n"}' &&
+        {{ rke2_kubectl }} -n fleet-local get bundles -o name
+        -l 'fleet.cattle.io/repo-name={{ fleet_gitrepo_name }},fleet.cattle.io/commit={{ lab_fleet_commit }}'
+      args:
+        executable: /bin/bash
+      vars:
+        # First line "<commit>|<gitJobStatus>", then one line per Bundle of this commit.
+        fleet_commit_fields: "{{ ((fleet_commit.stdout_lines | default([])) + [''])[0].split('|') + ['', ''] }}"
+      register: fleet_commit
+      until: >-
+        fleet_commit.rc == 0
+        and fleet_commit_fields[0] == lab_fleet_commit
+        and (fleet_commit_fields[1] == 'Failed' or fleet_commit.stdout_lines[1:] | length == fleet_paths | length)
+      retries: 30
+      delay: 10
+      changed_when: false
+      check_mode: false
+      when: lab_fleet_commit is defined and (not ansible_check_mode or fleet_gitrepo_existing.rc == 0)
+
+    # A failed job leaves its output in the GitRepo's "Stalled" condition (a fleet.yaml that does
+    # not parse, a path that does not exist on GitHub, ...).
+    - name: Why Fleet's job failed
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['-n', 'fleet-local', 'get', 'gitrepo', fleet_gitrepo_name, '-o', 'jsonpath={.status.conditions[?(@.type==\"Stalled\")].message}'] }}"
+      register: fleet_job_error
+      changed_when: false
+      check_mode: false
+      when:
+        - lab_fleet_commit is defined
+        - not ansible_check_mode or fleet_gitrepo_existing.rc == 0
+        - "'|Failed' in (fleet_commit.stdout_lines | default([]) | first | default(''))"
+
+    - name: Fleet's job for the commit succeeded
+      ansible.builtin.assert:
+        that: fleet_job_error is skipped
+        fail_msg: >-
+          Fleet could not process {{ lab_fleet_commit }}: {{ fleet_job_error.stdout | default('') }}
+          (Rancher > Continuous Delivery > Git Repos > {{ fleet_gitrepo_name }}, or
+          kubectl -n fleet-local get gitrepo {{ fleet_gitrepo_name }} -o yaml)
+        quiet: true
+      when: lab_fleet_commit is defined and (not ansible_check_mode or fleet_gitrepo_existing.rc == 0)
+
+    # The authoritative check, one level below the Bundles: each Bundle has one BundleDeployment
+    # per cluster (here only "local"), the unit the Fleet agent applies. One counts when it carries
+    # the pushed commit (a label Fleet copies from the Bundle), the agent has applied its current
+    # deployment ID (Helm release or manifests installed), every resource in it is ready, and
+    # nothing was changed by hand (nonModified). Checking the Bundles' summary instead could pass
+    # on the previous commit's state for a moment. The first time, the agents pull Airflow's image
+    # (about 1 GB) and the database is migrated: allow up to 30 minutes.
+    - name: Fleet has deployed every bundle
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['get', 'bundledeployments', '-A', '-l', fleet_bd_selector, '-o', fleet_bd_jsonpath] }}"
+      vars:
+        fleet_bd_selector: >-
+          fleet.cattle.io/repo-name={{ fleet_gitrepo_name }}{{ (',fleet.cattle.io/commit=' ~ lab_fleet_commit) if lab_fleet_commit is defined else '' }}
+        fleet_bd_jsonpath: 'jsonpath={range .items[*]}{.metadata.name}|{.spec.deploymentID}|{.status.appliedDeploymentID}|{.status.ready}|{.status.nonModified}{"\n"}{end}'
+        # Lines "<name>|<deploymentID>|<appliedDeploymentID>|<ready>|<nonModified>".
+        fleet_bundles_ready: >-
+          {%- set ns = namespace(n=0) -%}
+          {%- for line in fleet_bundles.stdout_lines | default([]) -%}
+          {%- set f = line.split('|') + ['', '', '', '', ''] -%}
+          {%- if f[1] != '' and f[1] == f[2] and f[3] == 'true' and f[4] == 'true' -%}
+          {%- set ns.n = ns.n + 1 -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.n }}
+      register: fleet_bundles
+      until: >-
+        fleet_bundles.rc == 0
+        and fleet_bundles.stdout_lines | length == fleet_paths | length
+        and fleet_bundles_ready | int == fleet_paths | length
+      retries: 180
+      delay: 10
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode or fleet_gitrepo_existing.rc == 0
+
+    # Also after a restart above: "rollout status" waits until every pod runs the newest template.
+    - name: Airflow's rollouts are complete
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['-n', airflow_namespace, 'rollout', 'status', 'deployment,statefulset', '-l', 'release=airflow', '--timeout=600s'] }}"
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode or fleet_gitrepo_existing.rc == 0
+
+    - name: Fleet's bundles
+      ansible.builtin.command:
+        argv: "{{ rke2_kubectl_argv + ['-n', 'fleet-local', 'get', 'bundles', '-l', 'fleet.cattle.io/repo-name=' ~ fleet_gitrepo_name] }}"
+      register: fleet_bundle_table
+      changed_when: false
+      check_mode: false
+
+  handlers:
+    - name: k8s certificate renewed
+      ansible.builtin.debug:
+        msg: A new certificate from OpenBao; its Kubernetes secret was updated in the same run.
+
+    # Airflow reads its secrets only at start. They are write-once in OpenBao, so this runs when a
+    # secret was (re)created after Airflow had been set up (someone deleted it, say), never on the
+    # first deployment. The redis StatefulSet restarts too (its password).
+    - name: restart airflow
+      ansible.builtin.shell: >-
+        if {{ rke2_kubectl }} -n {{ airflow_namespace }} get deployment airflow-scheduler >/dev/null 2>&1; then
+        {{ rke2_kubectl }} -n {{ airflow_namespace }} rollout restart deployment,statefulset -l release=airflow; fi
+      when: hostvars[groups['control'][0]].airflow_existing.rc == 0
+
+- name: Fleet - Airflow answers through central nginx
+  hosts: control
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    # The whole path from inside the lab: lab DNS -> nginx (SNI) -> Traefik on k8s-server -> the
+    # api-server pod. The health endpoint needs no login and reports the database and scheduler.
+    - name: https://{{ airflow_hostname }}/api/v2/monitor/health is healthy
+      ansible.builtin.uri:
+        url: "https://{{ airflow_hostname }}/api/v2/monitor/health"
+        return_content: true
+      register: airflow_health
+      until: >-
+        airflow_health.status == 200
+        and (airflow_health.json.metadatabase.status | default('')) == 'healthy'
+        and (airflow_health.json.scheduler.status | default('')) == 'healthy'
+      retries: 30
+      delay: 10
+      check_mode: false
+      when: not ansible_check_mode or hostvars[groups['rke2_servers'][0]].fleet_gitrepo_existing.rc == 0
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "{{ hostvars[groups['rke2_servers'][0]].fleet_bundle_table.stdout_lines }}"
+          - "Airflow: https://{{ airflow_hostname }} (user admin; password to the clipboard: .\\lab.ps1 secret k8s/airflow/admin)"
+          - "Fleet: Rancher > Continuous Delivery, or kubectl -n fleet-local get gitrepo,bundles"

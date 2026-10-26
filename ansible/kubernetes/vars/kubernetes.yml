@@ -38,8 +38,10 @@ rke2_download_dir: /var/cache/lab-rke2
 rke2_images_dir: /var/lib/rancher/rke2/agent/images
 rke2_manifests_dir: /var/lib/rancher/rke2/server/manifests
 rke2_agent_token_file: /var/lib/rancher/rke2/server/agent-token
-# kubectl comes with RKE2 but is not on the PATH; its admin kubeconfig is root's only.
+# kubectl comes with RKE2 but is not on the PATH; its admin kubeconfig is root's only. The same as a
+# list, for tasks that pass their arguments without a shell (argv).
 rke2_kubectl: /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml
+rke2_kubectl_argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml]
 
 # --- Networks -----------------------------------------------------------------------------------------
 # Pod and service addresses (RKE2's defaults). They exist only inside the cluster: Cilium routes
@@ -64,3 +66,18 @@ hubble_hostname: "hubble.{{ lab_domain }}"
 rancher_features: turtles=false,harvester=false
 # The TLS files of the cluster's web names on k8s-server (keys made there, root only).
 k8s_tls_dir: /etc/lab-k8s/tls
+
+# --- Fleet (GitOps) and the applications it deploys -------------------------------------------------
+# Fleet reads the bundles from this repository as GitHub has it: only what is pushed to the branch
+# reaches the cluster (lab.ps1 deploy fleet refuses while fleet\ differs from it).
+fleet_gitrepo_name: homelab
+fleet_repo_url: https://github.com/masterries/HomeLab.git
+fleet_branch: main
+# One bundle per folder (each has a fleet.yaml): the StorageClass first, then Airflow (dependsOn).
+fleet_paths:
+  - fleet/local-path
+  - fleet/airflow
+# Airflow (fleet/airflow): its namespace and web name. The release name "airflow" is fixed in
+# fleet/airflow/fleet.yaml; the connection strings below depend on it.
+airflow_namespace: airflow
+airflow_hostname: "airflow.{{ lab_domain }}"

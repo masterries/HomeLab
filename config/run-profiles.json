@@ -41,6 +41,7 @@
     "k8s-rke2":             { "playbook": "kubernetes/rke2.yml",    "principals": ["host-k8s-server", "host-k8s-agent-1", "host-k8s-agent-2", "host-k8s-agent-3"], "policies": ["ansible-k8s"] },
     "k8s-rancher":          { "playbook": "kubernetes/rancher.yml", "principals": ["host-k8s-server"], "policies": ["ansible-k8s"], "vendor": ["rancher"] },
     "k8s-check":            { "playbook": "kubernetes/check.yml",   "principals": ["host-k8s-server"] },
+    "k8s-fleet":            { "playbook": "kubernetes/fleet.yml",   "principals": ["host-k8s-server"], "policies": ["ansible-k8s"] },
     "hello-nginx":          { "playbook": "playbooks/hello-nginx.yml",    "principals": ["lab-all"], "policies": ["ansible-web"] },
     "syntax":               { "command": "bash bin/syntax-check",         "principals": [] },
     "test-run-token":       { "command": "bash tests/run-token-check.sh", "principals": [], "policies": ["ansible-keycloak"] },

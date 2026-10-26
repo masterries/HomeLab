@@ -13,15 +13,16 @@
     "inside the lab matrix.<domain> resolves to nginx.",
     "source \"management\": the route also enforces the management source policy: the configured PC",
     "and the private lab network only, including connections arriving through another published",
-    "IP (RustFS, the firewall GUI, Rancher and Hubble UI). The Kubernetes ingress is Traefik on",
-    "k8s-server (hostPort 443); it picks Rancher or Hubble UI by host name and terminates TLS there."
+    "IP (RustFS, the firewall GUI, Rancher, Hubble UI and Airflow). The Kubernetes ingress is Traefik on",
+    "k8s-server (hostPort 443); it picks Rancher, Hubble UI or Airflow by host name and terminates",
+    "TLS there."
   ],
   "tls": [
     { "names": ["matrix", "element", "@"], "vm": "matrix", "port": 443 },
     { "names": ["keycloak"], "vm": "keycloak", "port": 443 },
     { "names": ["rustfs", "rustfs-console"], "vm": "rustfs", "port": 443, "source": "management" },
     { "names": ["firewall"], "vm": "firewall", "port": 443, "source": "management" },
-    { "names": ["rancher", "hubble"], "vm": "k8s-server", "port": 443, "source": "management" }
+    { "names": ["rancher", "hubble", "airflow"], "vm": "k8s-server", "port": 443, "source": "management" }
   ],
   "http": [
     { "names": ["matrix", "element", "@"], "vm": "matrix", "port": 80 }

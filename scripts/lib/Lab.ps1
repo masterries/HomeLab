@@ -67,7 +67,7 @@ $script:LabCommands = [ordered]@{
     'up'           = @{ File = 'scripts\commands\up.ps1'; Elevated = $true; Group = 'Build'; Help = 'build or start the lab and bring it up to date (also after every Windows restart)' }
     'down'         = @{ File = 'scripts\commands\down.ps1'; Elevated = $true; Group = 'Build'; Help = 'delete the lab VMs (or one VM: down matrix); asks first' }
     'firewall'     = @{ File = 'scripts\commands\firewall.ps1'; Elevated = $true; Group = 'Build'; Help = 'build (-Rebuild) or check the OPNsense firewall VM' }
-    'deploy'       = @{ File = 'scripts\commands\deploy.ps1'; Group = 'Deploy'; Help = 'deploy vault | firewall | nginx | keycloak | matrix | rustfs | k8s | all' }
+    'deploy'       = @{ File = 'scripts\commands\deploy.ps1'; Group = 'Deploy'; Help = 'deploy vault | firewall | nginx | keycloak | matrix | rustfs | k8s | fleet | all' }
     'run'          = @{ Function = 'Invoke-LabRunCli'; PassExitCode = $true; Group = 'Deploy'; Help = 'run a profile on ansible-control (run <profile|playbook.yml> [ansible-playbook options]; alone: list them)' }
     'maintain'     = @{ Function = 'Invoke-LabMaintenance'; Group = 'Deploy'; Help = 'renew what is due (certificates, revocation lists); -List only shows it' }
     'connect'      = @{ File = 'scripts\commands\connect.ps1'; PassExitCode = $true; Group = 'Use'; Help = 'SSH to a lab machine as ansible (connect [vm] [command])' }
@@ -83,6 +83,7 @@ $script:LabCommands = [ordered]@{
     'recovery'     = @{ File = 'scripts\commands\recovery.ps1'; UserOnly = $true; Group = 'Your own window'; Help = 'the recovery kit (-Renew, -Open <file>, -Recover <file>)' }
     'mdad-upgrade' = @{ File = 'scripts\dev\Update-LabMdad.ps1'; Group = 'Maintainer'; Help = 'take a new matrix-docker-ansible-deploy commit into vendor\mdad' }
     'rancher-upgrade' = @{ File = 'scripts\dev\Update-LabRancherChart.ps1'; Group = 'Maintainer'; Help = 'take another Rancher Manager chart version into vendor\rancher (-Version, -Sha256)' }
+    'fleet-upgrade' = @{ File = 'scripts\dev\Update-LabFleetSource.ps1'; Group = 'Maintainer'; Help = 'take another Airflow chart or local-path-provisioner version into fleet\ (-Component, -Version, -Sha256)' }
 }
 
 # lab.ps1's arguments for the command behind it, as @{ Positional = @(...); Named = @{...} } for

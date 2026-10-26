@@ -63,7 +63,8 @@
     "  rustfs:   S3-compatible object storage at rustfs.<domain> and the UI at rustfs-console.<domain>",
     "            over HTTPS on 443; the RustFS backend ports remain private on the VM.",
     "  k8s-server: rancher = Rancher Manager, the cluster's management UI; hubble = Hubble UI,",
-    "            Cilium's view of the network flows between the pods. Both through central nginx",
+    "            Cilium's view of the network flows between the pods; airflow = Apache Airflow,",
+    "            deployed by Fleet from fleet/ (lab.ps1 deploy fleet). All through central nginx",
     "            to the cluster's ingress (Traefik on k8s-server), for the PC only.",
     "  vault:    OpenBao, the secrets manager and certificate authority (PKI); its web UI and API",
     "            on 8200 (OpenBao's standard port), e.g. https://vault.lab.internal:8200/ui/, directly",
@@ -145,9 +146,9 @@
     {
       "vm": "k8s-server",
       "address": "10.10.99.7",
-      "names": ["rancher", "hubble"],
+      "names": ["rancher", "hubble", "airflow"],
       "ports": [
-        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "source": "pc", "description": "HTTPS (Rancher Manager and Hubble UI, through the cluster's ingress)" }
+        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "source": "pc", "description": "HTTPS (Rancher Manager, Hubble UI and Airflow, through the cluster's ingress)" }
       ]
     }
   ]

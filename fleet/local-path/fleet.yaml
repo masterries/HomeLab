@@ -1,0 +1,22 @@
+# fleet/local-path/fleet.yaml - a Fleet bundle: Rancher's local-path-provisioner as the cluster's
+# default StorageClass (bundle "homelab-fleet-local-path", GitRepo "homelab" in fleet-local).
+#
+# Why: RKE2 brings no storage provisioner, but PostgreSQL in the Airflow bundle asks for a
+# PersistentVolumeClaim. local-path answers every claim with a directory on the node the pod runs
+# on (/opt/local-path-provisioner on an agent). Simple and light; the price: a volume is tied to
+# that node, and losing the node loses the data (no replication, no backup).
+# Enterprise equivalent: a CSI driver for real storage (a SAN, vSphere, Ceph/Rook, Longhorn).
+#
+# The bundle is plain Kubernetes YAML built by Kustomize (kustomization.yaml): the upstream manifest
+# local-path-storage.yaml, unchanged (version and SHA-256 in .lab-vendored-version, lab.ps1
+# fleet-upgrade), plus the lab's patches.
+#
+# defaultNamespace, not "namespace": the bundle also holds cluster-wide objects (StorageClass,
+# ClusterRole), which a forced namespace would break. Fleet creates the namespace itself.
+defaultNamespace: local-path-storage
+# The Airflow bundle waits until this one is Ready (its dependsOn selects this label).
+labels:
+  lab.bundle: local-path
+# Removing the bundle from Git leaves the StorageClass and the provisioner in place: volumes of
+# other workloads would otherwise lose their provisioner.
+keepResources: true

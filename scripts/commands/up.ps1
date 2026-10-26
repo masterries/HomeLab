@@ -23,7 +23,7 @@
       - It drives lab.ps1 firewall (the OPNsense firewall), Vagrant (Hyper-V provider,
         the Linux VMs) and the Hyper-V cmdlets, then tests the result over SSH. It does not
         deploy applications: that is done afterwards by .\lab.ps1 deploy vault (OpenBao), then
-        .\lab.ps1 deploy all (vault, firewall, nginx, keycloak, matrix, rustfs; other playbooks through
+        .\lab.ps1 deploy all (vault, firewall, nginx, keycloak, matrix, rustfs, k8s, fleet; other playbooks through
         .\lab.ps1 run).
       - Run again (for example after a Windows restart), it also unseals OpenBao and renews
         what is due: certificates and the root CA's revocation list (step 7).
@@ -145,7 +145,7 @@
 
     Related scripts: lab.ps1 host-setup (once, before this script),
     lab.ps1 trust (make Windows trust the lab root CA), lab.ps1 deploy vault (OpenBao:
-    secrets and the intermediate CA), lab.ps1 deploy all (vault, firewall, nginx, keycloak, matrix, rustfs,
+    secrets and the intermediate CA), lab.ps1 deploy all (vault, firewall, nginx, keycloak, matrix, rustfs, k8s, fleet,
     in this order after this script), lab.ps1 secret (read a password),
     lab.ps1 connect (SSH login), lab.ps1 run (run Ansible playbooks),
     lab.ps1 down (delete VMs).
@@ -556,5 +556,5 @@ if ((Test-Path (Join-Path $keyDir 'openbao\unseal-c.sha256')) -and -not (Test-La
 }
 if (-not $maintenanceDone) {
     Write-Host 'Next: .\lab.ps1 deploy vault (OpenBao), .\lab.ps1 trust (once per PC), .\lab.ps1 recovery (in your own window),'
-    Write-Host '      then .\lab.ps1 deploy all (central nginx, Keycloak, Matrix and RustFS)'
+    Write-Host '      then .\lab.ps1 deploy all (central nginx, Keycloak, Matrix, RustFS, Kubernetes and Fleet)'
 }

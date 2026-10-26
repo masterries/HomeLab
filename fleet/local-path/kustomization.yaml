@@ -1,0 +1,56 @@
+# fleet/local-path/kustomization.yaml - the upstream manifest plus the lab's changes. Fleet runs
+# Kustomize when it finds this file and deploys only what it lists.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # local-path-provisioner v0.0.37, unchanged (fleet/local-path/.lab-vendored-version).
+  - local-path-storage.yaml
+images:
+  # Pinned by digest, not only by tag: the image of v0.0.37 as the registry served it on
+  # 2026-10-26 (a multi-architecture index). lab.ps1 fleet-upgrade's help says how to update it.
+  - name: docker.io/rancher/local-path-provisioner
+    digest: sha256:e757967a5ec338f6a9b371c5a9688bedaa8c3578ea3dd4db329ea0084be0a86f
+patches:
+  # Fleet creates the namespace (defaultNamespace in fleet.yaml); a Namespace object in the bundle
+  # could be left behind unowned by a failed first install and block the next one.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: local-path-storage
+  # The cluster's default StorageClass: a claim without storageClassName gets a local-path volume.
+  - target:
+      group: storage.k8s.io
+      version: v1
+      kind: StorageClass
+      name: local-path
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          storageclass.kubernetes.io/is-default-class: "true"
+  # The helper pod that creates and deletes the volume directories: upstream names busybox without
+  # a tag (that is, "latest"); pinned here to 1.37.0 by digest. Otherwise unchanged.
+  - target:
+      version: v1
+      kind: ConfigMap
+      name: local-path-config
+    patch: |-
+      - op: replace
+        path: /data/helperPod.yaml
+        value: |-
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: helper-pod
+          spec:
+            priorityClassName: system-node-critical
+            tolerations:
+              - key: node.kubernetes.io/disk-pressure
+                operator: Exists
+                effect: NoSchedule
+            containers:
+            - name: helper-pod
+              image: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+              imagePullPolicy: IfNotPresent

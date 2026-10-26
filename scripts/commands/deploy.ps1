@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | firewall | nginx | keycloak | matrix | rustfs | k8s | all
+    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | firewall | nginx | keycloak | matrix | rustfs | k8s | fleet | all
 
 .DESCRIPTION
     Runs on the Windows host, as your own Windows user (no administrator rights needed). The work
@@ -36,17 +36,23 @@
                from OpenBao (ansible\kubernetes\site.yml, profile "k8s", with the vendored Rancher
                chart vendor\rancher). The first run downloads about 1.2 GB per node (RKE2's image
                archives, checked against pinned hashes) and Rancher's images.
-    all        vault, firewall, nginx, keycloak, matrix, rustfs, k8s - in that order, stopping at the
-               first failure.
+    fleet      GitOps on the cluster: Fleet (Rancher's GitOps controller) deploys what fleet\ in this
+               repository holds ON GITHUB - a default StorageClass and Apache Airflow (Celery stack).
+               This run (ansible\kubernetes\fleet.yml, profile "k8s-fleet") creates Airflow's secrets
+               from OpenBao, its certificate and the GitRepo object, then waits until Fleet has
+               deployed GitHub's main. It refuses while fleet\ differs from GitHub's main (changed
+               or new files): commit and push first (Fleet cannot see this checkout).
+    all        vault, firewall, nginx, keycloak, matrix, rustfs, k8s, fleet - in that order, stopping at
+               the first failure.
 
-    A snapshot of OpenBao follows every keycloak, matrix, rustfs and k8s run (also after a failure):
+    A snapshot of OpenBao follows every keycloak, matrix, rustfs, k8s and fleet run (also after a failure):
     secrets created by a first deployment exist only in OpenBao.
 
     Prerequisites: the lab is up (.\lab.ps1 up), and the firewall publishes the services
     ("published" in config\lab.json). Safe to run repeatedly: every step is idempotent.
 
 .PARAMETER Target
-    vault, firewall, nginx, keycloak, matrix, rustfs, k8s or all.
+    vault, firewall, nginx, keycloak, matrix, rustfs, k8s, fleet or all.
 
 .PARAMETER RotateIntermediate
     vault: make a new intermediate CA now (see Invoke-LabVaultDeploy).
@@ -70,7 +76,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('vault', 'firewall', 'nginx', 'keycloak', 'matrix', 'rustfs', 'k8s', 'all')]
+    [ValidateSet('vault', 'firewall', 'nginx', 'keycloak', 'matrix', 'rustfs', 'k8s', 'fleet', 'all')]
     [string]$Target,
     [switch]$RotateIntermediate,
     [switch]$Setup
@@ -81,8 +87,8 @@ $ErrorActionPreference = 'Stop'
 $domain = $script:LabConfig.domain
 
 # One run, then a snapshot of OpenBao in any case; a failed run stops the deployment.
-function Invoke-LabDeployRun([string]$RunName, [string]$What) {
-    Invoke-LabRun $RunName
+function Invoke-LabDeployRun([string]$RunName, [string]$What, [string[]]$ExtraArgs = @()) {
+    Invoke-LabRun $RunName $ExtraArgs
     $code = $LASTEXITCODE
     try { Backup-LabOpenBao }
     catch { Write-Warning "OpenBao snapshot failed: $($_.Exception.Message)" }
@@ -161,6 +167,37 @@ function Deploy-LabK8s {
     Write-Host 'kubectl on the server: .\lab.ps1 connect k8s-server, then: sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes'
 }
 
+function Deploy-LabFleet {
+    # Fleet clones GitHub, not this folder: what is not pushed does not exist for it. So the commit
+    # to deploy is GitHub's main, and fleet\ here must be the same (committed and pushed).
+    Write-Host '== Fleet: is fleet\ pushed? (Fleet deploys from GitHub) =='
+    $ErrorActionPreference = 'Continue'
+    & git -C $script:LabProjectRoot fetch -q origin main 2>&1 | Out-Null
+    $fetchCode = $LASTEXITCODE
+    $remote = (& git -C $script:LabProjectRoot rev-parse origin/main 2>$null)
+    # "git diff" compares only files Git knows; a new file nobody added is not among them.
+    & git -C $script:LabProjectRoot diff --quiet origin/main -- fleet 2>$null
+    $diffCode = $LASTEXITCODE
+    $untracked = @(& git -C $script:LabProjectRoot ls-files --others --exclude-standard -- fleet 2>$null)
+    $ErrorActionPreference = 'Stop'
+    if ($fetchCode -ne 0 -or -not $remote) { throw 'Cannot read origin/main from GitHub (git fetch failed).' }
+    if ($untracked.Count -gt 0) {
+        throw "fleet\ has files Git does not track ($(@($untracked | Select-Object -First 3) -join ', ')$(if ($untracked.Count -gt 3) { ', ...' })). Fleet deploys only what is pushed: git add, commit, git push, then run this again."
+    }
+    if ($diffCode -ne 0) {
+        throw "fleet\ here differs from GitHub's main ($($remote.Substring(0, 7))). Fleet deploys only what is pushed: commit, then git push, then run this again."
+    }
+    Write-Host "Fleet:       will deploy fleet/ at GitHub's main, $($remote.Substring(0, 7))"
+    Write-Host '== Fleet: Airflow''s secrets and certificate, the GitRepo, then wait for the bundles (kubernetes\fleet.yml; the first run pulls Airflow''s image, about 1 GB) =='
+    Invoke-LabDeployRun 'k8s-fleet' 'The Fleet deployment' @('-e', "lab_fleet_commit=$remote")
+    # The playbook checks the lab-side path; this is the PC's (DNS, the firewall's forward, Windows' trust).
+    $response = Invoke-WebRequest -Uri "https://airflow.${domain}/api/v2/monitor/health" -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+    if ([int]$response.StatusCode -ne 200) { throw "Airflow is not ready from the PC (HTTP $($response.StatusCode))." }
+    Write-Host ''
+    Write-Host "Airflow: https://airflow.${domain}  (user admin; password to the clipboard: .\lab.ps1 secret k8s/airflow/admin)"
+    Write-Host 'Fleet:   Rancher > Continuous Delivery (Git Repos, Bundles). A change to fleet\ goes live after git push.'
+}
+
 switch ($Target) {
     'vault' { Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate }
     'firewall' { Deploy-LabFirewall }
@@ -169,6 +206,7 @@ switch ($Target) {
     'matrix' { Deploy-LabMatrix }
     'rustfs' { Deploy-LabRustfs }
     'k8s' { Deploy-LabK8s }
+    'fleet' { Deploy-LabFleet }
     'all' {
         Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate
         Deploy-LabFirewall
@@ -177,5 +215,6 @@ switch ($Target) {
         Deploy-LabMatrix
         Deploy-LabRustfs
         Deploy-LabK8s
+        Deploy-LabFleet
     }
 }

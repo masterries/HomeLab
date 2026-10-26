@@ -17,7 +17,9 @@
         layout before lab.ps1); README.md names them only in its rename section ("Where the old
         scripts went"),
       - every link in README.md, tests\README.md and vendor\README.md resolves: "#anchor" links to
-        a heading of the same document, other links to a file or folder of the repository.
+        a heading of the same document, other links to a file or folder of the repository,
+      - fleet\: every GitRepo path has a fleet.yaml, the vendored Airflow chart and local-path
+        manifest are the versions (and the manifest the bytes) their markers name.
     The dispatcher: "help" works, an unknown command is refused, a command for your own window is
     refused when the output is redirected (as here), "breakglass" without a command is refused.
 
@@ -78,6 +80,24 @@ foreach ($policy in Get-ChildItem $policyDir -Filter '*.hcl') {
     $used = $profileText.Contains($quoted) -or $vaultCode.Contains("'$($policy.BaseName)'")
     Assert-LabTest "policy $($policy.BaseName) is used" $used
 }
+
+Write-Host 'Fleet (GitOps content in fleet\)'
+# Every folder Fleet reads has its fleet.yaml; no YAML lies directly in fleet\ (Fleet would make the
+# whole folder a bundle of raw YAML if the GitRepo ever read it).
+$fleetVars = Get-Content -Raw (Join-Path $root 'ansible\kubernetes\vars\kubernetes.yml')
+$fleetPaths = @([regex]::Matches(($fleetVars -split 'fleet_paths:')[1], '(?m)^  - (\S+)') | ForEach-Object { $_.Groups[1].Value })
+Assert-LabTest 'every GitRepo path has a fleet.yaml' ($fleetPaths.Count -gt 0 -and @($fleetPaths | Where-Object { -not (Test-Path (Join-Path $root "$_\fleet.yaml")) }).Count -eq 0) ($fleetPaths -join ', ')
+Assert-LabTest 'no YAML directly in fleet\' (@(Get-ChildItem (Join-Path $root 'fleet') -File -Filter '*.y*ml').Count -eq 0)
+# The vendored sources are the versions their markers name (lab.ps1 fleet-upgrade writes both).
+$airflowMarker = (Get-Content -Raw (Join-Path $root 'fleet\airflow\.lab-vendored-version')).Trim() -split '\s+'
+$airflowChart = [regex]::Match((Get-Content -Raw (Join-Path $root 'fleet\airflow\chart\Chart.yaml')), '(?m)^version:\s*"?([^"\s]+)').Groups[1].Value
+Assert-LabTest 'fleet\airflow\chart is the version its marker names' ($airflowMarker[0] -eq $airflowChart) "$($airflowMarker[0]) / Chart.yaml $airflowChart"
+$localPathMarker = (Get-Content -Raw (Join-Path $root 'fleet\local-path\.lab-vendored-version')).Trim() -split '\s+'
+$localPathFile = Join-Path $root 'fleet\local-path\local-path-storage.yaml'
+$localPathHash = 'sha256:' + (Get-FileHash -Algorithm SHA256 $localPathFile).Hash.ToLower()
+Assert-LabTest 'fleet\local-path\local-path-storage.yaml is unchanged (SHA-256 of its marker)' ($localPathMarker[1] -eq $localPathHash) "$($localPathMarker[0])"
+# Fleet expands ${ } in helm values; the lab's values must not contain any.
+Assert-LabTest 'no ${ } in fleet\airflow\fleet.yaml' (-not (Get-Content -Raw (Join-Path $root 'fleet\airflow\fleet.yaml')).Contains('${'))
 
 Write-Host 'No names from before lab.ps1'
 $retired = 'Initialize-Lab', 'New-LabFirewall', 'Deploy-LabVault', 'Deploy-LabKeycloak', 'Deploy-LabMatrix', 'Remove-Lab',

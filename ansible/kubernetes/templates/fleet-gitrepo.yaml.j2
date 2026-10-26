@@ -1,0 +1,25 @@
+# Managed by ansible/kubernetes/fleet.yml. The one object that connects the cluster to this
+# repository: Fleet (Rancher's GitOps controller) clones it, finds a bundle in every folder of
+# "paths" that has a fleet.yaml, and deploys each one to the clusters of "targets". It polls for a
+# new commit every pollingInterval; a push to the branch is all it takes to change the cluster.
+#
+# fleet-local is the namespace for Rancher's own cluster ("local"). The repository is public, so no
+# credentials. Only the listed folders are read (fleet/airflow-dags is git-sync's, not Fleet's).
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: {{ fleet_gitrepo_name }}
+  namespace: fleet-local
+spec:
+  repo: {{ fleet_repo_url }}
+  # Fleet's default branch is "master".
+  branch: {{ fleet_branch }}
+  paths:
+{% for path in fleet_paths %}
+    - {{ path }}
+{% endfor %}
+  # Written as Kubernetes stores a duration ("1m" would be rewritten to 1m0s by Fleet, and the next
+  # apply would report a change).
+  pollingInterval: 1m0s
+  targets:
+    - clusterName: local

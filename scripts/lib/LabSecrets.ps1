@@ -404,6 +404,8 @@ function Get-LabSubjectKeyId($Certificate) {
 #                                    intermediate changed
 #   Rancher's and Hubble UI's TLS    30 days before, or when the  lab.ps1 deploy k8s
 #   certificates (Kubernetes)        intermediate changed
+#   Airflow's TLS certificate        the same                     lab.ps1 run k8s-fleet (no push
+#                                                                 check, unlike deploy fleet)
 #   the firewall's GUI certificate   30 days before, and when it  lab.ps1 deploy firewall
 #                                    is not from the current
 #                                    intermediate (a new firewall
@@ -479,6 +481,15 @@ function Get-LabMaintenanceDue {
         if ($served.NotAfter -lt $now.AddDays(30) -or ($intermediate -and (Get-LabAuthorityKeyId $served) -ne (Get-LabSubjectKeyId $intermediate))) {
             $due += @{ What = "the Kubernetes cluster's TLS certificates ($name.$($script:LabConfig.domain), valid until $($served.NotAfter.ToString('yyyy-MM-dd')))"; Action = @('deploy', 'k8s') }
             break
+        }
+    }
+    # Airflow (lab.ps1 deploy fleet). Traefik answers for its name before that, with its own default
+    # certificate: only a certificate that names Airflow counts as deployed. The renewal runs the
+    # profile directly ("run k8s-fleet"): unlike "deploy fleet" it needs no pushed fleet\.
+    $airflow = Get-LabServedCertificate "airflow.$($script:LabConfig.domain)" 443
+    if ($airflow -and $airflow.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::DnsName, $false) -eq "airflow.$($script:LabConfig.domain)") {
+        if ($airflow.NotAfter -lt $now.AddDays(30) -or ($intermediate -and (Get-LabAuthorityKeyId $airflow) -ne (Get-LabSubjectKeyId $intermediate))) {
+            $due += @{ What = "Airflow's TLS certificate (valid until $($airflow.NotAfter.ToString('yyyy-MM-dd')))"; Action = @('run', 'k8s-fleet') }
         }
     }
     return , $due
