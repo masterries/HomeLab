@@ -24,19 +24,21 @@
         quiet: true
       loop: "{{ nginx_routes.tls + nginx_routes.http + (nginx_routes.tcp | default([])) }}"
 
-    - name: Only OpenBao receives trusted client-address metadata
+    # No backend may trust what nginx says about a client: OpenBao, the one service that binds
+    # logins to client addresses, is forwarded directly by the firewall and never routed here.
+    - name: No route sends client-address metadata (PROXY protocol), and OpenBao is not routed
       ansible.builtin.assert:
         that:
-          - (item.proxyProtocol | default(false) | bool) == (item.vm == 'vault')
+          - not (item.proxyProtocol | default(false) | bool)
+          - item.vm != 'vault'
         quiet: true
-      loop: "{{ nginx_routes.tls + (nginx_routes.tcp | default([])) }}"
+      loop: "{{ nginx_routes.tls + nginx_routes.http + (nginx_routes.tcp | default([])) }}"
 
-    - name: Validate the OpenBao compatibility listener
+    - name: Validate plain TCP passthrough listeners (lab-internal, same port on the backend)
       ansible.builtin.assert:
         that:
-          - item.listen | int == 8200
-          - item.vm == 'vault'
-          - item.port | int == 8200
+          - item.listen | int == item.port | int
+          - item.listen | int not in [80, 443]
         quiet: true
       loop: "{{ nginx_routes.tcp | default([]) }}"
 
@@ -126,25 +128,16 @@
         timeout: 30
       when: not ansible_check_mode
 
-    - name: OpenBao accepts trusted proxy traffic and remains unsealed before cutover
-      ansible.builtin.command:
-        argv:
-          - python3
-          - "{{ playbook_dir }}/../tests/openbao-ingress-check.py"
-          - --address
-          - "{{ nginx_ip }}"
-          - --port
-          - "8200"
-          - --hostname
-          - "vault.{{ lab_domain }}"
-          - --ca-file
-          - "{{ lab_pki_dir }}/root-ca.crt"
-          - --health
-          - --expect-status
-          - "200"
+    - name: Every TCP passthrough listener reaches its backend
+      ansible.builtin.wait_for:
+        host: "{{ nginx_ip }}"
+        port: "{{ item.listen }}"
+        timeout: 30
+      loop: "{{ nginx_routes.tcp | default([]) }}"
+      loop_control:
+        label: "{{ item.listen }} -> {{ item.vm }}:{{ item.port }}"
       delegate_to: ansible-control
       become: false
-      changed_when: false
       when: not ansible_check_mode
 
   handlers:

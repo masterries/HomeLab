@@ -6,7 +6,7 @@
 .DESCRIPTION
     Read-only. Needs the lab root CA imported into Windows (.\lab.ps1 trust);
     without it every "trusted" check fails. Expected issuers:
-      vault.lab.internal:443 and :8200                 the offline root CA
+      vault.lab.internal:8200 (directly, never via nginx) the offline root CA
       firewall, keycloak, matrix, element, lab.internal  the current intermediate CA in OpenBao
       rustfs.lab.internal and rustfs-console.lab.internal the current intermediate CA in OpenBao
     (A newly built firewall starts with a certificate from the root; lab.ps1 up and
@@ -30,7 +30,6 @@ $rootKeyId = Get-LabSubjectKeyId $root
 $endpoints = @(
     @{ Host = "firewall.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = "vault.$domain"; Port = 8200; Issuer = 'root' },
-    @{ Host = "vault.$domain"; Port = 443; Issuer = 'root' },
     @{ Host = "keycloak.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = "rustfs.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = "rustfs-console.$domain"; Port = 443; Issuer = 'intermediate' },

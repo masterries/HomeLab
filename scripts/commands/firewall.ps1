@@ -121,6 +121,10 @@ if ($existing -and -not $Rebuild) {
     # Left behind by an earlier first boot that failed?
     Remove-SeedIso
     if ($existing.State -ne 'Running') { Start-VM -VM $existing; Write-Host "VM:          $vmName started" }
+    # After the ingress cutover the GUI (10.10.99.2:443) goes through nginx, and the certificate
+    # check below waits for it: start an existing nginx VM too (after a Windows restart it is off).
+    $nginxVm = Get-LabSshHyperVVm 'nginx'
+    if ($nginxVm -and $nginxVm.State -ne 'Running') { Start-VM -VM $nginxVm; Write-Host 'VM:          nginx started (serves the firewall GUI)' }
     Wait-TcpPort $lab.firewall.hostIp 22 300
     Update-FirewallSsh
 }

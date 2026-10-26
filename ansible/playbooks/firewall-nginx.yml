@@ -1,5 +1,7 @@
-# Bootstrap adds only nginx DHCP/DNS and preserves an already-routed appliance. Route switches
-# exact managed web NAT targets and split DNS together after all nginx listeners are ready.
+# Bootstrap adds only nginx DHCP/DNS and preserves an already-routed appliance. Route makes the
+# firewall's forwards and split DNS match lab.json's publications (opnsense/lab-nginx.php),
+# after nginx listens on every port it will receive: routed ports to nginx, the rest (OpenBao)
+# directly to their VM.
 - name: Reconcile central nginx ingress on the existing firewall
   hosts: firewalls
   become: true
@@ -8,9 +10,23 @@
     nginx_firewall_stage: route
     firewall_nginx_private_address: "{{ (lab_config.vms | selectattr('name', 'equalto', 'nginx') | first).ip }}"
     firewall_nginx_publications: "{{ lab_config.published }}"
+    # Routed publications: those with a port that names targetVm nginx. Only their names move
+    # to nginx inside the lab; direct ones (vault) keep their VM's own address.
+    firewall_nginx_routed: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for pub in lab_config.published -%}
+      {%- if pub.ports | selectattr('targetVm', 'defined') | selectattr('targetVm', 'equalto', 'nginx') | list | length > 0 -%}
+      {%- set ns.out = ns.out + [pub] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    firewall_nginx_ingress_ports: >-
+      {{ firewall_nginx_routed | map(attribute='ports') | flatten | selectattr('targetVm', 'defined') |
+         map(attribute='port') | unique | sort | list }}
     firewall_nginx_web_names: >-
-      {{ (lab_config.published | map(attribute='names') | flatten | reject('equalto', '@') |
-          map('regex_replace', '$', '.' ~ lab_domain) | list) + [lab_domain, 'firewall.' ~ lab_domain] }}
+      {{ (firewall_nginx_routed | map(attribute='names') | flatten | map('regex_replace', '^@$', '') |
+          map('regex_replace', '^(.+)$', '\1.' ~ lab_domain) | map('regex_replace', '^$', lab_domain) | list) +
+         ['firewall.' ~ lab_domain] }}
     firewall_nginx_dns_names: >-
       {{ ['nginx.' ~ lab_domain] + (firewall_nginx_web_names if nginx_firewall_stage == 'route' else []) }}
   tasks:
@@ -18,7 +34,7 @@
       ansible.builtin.assert:
         that: nginx_firewall_stage in ['bootstrap', 'route']
 
-    - name: All nginx web and OpenBao listeners are ready before changing DNS or NAT
+    - name: nginx listens on every port the firewall will forward to it, before DNS or NAT change
       ansible.builtin.wait_for:
         host: "{{ firewall_nginx_private_address }}"
         port: "{{ item }}"
@@ -26,7 +42,7 @@
         timeout: 10
       delegate_to: ansible-control
       become: false
-      loop: [80, 443, 8200]
+      loop: "{{ firewall_nginx_ingress_ports }}"
       when: nginx_firewall_stage == 'route' and not ansible_check_mode
 
     - name: A temporary folder for the public configuration and helper
@@ -148,10 +164,10 @@
             [firewall_nginx_private_address]
           when: not ansible_check_mode
 
-        - name: Backend DHCP names retain their private management addresses
+        - name: Backend DHCP names of routed publications retain their private management addresses
           ansible.builtin.command:
             argv: [getent, ahostsv4, "{{ item.vm }}-backend.{{ lab_domain }}"]
-          loop: "{{ firewall_nginx_publications }}"
+          loop: "{{ firewall_nginx_routed }}"
           loop_control:
             label: "{{ item.vm }}"
           register: firewall_nginx_backend_dns

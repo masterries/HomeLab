@@ -50,23 +50,20 @@ Current `lab.ps1 up` uses `firewall-nginx` rather than this legacy onboarding pr
 
 The central proxy passes encrypted TLS streams by SNI and holds no application private
 keys. Live certificate checks continue checking the backend certificates through the
-existing service URLs. RustFS's own nginx remains its TLS terminator; Vault's API/CA
-HTTP and the firewall GUI also use central ingress after cutover. OpenBao accepts original
-client addresses through PROXY metadata only from nginx, retaining token CIDR restrictions.
-Matrix's media ports remain direct. Before cutover the nginx playbook requires OpenBao
-to answer through its trusted proxy with verified TLS and an unsealed health status.
-The other backend applications can still be deployed afterwards on a fresh lab.
+existing service URLs. RustFS's own nginx remains its TLS terminator; the firewall GUI
+also uses central ingress after cutover. OpenBao does not: the firewall forwards it
+directly, because its logins and tokens are bound to client addresses that a proxy would
+have to vouch for, and no backend accepts PROXY metadata. Matrix's media ports remain
+direct, and nginx passes 8448 (Synapse's openid resource, used by the LiveKit JWT
+service) through to the matrix VM. The other backend applications can still be deployed
+afterwards on a fresh lab.
 
 `ansible/tests/nginx-routing-check.py` compares the direct and central TLS certificates
 with normal CA/hostname validation and checks Matrix's HTTP challenge paths. Unknown
 or missing SNI must fail the handshake even with certificate verification disabled.
 Running it on nginx with `--denied-source 127.0.0.1` also checks that both RustFS
 names and the firewall GUI reject an unauthorized source while Matrix accepts that
-same source. This preserves their PC restrictions across published IPs. Vault's public
-CA/CRL paths must return the same bytes through ingress as directly from the backend.
-`ansible/tests/openbao-ingress-check.py` accepts test tokens only on stdin and verifies
-their source restrictions through both 443 and 8200. It also tests that a forged PROXY
-address from an untrusted direct client cannot impersonate the PC; no token is printed.
+same source. This preserves their PC restrictions across published IPs.
 The PC and control node keep explicit private SSH routes with FQDN `HostKeyAlias`,
 certificate-only host algorithms and revocation checks. `checks.yml` normally requires
 every published web domain to resolve only to nginx inside the lab; `up` enables its

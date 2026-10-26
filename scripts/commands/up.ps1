@@ -373,11 +373,12 @@ try {
     # Hyper-V and OpenBao is unsealed over HTTPS first - no SSH involved.
     $firewallVm = Get-VM -Name $firewallName -ErrorAction SilentlyContinue
     if ($firewallVm -and $firewallVm.State -ne 'Running') { Start-VM -VM $firewallVm; Write-Host "Started:     $firewallName" }
-    # Vault's public and lab API paths use ingress after cutover. Start an existing nginx
-    # directly through Hyper-V before unsealing or renewing the first SSH certificate.
+    # After the ingress cutover the firewall's own GUI (10.10.99.2:443) goes through nginx, and
+    # lab.ps1 firewall checks it below. Start an existing nginx directly through Hyper-V.
+    # (OpenBao does not need it: the firewall forwards OpenBao directly.)
     if ($states.Contains('nginx') -and $states['nginx'] -notin 'running', 'not_created') {
         Start-VM -VM (Get-LabVM 'nginx')
-        Write-Host 'Started:     nginx (Hyper-V; routes OpenBao before SSH certificates are needed)'
+        Write-Host 'Started:     nginx (Hyper-V; serves the firewall GUI and the web names)'
     }
     if ($states.Contains('vault') -and $states['vault'] -notin 'running', 'not_created') {
         Start-VM -VM (Get-LabVM 'vault')
@@ -404,18 +405,25 @@ try {
             Start-VM -VM (Get-LabVM 'ansible-control')
             Write-Host 'Started:     ansible-control (adds nginx to the existing firewall)'
         }
-        # This early connection precedes step 5's normal host-certificate renewal. Repair a
-        # due/expired control certificate through the verified Hyper-V KVP key first too.
-        Update-LabVmHostCertificates @('ansible-control')
-        # The bastion and control node can need a moment after a Windows restart.
+        # This early connection precedes step 5's normal host-certificate renewal. A due or
+        # expired control certificate is repaired through the verified Hyper-V KVP key. After a
+        # Windows restart the VM needs a moment (DHCP, sshd) before that can work: the KVP item
+        # is there long before sshd answers, so a failed attempt is retried, not fatal.
         $controlReady = $false
+        $lastError = 'no answer'
         for ($attempt = 0; $attempt -lt 30; $attempt++) {
-            if (Test-LabSshStrictLogin 'ansible-control') { $controlReady = $true; break }
+            try {
+                Update-LabVmHostCertificates @('ansible-control')
+                if (Test-LabSshStrictLogin 'ansible-control') { $controlReady = $true; break }
+            }
+            catch { $lastError = $_.Exception.Message }
             Start-Sleep -Seconds 3
         }
-        if (-not $controlReady) { throw 'ansible-control is not reachable with verified SSH; cannot safely add nginx to the running firewall.' }
+        if (-not $controlReady) { throw "ansible-control is not reachable with verified SSH ($lastError); cannot safely add nginx to the running firewall." }
         Invoke-LabRun firewall-nginx @('-e', 'nginx_firewall_stage=bootstrap')
-        if ($LASTEXITCODE -ne 0) { throw "firewall-nginx.yml failed (exit code $LASTEXITCODE). The existing firewall has not been rebuilt." }
+        if ($LASTEXITCODE -ne 0) {
+            throw "firewall-nginx.yml failed (exit code $LASTEXITCODE); nothing on the firewall was changed. A firewall built before a publication of config\lab.json (RustFS, for example) lacks its address and forwards: .\lab.ps1 firewall -Rebuild builds them."
+        }
         Clear-DnsClientCache
         $rustfsPublished = $lab.published | Where-Object { $_.vm -eq 'rustfs' }
         $rustfsAnswer = @(Resolve-LabName "rustfs.$labDomain")

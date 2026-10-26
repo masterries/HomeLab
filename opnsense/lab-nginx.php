@@ -1,6 +1,9 @@
 <?php
 /* Pure, bounded planning plus an appliance CLI. Bootstrap adds only nginx DHCP/DNS;
- * route atomically migrates the exact managed web ingress and split DNS records.
+ * route atomically migrates the managed ingress and split DNS records to what lab.json
+ * says: every publication of lab.json, each port either to its VM or (targetVm nginx) to
+ * central nginx, and forwards this lab generated for ports lab.json no longer lists removed.
+ * Anything it did not generate (other NAT rules, foreign DNS records) makes it refuse.
  * php lab-nginx.php --check|--apply|--status lab.json [--bootstrap]
  */
 function lab_nginx_require($condition, $message)
@@ -105,28 +108,53 @@ function lab_nginx_managed_host($actual, $expected)
     return true;
 }
 
-function lab_nginx_plan_dns($hosts, $lab, $vms, $bootstrap)
+// The networks lab VMs may live in: labNetwork and every lab.json segment's cidr.
+function lab_nginx_networks($lab)
+{
+    $networks = [$lab['labNetwork'] ?? ''];
+    foreach ($lab['segments'] ?? [] as $segment) { $networks[] = $segment['cidr'] ?? ''; }
+    return $networks;
+}
+
+function lab_nginx_in_any_network($address, $networks)
+{
+    foreach ($networks as $network) { if (lab_nginx_in_network($address, $network)) { return true; } }
+    return false;
+}
+
+// One published name below the domain: a DNS label, or "@" for the domain itself.
+function lab_nginx_valid_alias($alias)
+{
+    return $alias === '@' || (is_string($alias) && preg_match('/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/D', $alias));
+}
+
+// A publication is routed through nginx when one of its ports names targetVm nginx. Only
+// routed publications get the nginx-side split DNS and a <vm>-backend reservation; direct
+// publications (OpenBao, for example) keep their VM's own name and address in the lab.
+function lab_nginx_plan_dns($hosts, $lab, $vms, $routed, $bootstrap)
 {
     $domain = $lab['domain']; $ip = $vms['nginx']['ip'];
     $nginx = lab_nginx_host('nginx', $ip, $domain, lab_nginx_mac($vms['nginx']));
-    $slots = ['nginx' => ['old' => $nginx, 'new' => $nginx, 'optional' => true]];
+    $slots = ['nginx' => ['variants' => [$nginx], 'new' => $nginx, 'optional' => true]];
     if (!$bootstrap) {
         foreach ($lab['published'] as $pub) {
-            $vm = $vms[$pub['vm']]; $name = $pub['vm']; $mac = lab_nginx_mac($vm);
-            $slots[$name . '-reservation'] = ['old' => lab_nginx_host($name, $vm['ip'], $domain, $mac), 'new' => lab_nginx_host($name . '-backend', $vm['ip'], $domain, $mac)];
+            $vm = $vms[$pub['vm']]; $name = $pub['vm']; $mac = lab_nginx_mac($vm); $viaNginx = isset($routed[$name]);
+            $direct = lab_nginx_host($name, $vm['ip'], $domain, $mac);
+            $backend = lab_nginx_host($name . '-backend', $vm['ip'], $domain, $mac);
+            $slots[$name . '-reservation'] = ['variants' => [$direct, $backend], 'new' => $viaNginx ? $backend : $direct];
             foreach ($pub['names'] as $alias) {
-                $slots[$name . '-dns-' . $alias] = [
-                    'old' => lab_nginx_host($alias, $alias === $name ? $pub['address'] : $vm['ip'] . ',' . $pub['address'], $domain),
-                    'new' => lab_nginx_host($alias, $ip . ',' . $pub['address'], $domain),
-                ];
+                $directAlias = lab_nginx_host($alias, $alias === $name ? $pub['address'] : $vm['ip'] . ',' . $pub['address'], $domain);
+                $routedAlias = lab_nginx_host($alias, $ip . ',' . $pub['address'], $domain);
+                $slots[$name . '-dns-' . $alias] = ['variants' => [$directAlias, $routedAlias], 'new' => $viaNginx ? $routedAlias : $directAlias];
             }
         }
-        $slots['firewall'] = ['old' => lab_nginx_host('firewall', $lab['firewall']['lanIp'] . ',' . $lab['firewall']['hostIp'], $domain), 'new' => lab_nginx_host('firewall', $ip . ',' . $lab['firewall']['hostIp'], $domain)];
+        $firewallDirect = lab_nginx_host('firewall', $lab['firewall']['lanIp'] . ',' . $lab['firewall']['hostIp'], $domain);
+        $firewallRouted = lab_nginx_host('firewall', $ip . ',' . $lab['firewall']['hostIp'], $domain);
+        $slots['firewall'] = ['variants' => [$firewallDirect, $firewallRouted], 'new' => $firewallRouted];
     }
     $reservedNames = []; $reservedIps = []; $reservedMacs = [];
     foreach ($slots as $slot) {
-        foreach (['old', 'new'] as $version) {
-            $entry = $slot[$version];
+        foreach ($slot['variants'] as $entry) {
             $reservedNames[] = strtolower($entry['host'] . '.' . $entry['domain']);
             $reservedIps = array_merge($reservedIps, explode(',', $entry['ip']));
             if ($entry['hwaddr'] !== '') { $reservedMacs[] = $entry['hwaddr']; }
@@ -141,6 +169,8 @@ function lab_nginx_plan_dns($hosts, $lab, $vms, $bootstrap)
         // On a routed appliance many names intentionally share nginx's address. Bootstrap
         // owns only its own reservation, so preserve these already-migrated web records.
         if ($bootstrap && $fqdn !== 'nginx.' . $domain && !in_array(lab_nginx_mac($vms['nginx']), explode(',', strtolower($host['hwaddr'] ?? '')), true)) {
+            // Any publication: a record routed earlier stays as it is until the route stage
+            // (which also moves a publication back to direct, as OpenBao was).
             $approved = false;
             foreach ($lab['published'] as $pub) {
                 foreach ($pub['names'] as $alias) {
@@ -153,7 +183,9 @@ function lab_nginx_plan_dns($hosts, $lab, $vms, $bootstrap)
         }
         $matched = null;
         foreach ($slots as $slotKey => $slot) {
-            if (lab_nginx_managed_host($host, $slot['old']) || lab_nginx_managed_host($host, $slot['new'])) { $matched = $slotKey; break; }
+            foreach ($slot['variants'] as $variant) {
+                if (lab_nginx_managed_host($host, $variant)) { $matched = $slotKey; break 2; }
+            }
         }
         lab_nginx_require($matched !== null && !isset($seen[$matched]), 'Conflicting or duplicate managed DNS/DHCP record');
         $seen[$matched] = true;
@@ -176,15 +208,17 @@ function lab_nginx_plan($current, $lab, $bootstrap = false)
     $domain = $lab['domain'] ?? '';
     lab_nginx_require(preg_match('/^[a-z0-9][a-z0-9.-]*\.[a-z0-9-]+$/D', $domain), 'Invalid lab domain');
     lab_nginx_require(is_array($lab['centralIngress'] ?? null) && count($lab['centralIngress']) === 2 && ($lab['centralIngress']['firewallGui'] ?? null) === true && ($lab['centralIngress']['internalWebDns'] ?? null) === true, 'Both approved central ingress features must be enabled');
+    $networks = lab_nginx_networks($lab);
     $vms = []; $usedIps = []; $usedMacs = [];
     foreach ($lab['vms'] ?? [] as $vm) {
         lab_nginx_require(isset($vm['name']) && !isset($vms[$vm['name']]), 'Missing or duplicate VM in lab.json');
-        lab_nginx_require(lab_nginx_in_network($vm['ip'] ?? '', $lab['labNetwork'] ?? ''), 'VM lies outside the lab network');
+        lab_nginx_require(lab_nginx_in_any_network($vm['ip'] ?? '', $networks), 'VM lies outside the lab networks');
         $mac = lab_nginx_mac($vm);
         lab_nginx_require(!in_array($vm['ip'], $usedIps, true) && !in_array($mac, $usedMacs, true), 'Duplicate VM IP or MAC');
         $vms[$vm['name']] = $vm; $usedIps[] = $vm['ip']; $usedMacs[] = $mac;
     }
     lab_nginx_require(isset($vms['nginx']), 'lab.json must define nginx');
+    lab_nginx_require(lab_nginx_in_network($vms['nginx']['ip'], $lab['labNetwork'] ?? ''), 'nginx must live in the lab network');
     $ip = $vms['nginx']['ip'];
     foreach (['lanIp', 'hostIp', 'pcIp'] as $key) {
         lab_nginx_require(filter_var($lab['firewall'][$key] ?? '', FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false && !in_array($lab['firewall'][$key], $usedIps, true), 'Firewall/PC address invalid or collides with a VM');
@@ -197,43 +231,43 @@ function lab_nginx_plan($current, $lab, $bootstrap = false)
     lab_nginx_require(in_array('opt1', explode(',', $current['dnsmasq']['dhcp']['no_interface'] ?? ''), true), 'DHCP must remain disabled on HOST');
     lab_nginx_require(!array_key_exists('no_hosts', $current['dnsmasq']) || in_array($current['dnsmasq']['no_hosts'], ['', '0', '1'], true), 'Unexpected dnsmasq system-host lookup setting');
 
-    $allowedNames = ['matrix' => ['matrix', 'element', '@'], 'keycloak' => ['keycloak'], 'vault' => ['vault'], 'rustfs' => ['rustfs', 'rustfs-console']];
-    $allowedPorts = ['matrix' => ['tcp:443', 'tcp:7881', 'tcp:80', 'udp:7882'], 'keycloak' => ['tcp:443'], 'vault' => ['tcp:443', 'tcp:80', 'tcp:8200'], 'rustfs' => ['tcp:443']];
-    $allowedOverrides = ['matrix:tcp:443', 'matrix:tcp:80', 'keycloak:tcp:443', 'vault:tcp:443', 'vault:tcp:80', 'vault:tcp:8200', 'rustfs:tcp:443'];
-    $expected = []; $affectedVips = []; $affectedIps = [$ip]; $overrides = []; $publications = [];
+    // Every publication of lab.json, whatever its VM: the shape is checked, not a fixed list.
+    // Per port: targetVm nginx sends it to central nginx (only HTTP 80 and HTTPS 443, which
+    // nginx serves), otherwise to the VM itself; source "pc" limits it to the PC's address.
+    $expected = []; $affectedVips = []; $affectedIps = [$ip]; $publications = []; $routed = []; $aliases = []; $vipOwner = [];
     foreach ($lab['published'] ?? [] as $pub) {
         $name = $pub['vm'] ?? '';
-        lab_nginx_require(isset($allowedNames[$name], $vms[$name]) && !isset($publications[$name]), 'Unknown or duplicate managed publication');
-        lab_nginx_require(($pub['names'] ?? []) === $allowedNames[$name], 'Unexpected managed publication DNS names');
+        lab_nginx_require($name !== 'nginx' && isset($vms[$name]) && !isset($publications[$name]), 'Unknown or duplicate publication');
+        lab_nginx_require(is_array($pub['names'] ?? null) && count($pub['names']) > 0, 'A publication needs at least one name');
+        foreach ($pub['names'] as $alias) {
+            lab_nginx_require(lab_nginx_valid_alias($alias) && !isset($aliases[$alias]), 'Invalid or duplicate published name');
+            $aliases[$alias] = true;
+        }
         lab_nginx_require(lab_nginx_in_network($pub['address'] ?? '', $lab['hostNetwork'] ?? '') && !in_array($pub['address'], array_merge($affectedVips, array_values($lab['firewall'])), true), 'Published address invalid or collides');
-        $actualPorts = array_map(fn($port) => ($port['protocol'] ?? '') . ':' . ($port['port'] ?? ''), $pub['ports'] ?? []); sort($actualPorts);
-        lab_nginx_require($actualPorts === $allowedPorts[$name], 'Unexpected ports on a managed ingress publication');
-        $publications[$name] = true; $affectedVips[] = $pub['address']; $affectedIps[] = $vms[$name]['ip'];
+        lab_nginx_require(is_array($pub['ports'] ?? null) && count($pub['ports']) > 0, 'A publication needs at least one port');
+        $publications[$name] = true; $affectedVips[] = $pub['address']; $affectedIps[] = $vms[$name]['ip']; $vipOwner[$pub['address']] = $name;
         foreach ($pub['ports'] as $port) {
-            $key = $name . ':' . $port['protocol'] . ':' . $port['port'];
-            if (isset($port['targetVm'])) {
-                lab_nginx_require($port['targetVm'] === 'nginx' && in_array($key, $allowedOverrides, true), 'Unsupported ingress target override');
-                $overrides[$key] = true;
+            lab_nginx_require(in_array($port['protocol'] ?? '', ['tcp', 'udp'], true) && is_int($port['port'] ?? null) && $port['port'] >= 1 && $port['port'] <= 65535, 'Invalid published port');
+            lab_nginx_require(in_array($port['source'] ?? 'any', ['any', 'pc'], true), 'Unknown published source policy');
+            $viaNginx = isset($port['targetVm']);
+            if ($viaNginx) {
+                lab_nginx_require($port['targetVm'] === 'nginx' && $port['protocol'] === 'tcp' && in_array($port['port'], [80, 443], true), 'Unsupported ingress target override');
+                $routed[$name] = true;
             }
-            $newVaultHttps = $name === 'vault' && $port['protocol'] === 'tcp' && (int)$port['port'] === 443;
-            $source = $name === 'rustfs' ? $lab['firewall']['pcIp'] : 'any';
             $ruleKey = $pub['address'] . ':' . $port['protocol'] . ':' . $port['port'];
+            lab_nginx_require(!isset($expected[$ruleKey]), 'Duplicate published port');
             $expected[$ruleKey] = [
-                'originalTarget' => $newVaultHttps ? $ip : $vms[$name]['ip'], 'newTarget' => isset($port['targetVm']) ? $ip : $vms[$name]['ip'], 'optional' => $newVaultHttps,
-                'legacyDescription' => $name === 'vault' && (int)$port['port'] === 8200 ? 'vault: HTTPS (OpenBao API, web UI and ACME directory)' : null,
-                'rule' => ['interface' => 'opt1', 'ipprotocol' => 'inet', 'protocol' => $port['protocol'], 'source' => ['network' => $source], 'destination' => ['network' => $pub['address'], 'port' => (string)$port['port']], 'local-port' => (string)$port['port'], 'pass' => 'rule', 'descr' => $name . ': ' . $port['description']],
+                'targets' => [$vms[$name]['ip'], $ip], 'newTarget' => $viaNginx ? $ip : $vms[$name]['ip'], 'optional' => false, 'owner' => $name,
+                'rule' => ['interface' => 'opt1', 'ipprotocol' => 'inet', 'protocol' => $port['protocol'], 'source' => ['network' => ($port['source'] ?? 'any') === 'pc' ? $lab['firewall']['pcIp'] : 'any'], 'destination' => ['network' => $pub['address'], 'port' => (string)$port['port']], 'local-port' => (string)$port['port'], 'pass' => 'rule', 'descr' => $name . ': ' . ($port['description'] ?? '')],
             ];
         }
     }
-    lab_nginx_require(count($publications) === count($allowedNames), 'Exactly one publication per managed ingress service is required');
-    $overrideKeys = array_keys($overrides); sort($overrideKeys); sort($allowedOverrides);
-    lab_nginx_require($overrideKeys === $allowedOverrides, 'Exactly the seven approved ingress overrides are required');
     foreach ($affectedVips as $vip) {
         $matches = array_values(array_filter($current['virtualip']['vip'] ?? [], fn($entry) => ($entry['subnet'] ?? '') === $vip));
         lab_nginx_require(count($matches) === 1 && lab_nginx_equal($matches[0], ['interface' => 'opt1', 'mode' => 'ipalias', 'subnet_bits' => explode('/', $lab['hostNetwork'])[1], 'noexpand' => '0', 'nobind' => '1']), 'Missing, duplicate or incompatible managed virtual IP');
     }
     $guiKey = $lab['firewall']['hostIp'] . ':tcp:443';
-    $expected[$guiKey] = ['originalTarget' => $ip, 'newTarget' => $ip, 'optional' => true, 'rule' => ['interface' => 'opt1', 'ipprotocol' => 'inet', 'protocol' => 'tcp', 'source' => ['network' => $lab['firewall']['pcIp']], 'destination' => ['network' => $lab['firewall']['hostIp'], 'port' => '443'], 'local-port' => '443', 'pass' => 'rule', 'descr' => 'nginx: HTTPS (OPNsense web GUI and REST API)']];
+    $expected[$guiKey] = ['targets' => [$ip], 'newTarget' => $ip, 'optional' => true, 'owner' => 'nginx', 'rule' => ['interface' => 'opt1', 'ipprotocol' => 'inet', 'protocol' => 'tcp', 'source' => ['network' => $lab['firewall']['pcIp']], 'destination' => ['network' => $lab['firewall']['hostIp'], 'port' => '443'], 'local-port' => '443', 'pass' => 'rule', 'descr' => 'nginx: HTTPS (OPNsense web GUI and REST API)']];
     $affectedDestinations = array_merge($affectedVips, [$lab['firewall']['hostIp']]);
     foreach ($current['OPNsense']['Firewall']['DestinationNat']['rules']['rule'] ?? [] as $rule) {
         $serialized = json_encode($rule, JSON_THROW_ON_ERROR);
@@ -241,27 +275,46 @@ function lab_nginx_plan($current, $lab, $bootstrap = false)
             lab_nginx_require(strpos($serialized, $address) === false, 'Modern DestinationNat overlaps managed ingress; inspect it first');
         }
     }
-    $next = $current; $seen = []; $sequence = 100;
+    $next = $current; $seen = []; $sequence = 100; $stale = [];
     foreach ($current['nat']['rule'] ?? [] as $index => $rule) {
         $sequence = max($sequence, (int)($rule['sequence'] ?? 0) + 10);
         $vip = $rule['destination']['network'] ?? '';
         if (!in_array($vip, $affectedDestinations, true) && !in_array($rule['target'] ?? '', $affectedIps, true)) { continue; }
         $key = $vip . ':' . ($rule['protocol'] ?? '') . ':' . ($rule['destination']['port'] ?? '');
-        lab_nginx_require(isset($expected[$key]) && !isset($seen[$key]), 'Unknown or duplicate managed ingress NAT rule');
+        if (!isset($expected[$key])) {
+            // A forward this lab generated for a port that lab.json no longer publishes: same
+            // VIP owner prefix in its description, HOST interface, and a target of that VM or
+            // nginx. The route stage removes it; anything else stays a refusal.
+            $owner = $vipOwner[$vip] ?? null;
+            $generated = $owner !== null && ($rule['interface'] ?? '') === 'opt1' && strpos($rule['descr'] ?? '', $owner . ': ') === 0 && in_array($rule['target'] ?? '', [$vms[$owner]['ip'], $ip], true) && empty($rule['disabled']);
+            lab_nginx_require($generated, 'Unknown or duplicate managed ingress NAT rule');
+            $stale[] = $index;
+            continue;
+        }
+        lab_nginx_require(!isset($seen[$key]), 'Unknown or duplicate managed ingress NAT rule');
         $wanted = $expected[$key];
-        lab_nginx_require(in_array($rule['target'] ?? '', [$wanted['originalTarget'], $wanted['newTarget']], true), 'Managed ingress NAT target changed unexpectedly');
-        $shape = $wanted['rule'] + ['target' => $rule['target']];
-        if (($wanted['legacyDescription'] ?? null) !== null && ($rule['descr'] ?? '') === $wanted['legacyDescription']) { $shape['descr'] = $wanted['legacyDescription']; }
+        lab_nginx_require(in_array($rule['target'] ?? '', $wanted['targets'], true), 'Managed ingress NAT target changed unexpectedly');
+        // The description is ours (owner prefix) and follows lab.json; every other field must
+        // match exactly, the source policy included.
+        lab_nginx_require(strpos($rule['descr'] ?? '', $wanted['owner'] . ': ') === 0, 'Managed ingress NAT description is not ours for ' . $key);
+        $shape = $wanted['rule']; $shape['target'] = $rule['target']; $shape['descr'] = $rule['descr'];
         lab_nginx_require(lab_nginx_managed_rule($rule, $shape), 'Managed ingress NAT options/source differ for ' . $key . ': ' . lab_nginx_rule_difference($rule, $shape));
         $seen[$key] = true;
-        if (!$bootstrap) { $next['nat']['rule'][$index]['target'] = $wanted['newTarget']; }
+        if (!$bootstrap) {
+            $next['nat']['rule'][$index]['target'] = $wanted['newTarget'];
+            $next['nat']['rule'][$index]['descr'] = $wanted['rule']['descr'];
+        }
     }
     foreach ($expected as $key => $wanted) {
         if (isset($seen[$key])) { continue; }
         lab_nginx_require($wanted['optional'], 'A managed publication NAT rule is missing; refusing partial cutover');
         if (!$bootstrap) { $next['nat']['rule'][] = ['sequence' => (string)$sequence, 'target' => $wanted['newTarget']] + $wanted['rule']; $sequence += 10; }
     }
-    $next['dnsmasq']['hosts'] = lab_nginx_plan_dns($current['dnsmasq']['hosts'] ?? [], $lab, $vms, $bootstrap);
+    if (!$bootstrap && count($stale) > 0) {
+        foreach ($stale as $index) { unset($next['nat']['rule'][$index]); }
+        $next['nat']['rule'] = array_values($next['nat']['rule']);
+    }
+    $next['dnsmasq']['hosts'] = lab_nginx_plan_dns($current['dnsmasq']['hosts'] ?? [], $lab, $vms, $routed, $bootstrap);
     // OPNsense also publishes its own interface name through /etc/hosts. Stop importing
     // that system file into DNS after cutover, or firewall.<domain> still returns LAN .1.
     // The supported no_hosts setting keeps both generated addn-hosts files (managed

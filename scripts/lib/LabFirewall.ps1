@@ -395,10 +395,11 @@ function New-FirewallConfig($Secrets, $Certificate) {
     }
     & $entry 'firewall' "$($lab.firewall.lanIp),$($lab.firewall.hostIp)" $null 'Firewall: lab address and management address'
 
-    # This is the first-boot configuration. Keep backend DNS, OpenBao's 80/8200 and the GUI
-    # direct until nginx is ready: bootstrapping its PROXY-protocol listener needs OpenBao.
-    # firewall-nginx's route stage migrates the exact DNS/NAT records together afterward;
-    # its bootstrap stage preserves an already-routed appliance rather than rendering over it.
+    # This is the first-boot configuration. Routed web ports (targetVm nginx) go to nginx at
+    # once; the split DNS and the GUI stay direct until nginx is ready. firewall-nginx's route
+    # stage switches DNS and adds the GUI forward afterward (deploy nginx); its bootstrap stage
+    # preserves an already-routed appliance rather than rendering over it. OpenBao (vault) is
+    # never routed: it binds logins to client addresses, which a proxy would hide.
     # Published VMs ("published" in lab.json): per VM one virtual IP on the HOST interface, one
     # port forward per listed port (same port number on the VM), and its names with two
     # addresses each (split horizon: the PC gets the published address, the lab the VM's own).
@@ -447,14 +448,21 @@ function New-FirewallConfig($Secrets, $Certificate) {
 "@)
         foreach ($port in $pub.ports) {
             if ($port.protocol -notin 'tcp', 'udp') { throw "lab.json, published: protocol '$($port.protocol)' for $($pub.vm) must be tcp or udp." }
+            # targetVm "nginx" sends the port to central nginx (routed web ports); without it the
+            # port goes to the publication's own VM. lab-nginx.php checks the same rules live.
             $targetVm = if ($port.targetVm) { [string]$port.targetVm } else { [string]$pub.vm }
             if (-not $vmIp.ContainsKey($targetVm)) { throw "lab.json, published: unknown target VM '$targetVm' for $($pub.vm):$($port.port)." }
-            if ($pub.vm -eq 'vault' -and $port.protocol -eq 'tcp' -and [int]$port.port -in @(80, 8200)) {
-                $targetVm = 'vault'
+            if ($port.targetVm -and ($port.targetVm -ne 'nginx' -or $port.protocol -ne 'tcp' -or [int]$port.port -notin @(80, 443))) {
+                throw "lab.json, published: $($pub.vm) $($port.protocol)/$($port.port) may name targetVm nginx only for tcp 80 or 443."
             }
             $targetIp = $vmIp[$targetVm]
-            # RustFS's API and console are published only to this PC, also on a fresh firewall.
-            $sourceNetwork = if ($pub.vm -eq 'rustfs') { $lab.firewall.pcIp } else { 'any' }
+            # source "pc": only this PC may use the port (RustFS's API and console, for example).
+            $sourceNetwork = switch ([string]$port.source) {
+                '' { 'any' }
+                'any' { 'any' }
+                'pc' { $lab.firewall.pcIp }
+                default { throw "lab.json, published: unknown source '$($port.source)' for $($pub.vm):$($port.port) (pc or any)." }
+            }
             [void]$forwards.Append(@"
     <rule>
       <sequence>$sequence</sequence>

@@ -22,14 +22,14 @@ try {
     $reservation = @($xml.opnsense.dnsmasq.hosts | Where-Object { $_.host -eq 'nginx' })
     if ($reservation.Count -ne 1 -or $reservation[0].ip -ne '10.10.10.20' -or $reservation[0].hwaddr -ne '02:00:0a:0a:0a:14') { throw 'Incorrect nginx DHCP/DNS reservation.' }
     $central = @($xml.opnsense.nat.rule | Where-Object { $_.target -eq '10.10.10.20' })
-    if ($central.Count -ne 5) { throw 'Fresh bootstrap must target nginx on five web rules, leaving OpenBao 80/8200 direct.' }
+    $routedPorts = @($lab.published | ForEach-Object { $_.ports } | Where-Object { $_.targetVm -eq 'nginx' })
+    if ($central.Count -ne $routedPorts.Count -or $central.Count -eq 0) { throw 'Fresh firewall must target nginx on exactly the routed web ports (targetVm nginx).' }
     foreach ($pub in $lab.published) {
         foreach ($port in $pub.ports) {
             $rules = @($xml.opnsense.nat.rule | Where-Object { $_.destination.network -eq $pub.address -and $_.destination.port -eq [string]$port.port -and $_.protocol -eq $port.protocol })
             $targetName = if ($port.targetVm) { $port.targetVm } else { $pub.vm }
-            if ($pub.vm -eq 'vault' -and $port.protocol -eq 'tcp' -and [int]$port.port -in @(80, 8200)) { $targetName = 'vault' }
             $targetIp = ($lab.vms | Where-Object name -eq $targetName).ip
-            $source = if ($pub.vm -eq 'rustfs') { $lab.firewall.pcIp } else { 'any' }
+            $source = if ($port.source -eq 'pc') { $lab.firewall.pcIp } else { 'any' }
             if ($rules.Count -ne 1 -or $rules[0].target -ne $targetIp -or $rules[0].source.network -ne $source) { throw "Wrong target/source for $($pub.vm):$($port.port)." }
         }
         $backendReservation = @($xml.opnsense.dnsmasq.hosts | Where-Object { $_.host -eq $pub.vm -and $_.hwaddr })
@@ -48,7 +48,13 @@ try {
     $refused = $false
     try { [void](New-FirewallConfig @{ RootPassword = 'inert'; AnsiblePassword = 'inert'; ApiKey = 'inert'; ApiSecret = 'inert' } @{ CaPem = 'inert'; CrtPem = 'inert'; KeyPem = 'inert' }) } catch { $refused = $_.Exception.Message -like '*unknown target VM*' }
     if (-not $refused) { throw 'Unknown targetVm must be refused.' }
-    Write-Host 'PASS: fresh firewall nginx reservation, five web targets, direct OpenBao/GUI bootstrap, unchanged backend DNS/media/SSH/DNS policies, PC-only RustFS and unknown-target refusal.'
+    $lab = Get-Content -Raw (Join-Path $projectRoot 'config\lab.json') | ConvertFrom-Json
+    $media = $lab.published[0].ports | Where-Object { $_.protocol -eq 'udp' } | Select-Object -First 1
+    $media | Add-Member -NotePropertyName targetVm -NotePropertyValue 'nginx' -Force
+    $refused = $false
+    try { [void](New-FirewallConfig @{ RootPassword = 'inert'; AnsiblePassword = 'inert'; ApiKey = 'inert'; ApiSecret = 'inert' } @{ CaPem = 'inert'; CrtPem = 'inert'; KeyPem = 'inert' }) } catch { $refused = $_.Exception.Message -like '*targetVm nginx only for tcp 80 or 443*' }
+    if (-not $refused) { throw 'targetVm nginx on a media port must be refused.' }
+    Write-Host 'PASS: fresh firewall nginx reservation, routed web targets, direct OpenBao and GUI bootstrap, unchanged backend DNS/media/SSH/DNS policies, source policy from lab.json, unknown-target and media-to-nginx refusal.'
 }
 finally {
     $resolvedScratch = (Resolve-Path -LiteralPath $scratch).ProviderPath

@@ -42,7 +42,17 @@
   become: true
   vars:
     checks_ingress_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', 'nginx') | first).ip }}"
-    checks_published_vms: "{{ lab_config.published | map(attribute='vm') | list }}"
+    # Routed publications (a port with targetVm nginx) resolve to nginx inside the lab; direct
+    # ones (vault) keep their VM's own address, like every unpublished VM.
+    checks_routed: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for pub in lab_config.published -%}
+      {%- if pub.ports | selectattr('targetVm', 'defined') | selectattr('targetVm', 'equalto', 'nginx') | list | length > 0 -%}
+      {%- set ns.out = ns.out + [pub] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    checks_published_vms: "{{ checks_routed | map(attribute='vm') | list }}"
   tasks:
     - name: Web VM names resolve to ingress and management names to their private address
       ansible.builtin.command: getent ahostsv4 {{ item.name }}.{{ lab_domain }}
@@ -60,7 +70,7 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Every published web alias resolves to the central ingress
+    - name: Every routed web alias resolves to the central ingress
       ansible.builtin.command: getent ahostsv4 {{ lab_domain if item == '@' else item ~ '.' ~ lab_domain }}
       register: web_resolved
       check_mode: false
@@ -68,7 +78,7 @@
       failed_when: >-
         web_resolved.rc != 0 or
         (web_resolved.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) != [checks_ingress_ip]
-      loop: "{{ (lab_config.published | map(attribute='names') | flatten | unique) + ['firewall'] }}"
+      loop: "{{ (checks_routed | map(attribute='names') | flatten | unique) + ['firewall'] }}"
       when: not (lab_allow_bootstrap_dns | default(false) | bool)
 
     - name: sshd settings

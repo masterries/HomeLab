@@ -43,8 +43,8 @@ stream {
     server {
         listen {{ nginx_ip }}:443;
         ssl_preread on;
-        # All selected backends receive client metadata. Local listeners strip it
-        # for services that do not implement PROXY protocol; OpenBao trusts nginx.
+        # The client address goes, as a PROXY header, only to nginx's own local listeners
+        # (source policy, logs), which strip it: no backend receives PROXY metadata.
         proxy_protocol on;
         proxy_pass $lab_tls_backend;
         proxy_connect_timeout 5s;
@@ -69,10 +69,10 @@ stream {
 {% endif %}
 {% endfor %}
 {% for route in nginx_routes.tcp | default([]) %}
-    # Existing OpenBao API URLs on 8200 remain valid, with the same client IP.
+    # Plain TCP passthrough ({{ route.vm }}:{{ route.port }}), no PROXY header: the backend sees
+    # nginx as the client and does not have to trust anything nginx says.
     server {
         listen {{ nginx_ip }}:{{ route.listen }};
-        proxy_protocol on;
         proxy_pass {{ nginx_backend_addresses[route.vm] }}:{{ route.port }};
         proxy_connect_timeout 5s;
         proxy_timeout 1h;

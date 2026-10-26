@@ -27,14 +27,17 @@
     "",
     "published: what your PC may reach in the lab, per VM. Your PC never reaches a lab VM directly;",
     "it reaches a published address on the firewall's HOST network, and the firewall forwards the",
-    "listed ports to the VM (destination NAT). A port's optional targetVm selects another VM,",
-    "such as the central nginx ingress. After route activation, web DNS inside the lab names",
-    "nginx; the private backend addresses remain available under <vm>-backend names and SSH pins.",
+    "listed ports to the VM (destination NAT). A port's optional targetVm \"nginx\" sends it to",
+    "the central nginx ingress instead (only tcp 80 and 443). A publication with such a port is",
+    "routed: after route activation its names resolve to nginx inside the lab, and its VM keeps",
+    "its private address under <vm>-backend. Other publications (vault) stay direct. A port's",
+    "optional source \"pc\" limits it to the PC's address (default: any client on HOST).",
+    "opnsense/lab-nginx.php applies all of this to a running firewall (deploy nginx).",
     "One address per service VM, because two VMs may need the same",
     "port (443). Each name becomes <name>.lab.internal (\"@\" is lab.internal itself, as in DNS zone",
     "files) with two addresses: your PC gets the published address, lab web clients get nginx's",
-    "private address. Fresh firewall bootstrap keeps backend DNS and Vault80/8200 direct until",
-    "nginx is ready; firewall-nginx.yml then activates the full central ingress graph.",
+    "private address. A freshly built firewall forwards routed ports to nginx at once but keeps",
+    "the direct split DNS until nginx is ready; firewall-nginx.yml then switches it.",
     "centralIngress enables central firewall GUI ingress and internal web DNS; SSH and DNS",
     "management remain direct. The live helper disables automatic system hosts-file DNS",
     "registration so the firewall's own name has no extra direct LAN answer.",
@@ -51,8 +54,8 @@
     "  rustfs:   S3-compatible object storage at rustfs.<domain> and the UI at rustfs-console.<domain>",
     "            over HTTPS on 443; the RustFS backend ports remain private on the VM.",
     "  vault:    OpenBao, the secrets manager and certificate authority (PKI); its web UI and API",
-    "            on HTTPS 443, e.g. https://vault.lab.internal/ui/. Existing8200 API/UI URLs remain",
-    "            available through nginx with trusted client-IP forwarding. Port 80",
+    "            on 8200 (OpenBao's standard port), e.g. https://vault.lab.internal:8200/ui/, directly",
+    "            to the VM, never through nginx: OpenBao binds logins to client addresses. Port 80",
     "            serves only CA certificates and revocation lists (CRLs): certificates name these",
     "            plain-HTTP URLs, and clients such as Windows fetch them to check revocation.",
     "For HTTPS without a warning, every name must also be on the service's TLS certificate (issued by",
@@ -106,9 +109,8 @@
       "address": "10.10.99.5",
       "names": ["vault"],
       "ports": [
-        { "protocol": "tcp", "port": 8200, "targetVm": "nginx", "description": "HTTPS (OpenBao API compatibility and ACME directory through central nginx)" },
-        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "description": "HTTPS (OpenBao UI and API through central nginx)" },
-        { "protocol": "tcp", "port": 80, "targetVm": "nginx", "description": "HTTP: CA certificates and revocation lists only (nginx allow-list)" }
+        { "protocol": "tcp", "port": 8200, "description": "HTTPS (OpenBao API, web UI and ACME directory)" },
+        { "protocol": "tcp", "port": 80, "description": "HTTP: CA certificates and revocation lists only (nginx allow-list)" }
       ]
     },
     {
@@ -116,7 +118,7 @@
       "address": "10.10.99.6",
       "names": ["rustfs", "rustfs-console"],
       "ports": [
-        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "description": "HTTPS (RustFS S3 API and console)" }
+        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "source": "pc", "description": "HTTPS (RustFS S3 API and console)" }
       ]
     }
   ]
