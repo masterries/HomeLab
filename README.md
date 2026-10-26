@@ -7456,6 +7456,8 @@ DeployableServer/
 |   |                                 valid > 30 days, trusted by Windows
 |   |-- Test-LabAcmeBinding.ps1       ACME account binding: OpenBao requires it, no key pending,
 |   |                                 Traefik's account recorded as bound on the matrix VM
+|   |-- Test-LabAirflow.ps1           Airflow end to end from the PC: login, a run of lab_hello,
+|   |                                 task logs fetched from the worker; the run deleted again
 |   |-- Test-LabTlsPin.ps1            the PC's OpenBao calls pinned to the lab root, other hosts
 |   |                                 not; for the pinned host a foreign chain and a chain through
 |   |                                 the intermediate are refused
