@@ -1,0 +1,179 @@
+# Bootstrap adds only nginx DHCP/DNS and preserves an already-routed appliance. Route switches
+# exact managed web NAT targets and split DNS together after all nginx listeners are ready.
+- name: Reconcile central nginx ingress on the existing firewall
+  hosts: firewalls
+  become: true
+  gather_facts: false
+  vars:
+    nginx_firewall_stage: route
+    firewall_nginx_private_address: "{{ (lab_config.vms | selectattr('name', 'equalto', 'nginx') | first).ip }}"
+    firewall_nginx_publications: "{{ lab_config.published }}"
+    firewall_nginx_web_names: >-
+      {{ (lab_config.published | map(attribute='names') | flatten | reject('equalto', '@') |
+          map('regex_replace', '$', '.' ~ lab_domain) | list) + [lab_domain, 'firewall.' ~ lab_domain] }}
+    firewall_nginx_dns_names: >-
+      {{ ['nginx.' ~ lab_domain] + (firewall_nginx_web_names if nginx_firewall_stage == 'route' else []) }}
+  tasks:
+    - name: Validate the requested stage
+      ansible.builtin.assert:
+        that: nginx_firewall_stage in ['bootstrap', 'route']
+
+    - name: All nginx web and OpenBao listeners are ready before changing DNS or NAT
+      ansible.builtin.wait_for:
+        host: "{{ firewall_nginx_private_address }}"
+        port: "{{ item }}"
+        connect_timeout: 2
+        timeout: 10
+      delegate_to: ansible-control
+      become: false
+      loop: [80, 443, 8200]
+      when: nginx_firewall_stage == 'route' and not ansible_check_mode
+
+    - name: A temporary folder for the public configuration and helper
+      ansible.builtin.tempfile:
+        state: directory
+        path: /tmp
+        prefix: lab-nginx.
+      register: firewall_nginx_tmp
+      check_mode: false
+      changed_when: false
+
+    - name: Validate and reconcile bounded nginx firewall records
+      block:
+        - name: Copy the helper and public lab configuration
+          ansible.builtin.copy:
+            src: "{{ item.src }}"
+            dest: "{{ firewall_nginx_tmp.path }}/{{ item.name }}"
+            mode: "0600"
+          loop:
+            - { src: "{{ playbook_dir }}/../opnsense/lab-nginx.php", name: lab-nginx.php }
+            - { src: "{{ playbook_dir }}/../config/lab.json", name: lab.json }
+          loop_control:
+            label: "{{ item.name }}"
+          check_mode: false
+          changed_when: false
+
+        - name: Plan or save DHCP/DNS and the approved ingress targets
+          ansible.builtin.command:
+            argv: >-
+              {{ ['/usr/local/bin/php', firewall_nginx_tmp.path + '/lab-nginx.php',
+                  '--check' if ansible_check_mode else '--apply', firewall_nginx_tmp.path + '/lab.json'] +
+                 (['--bootstrap'] if nginx_firewall_stage == 'bootstrap' else []) }}
+          register: firewall_nginx_result
+          check_mode: false
+          changed_when: "'changed' in firewall_nginx_result.stdout_lines"
+
+        - name: A previous attempt still needs activation
+          ansible.builtin.stat:
+            path: /var/run/lab-nginx.pending
+          register: firewall_nginx_pending
+
+        - name: The virtual IPs currently active on HOST
+          ansible.builtin.command:
+            argv: [ifconfig, hn2, inet]
+          register: firewall_nginx_host_addresses
+          check_mode: false
+          changed_when: false
+
+        - name: Whether configuration or runtime state needs activation
+          ansible.builtin.set_fact:
+            firewall_nginx_needs_activation: >-
+              {{ firewall_nginx_result is changed or firewall_nginx_pending.stat.exists or
+                 (firewall_nginx_publications | map(attribute='address') | list |
+                  difference(firewall_nginx_host_addresses.stdout | regex_findall('inet\s+([0-9.]+)\s')) | length > 0) }}
+
+        - name: Current managed DNS answers inside the lab
+          ansible.builtin.command:
+            argv: [getent, ahostsv4, "{{ item }}"]
+          loop: "{{ firewall_nginx_dns_names }}"
+          register: firewall_nginx_dns_before
+          delegate_to: ansible-control
+          become: false
+          check_mode: false
+          changed_when: false
+          failed_when: false
+
+        - name: Repair stale runtime DNS even if the saved configuration is current
+          ansible.builtin.set_fact:
+            firewall_nginx_needs_activation: >-
+              {{ firewall_nginx_needs_activation or item.rc != 0 or
+                 (item.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) !=
+                 [firewall_nginx_private_address] }}
+          loop: "{{ firewall_nginx_dns_before.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Missing runtime VIPs or DNS would be repaired
+          ansible.builtin.debug:
+            msg: nginx firewall configuration needs activation.
+          when: ansible_check_mode and firewall_nginx_needs_activation
+          changed_when: true
+
+        # These configd actions return OK. A zero exit status alone is insufficient.
+        - name: Activate the existing virtual IPs, NAT rules and DHCP/DNS records
+          ansible.builtin.command:
+            argv: "{{ ['configctl'] + item.tokens }}"
+          loop:
+            - { tokens: [interface, vip, configure] }
+            - { tokens: [filter, reload] }
+            - { tokens: [dnsmasq, restart] }
+          register: firewall_nginx_activation
+          when: not ansible_check_mode and firewall_nginx_needs_activation
+          changed_when: true
+          failed_when: >-
+            firewall_nginx_activation.rc != 0 or firewall_nginx_activation.stdout | trim != 'OK'
+
+        - name: The existing published addresses are active on HOST
+          ansible.builtin.command:
+            argv: [ifconfig, hn2, inet]
+          register: firewall_nginx_host_active
+          changed_when: false
+          failed_when: >-
+            firewall_nginx_host_active.rc != 0 or
+            (firewall_nginx_publications | map(attribute='address') | list |
+             difference(firewall_nginx_host_active.stdout | regex_findall('inet\s+([0-9.]+)\s')) | length > 0)
+          when: not ansible_check_mode
+
+        - name: Every managed web name resolves only to nginx inside the lab
+          ansible.builtin.command:
+            argv: [getent, ahostsv4, "{{ item }}"]
+          loop: "{{ firewall_nginx_dns_names }}"
+          register: firewall_nginx_dns
+          delegate_to: ansible-control
+          become: false
+          changed_when: false
+          failed_when: >-
+            firewall_nginx_dns.rc != 0 or
+            (firewall_nginx_dns.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) !=
+            [firewall_nginx_private_address]
+          when: not ansible_check_mode
+
+        - name: Backend DHCP names retain their private management addresses
+          ansible.builtin.command:
+            argv: [getent, ahostsv4, "{{ item.vm }}-backend.{{ lab_domain }}"]
+          loop: "{{ firewall_nginx_publications }}"
+          loop_control:
+            label: "{{ item.vm }}"
+          register: firewall_nginx_backend_dns
+          delegate_to: ansible-control
+          become: false
+          changed_when: false
+          failed_when: >-
+            firewall_nginx_backend_dns.rc != 0 or
+            (firewall_nginx_backend_dns.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) !=
+            [(lab_config.vms | selectattr('name', 'equalto', item.vm) | first).ip]
+          when: nginx_firewall_stage == 'route' and not ansible_check_mode
+
+        - name: Activation completed
+          ansible.builtin.file:
+            path: /var/run/lab-nginx.pending
+            state: absent
+          when: not ansible_check_mode
+          changed_when: false
+      always:
+        - name: Remove the temporary public input files
+          ansible.builtin.file:
+            path: "{{ firewall_nginx_tmp.path }}"
+            state: absent
+          check_mode: false
+          changed_when: false

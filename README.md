@@ -3,8 +3,8 @@
 This repository builds a small, segmented company network on one Windows PC
 (Hyper-V) and runs a self-hosted team chat in it: a Matrix homeserver with the
 Element web client, single sign-on through the identity provider Keycloak, and
-voice and video calls. Five virtual machines take part: an OPNsense firewall and
-four Ubuntu 24.04 servers built with Vagrant, all configured with Ansible. It
+voice and video calls, plus RustFS object storage and central nginx ingress. Seven virtual machines take part: an OPNsense firewall and
+six Ubuntu 24.04 servers built with Vagrant, all configured with Ansible. It
 is a learning project. It uses the same building blocks you find in a company
 network (perimeter firewall, bastion host, internal DNS, a two-level internal
 certificate authority, a secrets manager, identity provider, reverse proxy,
@@ -38,7 +38,7 @@ the overall picture and tells you which file to read for each topic.
 
 The end result: you open <https://element.lab.internal> in the browser on your
 PC, sign in with a central company account (for example `alice`), chat with
-another user and start a video call. Behind that page work five VMs:
+another user and start a video call. The lab also includes RustFS object storage and central hostname routing. Seven VMs take part:
 
 - **firewall**: an OPNsense firewall (open source, FreeBSD with the pf packet
   filter, web GUI and REST API). It is the only way into the lab: the router and
@@ -53,6 +53,10 @@ another user and start a video call. Behind that page work five VMs:
   certificate for only the machines that run configures, and the playbooks hold
   the secrets they read only in memory (even Ansible's temporary files are kept
   in RAM).
+- **nginx** (Ubuntu, built with Vagrant): a dedicated central ingress VM, with native nginx
+  and its stream module. It routes HTTPS by SNI without terminating TLS and routes Matrix
+  HTTP by hostname. Domains and backend VMs are defined in [config/nginx.json](config/nginx.json).
+  It has 1 vCPU, 1 GB RAM and private address `10.10.10.20`; no management web UI is installed.
 - **matrix** (Ubuntu, built with Vagrant): the chat. A Matrix homeserver
   (Synapse) with its PostgreSQL database, the Element Web client, the Matrix
   Authentication Service (MAS) for logins, LiveKit for calls and the reverse
@@ -71,6 +75,9 @@ another user and start a video call. Behind that page work five VMs:
   authority that issues the certificates of Keycloak and of the chat, including
   an ACME server like the one Let's Encrypt runs. After every start it is
   "sealed" until two of its three key shares unlock it.
+- **rustfs** (Ubuntu, built with Vagrant): RustFS 1.0.3, an S3-compatible
+  object store with a browser console, HTTPS and credentials from OpenBao.
+  See [RustFS object storage](#rustfs-object-storage) for deployment and storage limits.
 
 Your PC has a part of its own: it holds the offline root certificate authority,
 which signs only a handful of certificates, the offline SSH certificate
@@ -99,7 +106,7 @@ What you learn by building and reading it:
 | SSH certificates | No shared SSH key and no "trust on first use": two SSH certificate authorities (an offline one on the PC for the bootstrap and break-glass, OpenBao's SSH secrets engine for everyday signing) issue 8-hour certificates for the PC, 2-hour certificates per Ansible run for only the hosts that run configures, and host certificates for every machine, whose host keys were verified out of band first (serial console, Hyper-V KVP). |
 | Network segmentation | Three Hyper-V switches with different trust levels: internet uplink, host network, private lab network. |
 | DHCP reservations | Static MAC addresses + DHCP reservations on the firewall (generated from one data file) give every VM a fixed IP without static configuration in the guest. |
-| Split-horizon DNS | The same name (`element.lab.internal`) resolves to a different address for your PC (the published address) than for the lab (the VM itself). |
+| Split-horizon DNS | The same web name (`element.lab.internal`) resolves to its published address for your PC and central nginx for LabNet; SSH uses an independent private-address map. |
 | Conditional DNS forwarding | Windows asks the lab DNS only for `lab.internal` and the names below it (NRPT rule); everything else uses your normal DNS. |
 | Internal PKI | Two levels, as in enterprises: an offline root CA on the PC (its key encrypted, restricted by X.509 name constraints to names under `lab.internal`) signs an intermediate CA inside OpenBao, whose key never leaves it. The intermediate issues the everyday certificates, by signing a CSR (Keycloak, the firewall's GUI) and through ACME (Traefik, renewed automatically). Revocation lists are published over HTTP, so Windows checks revocation. The renewals that are due run whenever `lab.ps1 up` starts the lab again after a Windows restart, and the intermediate itself is replaced by a new one ("rotated") 400 days before it expires. |
 | Secrets management | OpenBao as the one store for the services' secrets: values generated by OpenBao, one access policy per consumer that may create a missing secret but never change one, a short-lived, response-wrapped token per Ansible run that works only from the control node, secrets kept off the control node's disk, an audit log of every access; OpenBao's own configuration split in two planes, as in enterprises: identities and policies (policies as files in the repository) set by the PC, the engines' configuration applied by an Ansible playbook whose token cannot hand out rights. |
@@ -164,9 +171,10 @@ enterprise practice it replaces.
  +------------+---------------------------------------------+------------------+
  | firewall: OPNsense 26.7 (FreeBSD + pf), built by lab.ps1 firewall           |
  |   pf:       default deny, outbound NAT LAN -> WAN, port forwards (DNAT):    |
- |             10.10.99.3 tcp 443, 80, 7881 + udp 7882 -> matrix 10.10.10.30   |
- |             10.10.99.4 tcp 443                      -> keycloak 10.10.10.40 |
- |             10.10.99.5 tcp 8200, 80                 -> vault 10.10.10.50    |
+ |             10.10.99.3 tcp 443,80 -> nginx .20; media 7881/7882 -> matrix .30 |
+ |             10.10.99.4 tcp 443                      -> nginx 10.10.10.20   |
+ |             10.10.99.5 tcp 443, 8200, 80            -> nginx 10.10.10.20   |
+ |             10.10.99.6 tcp 443 (PC only)            -> nginx 10.10.10.20   |
  |   dnsmasq:  DHCP for LabNet, split-horizon DNS for lab.internal             |
  |   web GUI and REST API: https://firewall.lab.internal (10.10.99.2)          |
  |   sshd:     bastion / jump host for the PC and for Vagrant                  |
@@ -200,7 +208,8 @@ and OpenBao, tokens and certificates in
 - **Browser on the PC to Element**: `https://element.lab.internal` -> Windows
   asks the firewall's DNS at `10.10.99.2` (NRPT rule) -> answer `10.10.99.3`,
   the published address of the matrix VM -> TCP 443 to `10.10.99.3` on the
-  firewall's HOST interface (`hn2`) -> port forward (DNAT) -> `10.10.10.30:443`,
+  firewall's HOST interface (`hn2`) -> port forward (DNAT) -> nginx `10.10.10.20:443`
+  -> SNI route -> `10.10.10.30:443`,
   Traefik on the matrix VM -> chosen by host name: the Element Web container,
   which delivers the app's files. From then on Element runs in the browser.
 - **Element to the homeserver**: Element takes the homeserver's address
@@ -214,34 +223,34 @@ and OpenBao, tokens and certificates in
   `lab.internal`, to a static file server); the login-related endpoints go to
   MAS.
 - **Login**: the browser travels between MAS (`10.10.99.3`) and Keycloak
-  (`10.10.99.4`), and MAS talks to Keycloak directly inside the lab. Step by step
+  (`10.10.99.4`), and MAS talks to Keycloak through central nginx inside the lab. Step by step
   in [The login flow](#the-login-flow) below.
 - **Keycloak's pages from the PC** (login form, admin console
   `https://keycloak.lab.internal/admin/`): answer `10.10.99.4` -> port forward ->
-  `10.10.10.40:443` -> the Keycloak container (port 8443 inside). Keycloak
-  terminates TLS itself; there is no reverse proxy in front of it.
+  nginx `10.10.10.20:443` -> SNI route -> `10.10.10.40:443` -> the Keycloak container
+  (port 8443 inside). Keycloak terminates TLS itself; central nginx passes encrypted bytes through.
 - **The PC to OpenBao** (web UI `https://vault.lab.internal:8200/ui/`, and the
   API calls of the PC's scripts such as `lab.ps1 deploy vault`,
   `lab.ps1 secret`, the run tokens for Ansible and the snapshots of
   `lab.ps1 backup`): answer `10.10.99.5` -> TCP 8200 -> port forward ->
-  `10.10.10.50:8200`, OpenBao itself, which terminates TLS with a certificate
+  central nginx `10.10.10.20:8200` -> `10.10.10.50:8200`, OpenBao itself, which terminates TLS with a certificate
   signed by the offline root. The PC's scripts accept that certificate only if
   the lab root signed it directly, a chain of exactly two (the certificate and
   the root); a certificate for that name from OpenBao's own intermediate CA is
   refused (certificate pinning, see
   [Internal PKI](#internal-pki-certificate-authority)). A port forward
-  rewrites only the destination, so OpenBao sees the PC's own address
-  `10.10.99.1` as the source: the PC's OpenBao logins are accepted only from
-  that address.
+  reaches nginx with the original source address. nginx supplies that address to OpenBao
+  through trusted PROXY protocol; OpenBao accepts this metadata only from nginx's private
+  address. PC and Ansible token source restrictions keep their original CIDRs.
 - **Revocation checks from the PC**: every lab certificate names plain HTTP URLs
   on `vault.lab.internal` where its CA's certificate and revocation list (CRL)
   can be fetched. Windows fetches them when it checks a certificate (so does
   `curl.exe`, which uses Windows' TLS library): TCP 80 to `10.10.99.5` -> port
-  forward -> nginx on the vault VM, which serves only these files (the root's
+  forward -> central nginx -> nginx on the vault VM, which serves only these files (the root's
   from disk, the intermediate's from OpenBao) and answers 404 to everything
   else.
 - **Calls**: the call's signalling (who is in the call, access tokens) runs over
-  HTTPS and a WebSocket through `10.10.99.3:443` and Traefik. The audio and
+  HTTPS and a WebSocket through `10.10.99.3:443`, central nginx and Traefik. The audio and
   video (WebRTC) go from the browser directly to LiveKit: UDP `10.10.99.3:7882`
   (or TCP `7881` as fallback), forwarded unchanged to the matrix VM. Step by
   step in [A call and a chat message](#a-call-and-a-chat-message-step-by-step),
@@ -250,18 +259,19 @@ and OpenBao, tokens and certificates in
 - **Server to server inside the lab**: MAS on the matrix VM fetches Keycloak's
   discovery document, exchanges login codes for tokens and reads user details;
   Keycloak calls MAS when a user's Keycloak session ends (back-channel logout).
-  Inside the lab the names resolve to the VMs' own addresses (`10.10.10.40`,
-  `10.10.10.30`), and both VMs are on the same switch, so this traffic never
-  passes the firewall.
+  Inside the lab all published web names resolve to central nginx (`10.10.10.20`),
+  which forwards to fixed private backend addresses. This traffic stays on LabNet.
+  SSH uses a separate generated private-address map with certified FQDN identities.
 - **Traefik to OpenBao (ACME)**: Traefik on the matrix VM orders its
   certificates from OpenBao's ACME directory
   (`https://vault.lab.internal:8200/v1/pki_int/roles/acme-matrix/acme/directory`,
-  lab view `10.10.10.50`). OpenBao checks each name with an HTTP-01 challenge:
+  lab DNS view `10.10.10.20`, then OpenBao at `10.10.10.50`). OpenBao checks each name with an HTTP-01 challenge:
   from the vault VM it fetches `http://<name>/.well-known/acme-challenge/...`,
-  which lab DNS resolves to `10.10.10.30`, Traefik's port 80. Both directions
+  which lab DNS resolves to central nginx, then Traefik's port 80 at `10.10.10.30`. Both directions
   stay on LabNet.
 - **Browser on the PC to the firewall's GUI**: `https://firewall.lab.internal` ->
-  answer `10.10.99.2` -> TCP 443 to the OPNsense web GUI itself.
+  answer `10.10.99.2` -> PC-only TCP 443 forward to nginx -> SNI route to the
+  OPNsense web GUI at `10.10.10.1:443`. SSH and DNS remain direct on `10.10.99.2`.
 - **SSH from the PC**: `ssh -F keys\ssh_config matrix` -> SSH to the firewall at
   `10.10.99.2` as user `ansible`, logged in with the PC's short-lived SSH
   certificate, the firewall's host certificate checked -> the firewall opens the
@@ -278,7 +288,7 @@ and OpenBao, tokens and certificates in
   firewall's own downloads (OPNsense updates from `pkg.opnsense.org`) leave
   through `hn0` the same way.
 - **Ansible**: ansible-control connects over LabNet directly to the matrix,
-  keycloak and vault VMs (SSH, with its own key and a certificate for this run
+  keycloak, rustfs and vault VMs (SSH, with its own key and a certificate for this run
   that names only the hosts the run's profile configures, see
   [Where code runs](#where-code-runs-the-pc-and-ansible-control)), to Keycloak's
   admin API (`https://keycloak.lab.internal`, lab view `10.10.10.40`), to
@@ -287,7 +297,7 @@ and OpenBao, tokens and certificates in
   configuration, with a run token that works only from ansible-control's address
   `10.10.10.10`) and to the firewall's LAN address `10.10.10.1` (SSH, for example
   to renew the firewall's GUI certificate).
-- **Vagrant**: manages only the four Ubuntu VMs and never talks to the
+- **Vagrant**: manages only the six Ubuntu VMs and never talks to the
   firewall's WAN side. It reaches the lab VMs through the firewall:
   `ssh.proxy_command` in the Vagrantfile opens an SSH connection to the firewall
   at `10.10.99.2` as user `ansible` (Windows' own `ssh.exe`, settings and the
@@ -358,7 +368,7 @@ ID of its own).
 6. Keycloak redirects the browser back to MAS with a short-lived authorization
    code.
 7. MAS exchanges the code for tokens **server to server** (the "back channel",
-   directly from the matrix VM to the keycloak VM), authenticating with its
+   from the matrix VM through nginx to the keycloak VM), authenticating with its
    client secret and the PKCE verifier, and fetches the user's details from
    Keycloak's userinfo endpoint.
 8. MAS links the Keycloak account to a Matrix account (`@alice:lab.internal`,
@@ -381,7 +391,8 @@ Every HTTPS request from the browser to the matrix VM below goes the same way,
 which the diagrams do not repeat (the Keycloak login page has its own address,
 `10.10.99.4`): to `10.10.99.3:443` (the published address of the
 matrix VM, what `matrix.lab.internal`, `element.lab.internal` and `lab.internal`
-resolve to for the PC), port forward (DNAT) to `10.10.10.30:443`, Traefik, which
+resolve to for the PC), port forward (DNAT) to central nginx `10.10.10.20:443`,
+then an encrypted SNI route to `10.10.10.30:443`, Traefik, which
 picks the service by host name and path. The firewall only forwards packets; TLS
 ends at Traefik.
 
@@ -854,11 +865,13 @@ with a warning.
 
 | Profile | What runs (in `~/lab` on ansible-control) | SSH certificate for | OpenBao token (policies) | Started by |
 |---|---|---|---|---|
-| `base`, `checks` | `base.yml` (zsh, console autologin), `checks.yml` (read-only checks of every machine) | base: matrix, keycloak, vault (ansible-control itself is managed locally); checks: every machine | none | `lab.ps1 up`; `lab.ps1 test` (`checks`, and `base` with `--check`) |
+| `base`, `checks` | `base.yml` (zsh, console autologin), `checks.yml` (read-only checks of every machine) | base: nginx, matrix, keycloak, vault, rustfs (ansible-control itself is managed locally); checks: every machine | none | `lab.ps1 up`; `lab.ps1 test` (`checks`, and `base` with `--check`) |
 | `ping` | `ping.yml` | every machine | none | by hand |
 | `openbao` | `openbao.yml`: OpenBao's package, configuration file and service, nginx | vault | none | `lab.ps1 deploy vault` (also `lab.ps1 up` / `lab.ps1 maintain` when one of its renewals is due) |
 | `openbao-config` | `openbao-config.yml`: OpenBao's configuration plane, through its API | none | `openbao-config`, token role `ansible-config` | `lab.ps1 deploy vault` (as `openbao`); `lab.ps1 test` (`--check`) |
 | `firewall` | `firewall.yml`: the firewall's GUI certificate | firewall | `ansible-firewall` | `lab.ps1 deploy firewall`; `lab.ps1 up` / `lab.ps1 maintain` when it is due; `lab.ps1 test` (`--check`) |
+| `nginx` | `nginx.yml`: native nginx and central SNI/HTTP domain routes | nginx | none | `lab.ps1 deploy nginx` and `lab.ps1 deploy all` |
+| `firewall-nginx` | `firewall-nginx.yml`: bounded nginx DHCP/DNS bootstrap or web-forward cutover | firewall | none | `lab.ps1 up` (bootstrap only), then `lab.ps1 deploy nginx` (cutover) |
 | `keycloak` | `keycloak.yml` | keycloak | `ansible-keycloak` | `lab.ps1 deploy keycloak` (also `lab.ps1 up` / `lab.ps1 maintain` when its certificate is due) |
 | `matrix-prepare`, `matrix`, `matrix-setup`, `mdad` | `matrix-prepare.yml` (with `syncMdad`: `vendor\mdad` to `~/mdad` first), then `bin/deploy-matrix install-all` (`matrix-setup`: `setup-all`); `mdad` runs an MDAD playbook directly in `~/mdad` | matrix | `ansible-matrix` | `lab.ps1 deploy matrix` (`-Setup`: `matrix-setup`); `mdad` by hand |
 | `hello-nginx` | `hello-nginx.yml`, the nginx demo | every machine | `ansible-web` | by hand |
@@ -880,8 +893,8 @@ automation that uses them.
 | Hyper-V switch | Switch type | Subnet | Members | Purpose |
 |---|---|---|---|---|
 | Default Switch | Built-in, NAT via Windows ICS | Chosen by Windows, changes on every reboot | PC, firewall `hn0` (WAN) | Internet uplink for the lab (the firewall's WAN side) |
-| LabHost | Internal (host + VMs) | 10.10.99.0/24 | PC `10.10.99.1`, firewall `hn2` (HOST) `10.10.99.2` and the virtual IPs `10.10.99.3` (matrix), `10.10.99.4` (keycloak) and `10.10.99.5` (vault) | Fixed path from the PC into the lab: SSH to the bastion, DNS and the web GUI on `.2`; the published ports of each published VM on its own address |
-| LabNet | Private (VMs only, the PC has no adapter on it) | 10.10.10.0/24 | firewall `hn1` (LAN) `.1`, ansible-control `.10`, matrix `.30`, keycloak `.40`, vault `.50`, DHCP pool `.100`-`.199` | The segmented lab network, reachable only through the firewall |
+| LabHost | Internal (host + VMs) | 10.10.99.0/24 | PC `10.10.99.1`, firewall `hn2` (HOST) `10.10.99.2` and the virtual IPs `10.10.99.3` (matrix), `10.10.99.4` (keycloak), `10.10.99.5` (vault) and `10.10.99.6` (rustfs) | Fixed path from the PC into the lab: SSH to the bastion, DNS and the web GUI on `.2`; the published ports of each published VM on its own address |
+| LabNet | Private (VMs only, the PC has no adapter on it) | 10.10.10.0/24 | firewall `hn1` (LAN) `.1`, ansible-control `.10`, nginx `.20`, matrix `.30`, keycloak `.40`, vault `.50`, rustfs `.60`, DHCP pool `.100`-`.199` | The segmented lab network, reachable only through the firewall |
 
 LabHost is created once by `scripts/host/Initialize-LabHost.ps1`. LabNet is
 created by `scripts/commands/up.ps1`. Almost all addresses come from
@@ -906,7 +919,7 @@ and the matrix VM's published address as LiveKit's node IP,
 `livekit_server_config_rtc_node_ip` in the same `vars.yml`.
 
 **Why several addresses on the HOST side?** `10.10.99.2` is the firewall's
-management address (GUI, SSH, DNS). `10.10.99.3` to `10.10.99.5` are virtual
+management address (GUI, SSH, DNS). `10.10.99.3` to `10.10.99.6` are virtual
 IPs (VIPs: IP aliases on the same interface), one per published VM, listed under
 `published` in `config/lab.json`. A port forward is chosen by destination
 address **and** port, so `10.10.99.3:443` can lead to the matrix VM and
@@ -923,7 +936,7 @@ rules for administrators and for users never mix.
 
 ### Virtual machines
 
-The four Ubuntu VMs use the Vagrant box `gusztavvargadr/ubuntu-server-2404-lts`
+The six Ubuntu VMs use the Vagrant box `gusztavvargadr/ubuntu-server-2404-lts`
 (Ubuntu 24.04 LTS) as Hyper-V linked clones; their names, MACs, IPs and sizes
 come from `vms` in `config/lab.json`. The firewall is built by
 `lab.ps1 firewall` from the official OPNsense 26.7 "nano" image (a
@@ -936,11 +949,13 @@ explains why that matters.
 
 | VM | Role | Addresses | DNS names | Size |
 |---|---|---|---|---|
-| firewall | OPNsense: router/NAT, pf packet filter, dnsmasq DHCP + DNS, SSH bastion, web GUI + REST API | `hn0` WAN: DHCP from the Default Switch (MAC 02:00:0a:0a:0a:fe); `hn1` LAN: 10.10.10.1 (MAC 02:00:0a:0a:0a:01); `hn2` HOST: 10.10.99.2 + virtual IPs 10.10.99.3, 10.10.99.4 and 10.10.99.5 (MAC 02:00:0a:0a:0a:02) | `firewall.lab.internal` (PC gets 10.10.99.2, lab gets 10.10.10.1) | Hyper-V Generation 1, 1 vCPU, 3 GB static RAM, 16 GB disk |
+| firewall | OPNsense: router/NAT, pf packet filter, dnsmasq DHCP + DNS, SSH bastion, web GUI + REST API | `hn0` WAN: DHCP from the Default Switch (MAC 02:00:0a:0a:0a:fe); `hn1` LAN: 10.10.10.1 (MAC 02:00:0a:0a:0a:01); `hn2` HOST: 10.10.99.2 + virtual IPs 10.10.99.3, 10.10.99.4 and 10.10.99.5 (MAC 02:00:0a:0a:0a:02) | `firewall.lab.internal` (PC gets 10.10.99.2, lab gets central nginx 10.10.10.20 after ingress cutover) | Hyper-V Generation 1, 1 vCPU, 3 GB static RAM, 16 GB disk |
 | ansible-control | Ansible control node: runs all playbooks and MDAD; holds the copy of the Ansible project (`~/lab`, replaced by a fresh copy on every run, see [Where code runs](#where-code-runs-the-pc-and-ansible-control)), a copy of the repository's `vendor\mdad` (`~/mdad`, replaced on every `lab.ps1 deploy matrix` run) and the public PKI files (`~/lab-pki`: root certificate and its CRL). No service secrets on disk: each run that needs OpenBao gets a run token from the PC (see [above](#where-secrets-and-certificates-come-from)); its only secret is its own SSH key, which opens nothing without the 2-hour certificate the PC signs for each run | 10.10.10.10 (MAC 02:00:0a:0a:0a:0a, DHCP reservation) | `ansible-control.lab.internal` | 2 vCPU, 2 GB |
-| matrix | The Matrix stack (MDAD): Traefik, Synapse, PostgreSQL, MAS, Element Web, LiveKit server and LiveKit JWT service, a static file server for `.well-known`, a Docker socket proxy; 9 systemd units `matrix-*.service` | 10.10.10.30 (MAC 02:00:0a:0a:0a:1e, DHCP reservation) | `matrix.lab.internal`, `element.lab.internal`, `lab.internal` (published: PC gets 10.10.99.3, lab gets 10.10.10.30) | 4 vCPU, 8 GB |
-| keycloak | Keycloak 26.8.1 and its PostgreSQL 18.6 as a Docker Compose project in `/opt/keycloak-stack` | 10.10.10.40 (MAC 02:00:0a:0a:0a:28, DHCP reservation) | `keycloak.lab.internal` (published: PC gets 10.10.99.4, lab gets 10.10.10.40) | 2 vCPU, 4 GB |
-| vault | OpenBao 2.7.1 (secrets manager and intermediate CA) with its data in `/opt/openbao/data`; nginx on port 80 for the CA certificates and CRLs | 10.10.10.50 (MAC 02:00:0a:0a:0a:32, DHCP reservation) | `vault.lab.internal` (published: PC gets 10.10.99.5, lab gets 10.10.10.50) | 2 vCPU, 2 GB; Hyper-V checkpoints off, no console autologin |
+| matrix | The Matrix stack (MDAD): Traefik, Synapse, PostgreSQL, MAS, Element Web, LiveKit server and LiveKit JWT service, a static file server for `.well-known`, a Docker socket proxy; 9 systemd units `matrix-*.service` | 10.10.10.30 (MAC 02:00:0a:0a:0a:1e, DHCP reservation) | `matrix.lab.internal`, `element.lab.internal`, `lab.internal` (published: PC gets 10.10.99.3, lab gets 10.10.10.20 after ingress cutover) | 4 vCPU, 8 GB |
+| nginx | Native nginx with the Ubuntu stream module; central SNI routing for application HTTPS and Matrix HTTP forwarding; no application stack or web administration UI | 10.10.10.20 (MAC 02:00:0a:0a:0a:14, DHCP reservation) | `nginx.lab.internal` (private management name; no separate published address) | 1 vCPU, 1 GB; Hyper-V checkpoints off, no console autologin |
+| keycloak | Keycloak 26.8.1 and its PostgreSQL 18.6 as a Docker Compose project in `/opt/keycloak-stack` | 10.10.10.40 (MAC 02:00:0a:0a:0a:28, DHCP reservation) | `keycloak.lab.internal` (published: PC gets 10.10.99.4, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 4 GB |
+| vault | OpenBao 2.7.1 (secrets manager and intermediate CA) with its data in `/opt/openbao/data`; nginx on port 80 for the CA certificates and CRLs | 10.10.10.50 (MAC 02:00:0a:0a:0a:32, DHCP reservation) | `vault.lab.internal` (published: PC gets 10.10.99.5, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 2 GB; Hyper-V checkpoints off, no console autologin |
+| rustfs | RustFS 1.0.3, S3 API and browser console over HTTPS through nginx; persistent objects in `/var/lib/rustfs/data` | 10.10.10.60 (MAC 02:00:0a:0a:0a:3c, DHCP reservation) | `rustfs.lab.internal`, `rustfs-console.lab.internal` (published: PC gets 10.10.99.6, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 4 GB; Hyper-V checkpoints off, no console autologin |
 
 The Matrix stack in detail, as deployed (the versions come with the pinned MDAD
 commit, except where the lab pins them itself):
@@ -985,7 +1000,7 @@ addresses easy to read. Hyper-V writes MACs without separators (`02000A0A0A1E`,
 as in `config/lab.json`), OPNsense and dnsmasq with colons
 (`02:00:0a:0a:0a:1e`, as in the firewall's `config.xml`).
 
-The four Ubuntu VMs also get, from Vagrant's provisioning
+The six Ubuntu VMs also get, from Vagrant's provisioning
 ([provision/](provision/), only what must exist before Ansible can reach a VM):
 
 - user `ansible` with passwordless sudo, which logs in only with an SSH
@@ -1086,11 +1101,12 @@ flowchart LR
 
 | From | To | Allowed? |
 |---|---|---|
-| PC 10.10.99.1 (LabHost) | firewall 10.10.99.2: SSH 22, HTTPS 443 (web GUI and REST API), DNS 53 (UDP and TCP), ping | yes, one pass rule each on the HOST interface, only from 10.10.99.1 and only to 10.10.99.2 |
+| PC 10.10.99.1 (LabHost) | firewall 10.10.99.2: SSH 22, HTTPS 443 (web GUI and REST API), DNS 53 (UDP and TCP), ping | yes, PC-only management rules; HTTPS goes through central nginx to the firewall LAN GUI, while SSH/DNS/ping remain direct |
 | PC 10.10.99.1 (LabHost) | firewall 10.10.99.2: any other port, including HTTP 80 (the GUI's HTTP -> HTTPS redirect is switched off) | no |
-| PC (LabHost) | published address 10.10.99.3: TCP 443, TCP 80, TCP 7881, UDP 7882 | yes, forwarded (port forward / DNAT) to the same ports on matrix 10.10.10.30 |
-| PC (LabHost) | published address 10.10.99.4: TCP 443 | yes, forwarded to keycloak 10.10.10.40 |
-| PC (LabHost) | published address 10.10.99.5: TCP 8200, TCP 80 | yes, forwarded to vault 10.10.10.50: 8200 to OpenBao (API, web UI, ACME), 80 to nginx (CA certificates and CRLs only) |
+| PC (LabHost) | published address 10.10.99.3: TCP 443, TCP 80, TCP 7881, UDP 7882 | yes: 443/80 to central nginx 10.10.10.20, then matrix 10.10.10.30; media 7881/7882 directly to matrix |
+| PC (LabHost) | published address 10.10.99.4: TCP 443 | yes, forwarded to central nginx 10.10.10.20, then by SNI to keycloak 10.10.10.40 |
+| PC (LabHost) | published address 10.10.99.5: TCP 443, TCP 8200, TCP 80 | yes, forwarded through central nginx to vault 10.10.10.50: HTTPS to OpenBao with trusted original-source metadata, HTTP to the existing CA/CRL allow-list |
+| PC 10.10.99.1 (LabHost) | published address 10.10.99.6: TCP 443 | yes, PC-only forward to central nginx 10.10.10.20, then by SNI to RustFS's local nginx at 10.10.10.60:443 |
 | PC (LabHost) | published addresses: anything else, including DNS, SSH and Matrix federation 8448 | no |
 | PC (LabHost) | ansible-control, matrix, keycloak, vault directly | no. Use SSH through the firewall (jump host) |
 | Default Switch (WAN) | firewall | no. There is no pass rule on WAN, so pf's default applies. Vagrant does not use this side |
@@ -1143,20 +1159,24 @@ back in when it breaks.
 
 - **Windows 10 or 11 Pro/Enterprise/Education with Hyper-V enabled.** Windows
   Home has no Hyper-V. Hardware virtualization must be on in the firmware.
-- **RAM**: the five VMs use 19 GB together: firewall 3 GB, ansible-control
-  2 GB, matrix 8 GB, keycloak 4 GB, vault 2 GB. The sizes are fixed. The Ubuntu
+- **RAM**: the seven VMs use 24 GB together: firewall 3 GB, ansible-control
+  2 GB, nginx 1 GB, matrix 8 GB, keycloak 4 GB, vault 2 GB, rustfs 4 GB. The sizes are fixed. The Ubuntu
   VMs' sizes (`cpus`, `memory` in MB) are set in [config/lab.json](config/lab.json).
   The firewall has static memory (FreeBSD does not support Hyper-V Dynamic
   Memory); for the Ubuntu VMs the Vagrantfile sets `maxmemory` equal to
   `memory`, so Dynamic Memory gets the same minimum and maximum and a VM never
-  takes more host RAM than its size. 32 GB on the host is comfortable; with
-  24 GB, little else can run. Measured right after a deployment, the Matrix
+  takes more host RAM than its size. Allow room for Windows and other applications
+  beyond the lab's 24 GB. Measured right after a deployment, the Matrix
   stack used about 1.3 GB of the matrix VM's 8 GB and the keycloak VM about
   1.2 GB of its 4 GB (the Keycloak container is limited to 2 GB, its database
   to 512 MB), so on a smaller host you can lower `memory` for these two in
   `config/lab.json`.
-- **Vagrant 2.4.x** on `PATH`, for the four Ubuntu VMs. The lab was developed
+- **Vagrant 2.4.x** on `PATH`, for the six Ubuntu VMs. The lab was developed
   with 2.4.9 and the built-in `hyperv` provider.
+  The lab defaults `VAGRANT_PREFERRED_POWERSHELL` to `powershell` for native Windows
+  PowerShell Hyper-V objects, avoiding VM type-conversion errors seen with `pwsh` on
+  Windows 10. An explicit environment override is preserved; `lab.ps1 up` restores
+  the caller's value on exit. The Vagrantfile applies the same default to direct commands.
 - **Git for Windows**, installed in its default folder. The PC's scripts use its
   OpenSSL from `C:\Program Files\Git\mingw64\bin`: the firewall build for the
   image signature check, the password hashes and the first GUI key and request,
@@ -1258,17 +1278,19 @@ The order for a new lab:
 | Step | Command | What it does / who runs it | Time |
 |---|---|---|---|
 | 1 | `.\lab.ps1 host-setup` | creates the host network and the DNS rule; you, once per PC (changes Windows) | seconds |
-| 2 | `.\lab.ps1 up` | builds the firewall (and with it the offline root CA) and the Ubuntu VMs | the first run takes longest: it downloads the Vagrant box and the OPNsense image and provisions four VMs; the firewall build alone takes about 4 minutes |
+| 2 | `.\lab.ps1 up` | builds the firewall (and with it the offline root CA) and the Ubuntu VMs | the first run takes longest: it downloads the Vagrant box and the OPNsense image and provisions six VMs; the firewall build alone takes about 4 minutes |
 | 3 | `.\lab.ps1 deploy vault` | deploys OpenBao on the vault VM: secrets manager and intermediate CA | a few minutes on the first run (not timed exactly) |
 | 4 | `.\lab.ps1 trust` | makes Windows trust the lab's root CA; you, once per PC (changes Windows) | seconds |
 | 5 | `.\lab.ps1 recovery -Destination <folder>` | hands you OpenBao key share C and writes the encrypted recovery file (key share B, a break-glass login for OpenBao, the root CA, the offline SSH CA, the firewall's passwords); you, once, in a console window you type into yourself (it shows secrets) | a few minutes |
 | 5a | `.\lab.ps1 deploy firewall` | moves the firewall's web GUI certificate from the offline root to OpenBao's intermediate CA (`lab.ps1 up` does it too, when it is due) | not timed yet |
+| 5b | `.\lab.ps1 deploy nginx` | configures central nginx, then switches managed web forwards and internal web DNS after its listeners are ready | not timed yet |
 | 6 | `.\lab.ps1 deploy keycloak` | deploys Keycloak, the identity provider | about 1 minute on the first run |
 | 7 | `.\lab.ps1 deploy matrix` | deploys the Matrix stack, the chat | about 5 minutes |
+| 7a | `.\lab.ps1 deploy rustfs` | deploys the RustFS S3 API and browser console | not timed yet |
 | 8 | Browser test: sign in, chat, call | manual test, by you | a few minutes |
 
-Steps 5a, 6 and 7 can also be one command: `.\lab.ps1 deploy all` runs
-`deploy vault`, `deploy firewall`, `deploy keycloak` and `deploy matrix`, in this
+Steps 5a, 5b, 6, 7 and 7a can also be one command: `.\lab.ps1 deploy all` runs
+`deploy vault`, `deploy firewall`, `deploy nginx`, `deploy keycloak`, `deploy matrix` and `deploy rustfs`, in this
 order, and stops at the first failure. Running `deploy vault` again there is
 harmless: each of its steps checks first and acts only if needed. So the
 short form of the whole first build is: `host-setup` (your own window) -> `up` ->
@@ -1333,7 +1355,7 @@ output). You can run it again at any time:
    a shared key, and host keys are checked instead of trusted on first use:
    [SSH certificates](#ssh-certificates-user-and-host-cas).
 3. **LabNet**: creates the Private switch `LabNet` if it is missing.
-4. **Firewall**: first, if they exist, the firewall and the vault VM are
+4. **Firewall**: first, if they exist, the firewall, nginx and the vault VM are
    started directly in Hyper-V and OpenBao is unsealed, over HTTPS, before any
    SSH: once OpenBao is deployed, it signs the SSH certificates, and after a
    Windows restart the PC's certificate (8 hours) has expired. Then the step
@@ -2159,6 +2181,143 @@ browser (the [roadmap](#11-roadmap) has an idea for Element X).
 
 ---
 
+### Central nginx domain routing
+
+The dedicated `nginx` VM runs native nginx and `libnginx-mod-stream` on Ubuntu:
+`10.10.10.20`, 1 vCPU and 1 GB RAM. It has the lab's certificate-based SSH access,
+disabled Hyper-V checkpoints and no console autologin. Management is through the
+repository and SSH; no web administration UI or additional application stack is installed.
+
+[config/nginx.json](config/nginx.json) is the central hostname-to-backend map.
+Its `tls` routes cover every published web domain: `matrix`, `element`, `@` (the domain itself),
+`keycloak`, `rustfs`, `rustfs-console`, `vault` and `firewall`. Each entry names a backend and port; the
+playbook takes that VM's private address from [config/lab.json](config/lab.json)
+to avoid DNS loops. Firewall uses its fixed LAN address. The `http` routes send Matrix
+names to Traefik's port 80 and `vault` to the existing CA/CRL allow-list. This preserves
+redirects and ACME challenge requests. Unknown HTTPS SNI names are rejected.
+
+On port 443 nginx reads the TLS SNI hostname and forwards the encrypted stream.
+TLS still ends at Traefik, Keycloak, OpenBao, the OPNsense GUI or the nginx on the RustFS VM. Their certificates,
+private keys and renewal procedures stay on those backend VMs; the central ingress has
+no TLS private key and needs no OpenBao run token. WebSockets and S3 request bytes pass
+through unchanged. Most backend access logs see the central nginx VM as the connection source.
+For OpenBao nginx sends trusted PROXY metadata, preserving the original client address and
+the existing PC/Ansible source-bound token restrictions. OpenBao accepts this metadata only
+from nginx's private IP; normal direct TLS from other peers remains available for bootstrap
+and the vault VM's local CA-publication proxy.
+
+The PC keeps the existing service addresses and URLs. OpenBao also has the port-free
+UI address [https://vault.lab.internal/ui/](https://vault.lab.internal/ui/); port 8200 remains
+available for existing API and ACME clients. The corresponding 443/80/8200
+entries in `lab.json` use `"targetVm": "nginx"` to select central ingress as the
+firewall's NAT target. After cutover every published web name inside LabNet points only
+to nginx `10.10.10.20`. Firewall's PC DNS answer stays `10.10.99.2`; its PC-only 443
+forward goes through nginx, while SSH and DNS stay direct. Matrix media stays direct
+on TCP 7881 and UDP 7882. TLS certificates, including the PC's OpenBao certificate pin,
+are preserved end to end.
+
+SSH management remains independent of web DNS. The PC pins every VM's private IP behind
+the bastion and checks its certified FQDN with `HostKeyAlias`. The generated public
+`keys/ssh/control_ssh_config`, installed as `/etc/ssh/ssh_config.d/20-lab.conf` on
+ansible-control, applies private transport and the same strict certificate/revocation
+checks to Ansible, MDAD and direct SSH commands. Backend DHCP reservations use management
+names so they do not add competing backend IPs to published web DNS.
+The route stage disables dnsmasq's automatic `/etc/hosts` import while keeping its
+managed DNS/DHCP files, so OPNsense's own system hostname cannot add a second LAN
+address for the firewall web domain.
+
+For an existing lab, refresh OpenBao's SSH host allow-list, provision the nginx VM,
+then configure nginx and apply the bounded firewall cutover:
+
+```powershell
+.\lab.ps1 deploy vault
+.\lab.ps1 up
+.\lab.ps1 deploy nginx
+```
+
+`up` runs [firewall-nginx.yml](ansible/playbooks/firewall-nginx.yml) in its `bootstrap`
+stage: nginx DHCP/private DNS is added while running service forwards and web DNS stay unchanged.
+`deploy nginx` first validates and starts the nginx configuration, verifies that OpenBao
+is reachable and unsealed through its trusted proxy, then runs that
+playbook's `route` stage. The route stage requires nginx's listeners to be reachable and
+applies the managed web-forward targets and internal web DNS together. It preserves PC
+addresses, source restrictions, backend TLS identities and Matrix media rules; conflicting
+unmanaged records stop the change. A fresh firewall leaves Vault's existing API/CA paths
+and the GUI direct until this cutover, so the first OpenBao deployment can bootstrap nginx.
+After a Windows restart `up` starts an existing nginx VM through Hyper-V before unsealing
+OpenBao. Its DNS checks allow backend answers only while the firewall's internal web
+name still identifies the bootstrap DNS graph; normal checks require central ingress.
+
+To edit domains or backend routes, update `config/nginx.json` and run
+`.\lab.ps1 deploy nginx`. A newly published name also needs the matching `published`
+entry in `config/lab.json`, a backend application route and a backend certificate that
+covers the name. Arbitrary new firewall publications still follow
+[Publish a name or a port](#publish-a-name-or-a-port); the bounded live helper owns the
+existing ingress rules and the nginx reservation. The old `firewall-rustfs` profile and
+[lab-rustfs.php](opnsense/lab-rustfs.php) are retained for legacy regression coverage;
+current `up` uses `firewall-nginx`.
+
+### RustFS object storage
+
+The repository defines a dedicated RustFS 1.0.3 VM: `10.10.10.60`, 2 vCPUs,
+4 GB RAM, published through the firewall at `10.10.99.6`. Its endpoints are
+[S3 API](https://rustfs.lab.internal) and
+[browser console](https://rustfs-console.lab.internal). Both use the standard
+HTTPS port 443, so the browser address needs no port number. Central nginx passes TLS
+by SNI to the RustFS VM's own nginx. That local nginx serves the
+lab certificate for both names and forwards over verified TLS to RustFS's
+loopback-only S3 and console listeners on ports 9000 and 9001. The console is RustFS's built-in UI.
+The firewall publishes only HTTPS to the PC. SSH uses
+the lab's certificate-based bastion access. Hyper-V checkpoints and console
+autologin are disabled for this VM.
+
+RustFS's SSH entry uses its private IP through the firewall and verifies the host certificate
+for `rustfs.lab.internal`. The firewall's loopback DNS view returns both private and published
+addresses, so this explicit transport address keeps SSH on the private network. HTTPS clients
+continue using the normal split DNS view.
+
+For an existing lab, first apply the new OpenBao policy, signing role and SSH
+host allow-list, then bring the VM up and deploy its service:
+
+```powershell
+.\lab.ps1 deploy vault
+.\lab.ps1 up
+.\lab.ps1 deploy nginx
+.\lab.ps1 deploy rustfs
+.\lab.ps1 test -Name Test-LabCertificates,Test-LabSshCertificates
+```
+
+The `rustfs` run profile receives only `host-rustfs` and the `ansible-rustfs`
+OpenBao policy. OpenBao generates its credentials once under `rustfs/admin/`;
+the playbook keeps them in memory on ansible-control and writes the service's
+credential file only on the RustFS VM with restricted permissions. Retrieve
+credentials in your own console with `lab.ps1 secret rustfs/admin/access-key`
+and `lab.ps1 secret rustfs/admin/secret-key`. TLS private keys are generated
+on the VM and the lab's intermediate CA signs the CSRs. nginx has a separate,
+root-only private key and a certificate valid for both HTTPS names. Deployment and
+maintenance renew due certificates; deployment also snapshots OpenBao.
+
+Objects persist in `/var/lib/rustfs/data` across service updates. This directory
+uses the VM's existing root disk inherited from the Vagrant image: no separate
+data disk is provisioned or automatically enlarged. This is a single-node
+installation without high availability. Deleting the VM deletes its local
+objects; OpenBao snapshots preserve credentials and do not back up object data.
+Back up objects separately before storing data you need to retain. The initial
+VM has a 122 GiB root filesystem, with about 108 GiB free after deployment;
+check current capacity with `lab.ps1 connect rustfs sudo df -h /var/lib/rustfs/data`.
+
+Every `lab.ps1 deploy rustfs` run checks verified HTTPS, denies anonymous S3
+access, uploads and downloads a temporary object, verifies its checksum, and
+deletes the object and test bucket. It also checks both published health
+endpoints from the PC before reporting readiness. Re-run Windows certificate
+and SSH trust checks with:
+
+```powershell
+.\lab.ps1 test -Name Test-LabCertificates,Test-LabSshCertificates
+```
+
+The console is available at [https://rustfs-console.lab.internal](https://rustfs-console.lab.internal).
+
 ## 5. Everyday operations
 
 ### The lab.ps1 commands
@@ -2178,7 +2337,7 @@ equivalent: one command-line tool with subcommands, like `az`, `kubectl` or `gh`
 | `up` | build or start the lab and bring it up to date, also after every Windows restart ([After a Windows restart](#after-a-windows-restart)) | elevated |
 | `down` | delete the lab VMs, or one (`down matrix`); asks first ([Rebuild one VM or the whole lab](#rebuild-one-vm-or-the-whole-lab)) | elevated |
 | `firewall` | build (`-Rebuild`) or check the OPNsense firewall VM | elevated |
-| `deploy` | deploy `vault`, `firewall`, `keycloak`, `matrix`, or `all` (these four in this order, stopping at the first failure) ([Run a playbook, re-run a deployment](#run-a-playbook-re-run-a-deployment)) | |
+| `deploy` | deploy `vault`, `firewall`, `nginx`, `keycloak`, `matrix`, `rustfs`, or `all` (these six in this order, stopping at the first failure) ([Run a playbook, re-run a deployment](#run-a-playbook-re-run-a-deployment)) | |
 | `run` | one Ansible run on ansible-control: `run <profile>` or `run <playbook.yml>`, then options for `ansible-playbook`; without arguments it lists the run profiles | |
 | `maintain` | renew what is due (certificates, revocation lists); `-List` only shows it | |
 | `connect` | SSH to a lab machine as `ansible`: `connect [vm] [command]` ([Log in to a VM](#log-in-to-a-vm)) | |
@@ -2568,6 +2727,13 @@ a secret:
 .\tests\Test-LabCertificates.ps1             # or one test directly
 ```
 
+Additional ingress checks run separately from the default suite:
+`.\tests\Test-LabNginxFirewallRender.ps1` and `.\tests\Test-LabRustfsFirewallRender.ps1`
+render the current firewall with inert credentials. `php tests/Test-LabNginxFirewall.php`
+checks the bounded bootstrap and cutover planner; `php tests/Test-LabRustfsFirewall.php`
+covers the legacy RustFS onboarding helper. These offline checks need no deployed lab
+or real keys; the PHP tests require PHP 8. See [tests/README.md](tests/README.md).
+
 `.\lab.ps1 test` starts [tests/Invoke-LabTests.ps1](tests/Invoke-LabTests.ps1), which you may
 also run directly with the same parameters. Without `-Name` it runs twelve tests:
 
@@ -2654,10 +2820,12 @@ without changes changes nothing.
 .\lab.ps1 deploy vault           # OpenBao: openbao.yml, identities and policies (PC), openbao-config.yml, intermediate CA
 .\lab.ps1 deploy vault -RotateIntermediate   # the same, and a new intermediate CA now
 .\lab.ps1 deploy firewall        # firewall.yml: the GUI certificate from OpenBao's intermediate CA, when due
+.\lab.ps1 deploy nginx           # nginx.yml: central domains, then bounded firewall ingress cutover
 .\lab.ps1 deploy keycloak        # keycloak.yml (secrets and certificate from OpenBao)
 .\lab.ps1 deploy matrix          # vendor\mdad to ~/mdad + matrix-prepare.yml + MDAD (through lab-setup.yml) + checks
 .\lab.ps1 deploy matrix -Setup   # the same with the tags of "just setup-all", after REMOVING a component
-.\lab.ps1 deploy all             # vault, firewall, keycloak, matrix; stops at the first failure
+.\lab.ps1 deploy rustfs          # rustfs.yml (TLS, OpenBao credentials, persistent object storage)
+.\lab.ps1 deploy all             # vault, firewall, nginx, keycloak, matrix, rustfs; stops at the first failure
 ```
 
 On a brand-new OpenBao, `deploy vault` runs `openbao-config.yml` twice: first for the mounts
@@ -2665,7 +2833,7 @@ and everything that needs no CA yet (the URLs even must exist before the interme
 first certificate), and again once the PC has made the intermediate CA, for the PKI roles and
 ACME, which need it.
 
-`lab.ps1 deploy keycloak` (after its playbook) and `lab.ps1 deploy matrix` (after
+`lab.ps1 deploy keycloak`, `lab.ps1 deploy rustfs` (after their playbook) and `lab.ps1 deploy matrix` (after
 `matrix-prepare.yml` and again after MDAD's run) also take a snapshot of OpenBao, on
 every run and also when the playbook failed: a first deployment creates secrets that from then on
 exist only in OpenBao (see [Back up OpenBao](#back-up-openbao)). A failed
@@ -2747,7 +2915,7 @@ profile gets which policy is its `policies` in
 | `firewall` (`firewall.yml`) | `ansible-firewall` | have OpenBao sign certificates of the PKI role `firewall-gui` (only the name `firewall.<domain>`); no secrets |
 | `hello-nginx` (`hello-nginx.yml`) | `ansible-web` | have OpenBao sign certificates of the PKI role `web`; no secrets |
 | `openbao-config` (`openbao-config.yml`) | `openbao-config`, through the token role `ansible-config` | configure the engines: the KV mount `lab` and its settings, the password policies, the `pki_int` mount with its URLs, revocation list, tidying, PKI roles and ACME. Never a policy, a login, a token role, the SSH CA, a CA's import or choice, a certificate or a secret; the playbook stops unless its token has exactly this policy |
-| `ping`, `base`, `checks`, `openbao`, `syntax` | none | (they need no token: they do not contact OpenBao, except `openbao.yml`, which only calls the unauthenticated health endpoint `sys/health`) |
+| `ping`, `base`, `checks`, `openbao`, `nginx`, `firewall-nginx`, `syntax` | none | (they need no token: they do not contact OpenBao, except `openbao.yml`, which only calls the unauthenticated health endpoint `sys/health`) |
 
 The test profiles `test-run-token` and `test-secret-creation` get `ansible-keycloak`,
 `test-config-token` gets `openbao-config` through `ansible-config`, like the runs they test.
@@ -2759,8 +2927,10 @@ explained in [SSH certificates](#ssh-certificates-user-and-host-cas)):
 |---|---|---|
 | `openbao` | `host-vault` | vault |
 | `firewall` | `host-firewall` | firewall |
+| `firewall-nginx` | `host-firewall` | firewall |
+| `nginx` | `host-nginx` | nginx |
 | `keycloak` | `host-keycloak` | keycloak |
-| `base` | `host-matrix`, `host-keycloak`, `host-vault` | matrix, keycloak, vault (ansible-control applies `base.yml` to itself locally, without SSH) |
+| `base` | `host-nginx`, `host-matrix`, `host-keycloak`, `host-vault`, `host-rustfs` | nginx, matrix, keycloak, vault, rustfs (ansible-control applies `base.yml` to itself locally, without SSH) |
 | `matrix-prepare`, and MDAD's runs: `matrix`, `matrix-setup`, `mdad` | `host-matrix` | matrix |
 | `ping`, `checks`, `hello-nginx`, and every playbook without a profile (the script says so) | `lab-all` | every machine, the firewall included |
 | `openbao-config`, `syntax`, the `test-*` profiles | none (`[]`) | nothing: no certificate, the run stays on ansible-control (`openbao-config.yml` only talks to OpenBao's API) |
@@ -2881,6 +3051,7 @@ own settings for MDAD belong in `ansible\matrix\`.
 
 | You changed | Apply it with |
 |---|---|
+| `config/nginx.json`, `ansible/playbooks/nginx.yml`, `ansible/templates/nginx/*` | `.\lab.ps1 deploy nginx`: validate and start nginx, then reconcile the bounded web-forward targets. Backend certificates and application routes must cover any new hostname. See [Central nginx domain routing](#central-nginx-domain-routing) |
 | `config/lab.json`: `published` (addresses, names, ports) | `.\lab.ps1 firewall -Rebuild` (about 4 minutes; see [Publish a name or a port](#publish-a-name-or-a-port)). If the matrix entry's `address` changes, also set `livekit_server_config_rtc_node_ip` in `vars.yml` to it and run `.\lab.ps1 deploy matrix`, or calls connect without media ([P35](#p35-a-call-connects-but-no-audio-or-video-flows)) |
 | `config/lab.json`: a new lab VM | see [Add a VM](#add-a-vm): firewall rebuild, `.\lab.ps1 deploy vault` (OpenBao's SSH roles learn the new name), then `.\lab.ps1 up` |
 | `config/lab.json`: an existing VM's `cpus` or `memory` | `vagrant reload <vm>` in the `vagrant` folder (the VM restarts; after a reload of vault, `.\lab.ps1 unseal`) |
@@ -3314,8 +3485,8 @@ VM:
     "address": "10.10.99.3",
     "names": ["matrix", "element", "@"],
     "ports": [
-      { "protocol": "tcp", "port": 443, "description": "HTTPS (Traefik: Synapse, MAS, Element, LiveKit signalling)" },
-      { "protocol": "tcp", "port": 80, "description": "HTTP (Traefik redirects to HTTPS)" },
+      { "protocol": "tcp", "port": 443, "targetVm": "nginx", "description": "HTTPS (Traefik: Synapse, MAS, Element, LiveKit signalling)" },
+      { "protocol": "tcp", "port": 80, "targetVm": "nginx", "description": "HTTP (Traefik redirects to HTTPS)" },
       { "protocol": "udp", "port": 7882, "description": "LiveKit media (WebRTC over UDP)" },
       { "protocol": "tcp", "port": 7881, "description": "LiveKit media (WebRTC over TCP, fallback)" }
     ]
@@ -3332,6 +3503,9 @@ From each entry `lab.ps1 firewall` generates:
   one uses the firewall's or the PC's address.
 - **a port forward per port**, from `address:port` to the same port on the VM's
   lab address, with a registered pass rule. `protocol` is `tcp` or `udp`.
+  Optional `targetVm` selects another VM's private address as the NAT target;
+  the managed application HTTP(S) entries select `nginx`. This leaves the
+  service's DNS names and published address unchanged.
 - **a DNS host entry per name** with two addresses (split horizon): your PC gets
   `address`, the lab gets the VM's own IP. `"@"` stands for the domain itself
   (`lab.internal`, as in DNS zone files). A name equal to the VM's name gets
@@ -3339,7 +3513,10 @@ From each entry `lab.ps1 firewall` generates:
   provides the lab address (both details in
   [P7](#p7-published-host-entries-the-domain-itself-and-a-vms-own-name)).
 
-To publish another name or port, edit the entry (or add one for another VM) and
+For the existing central ingress routes, also keep
+[config/nginx.json](config/nginx.json) in sync and apply route changes with
+`.\lab.ps1 deploy nginx`. See [Central nginx domain routing](#central-nginx-domain-routing)
+for its bounded live cutover. To publish another name or port, edit the entry (or add one for another VM) and
 rebuild the firewall. The data is read only when the firewall is built, so a
 plain re-run does not pick it up:
 
@@ -3369,7 +3546,8 @@ Four things to know:
 - **The firewall forwards by address and port, not by name.** Several names on
   one published address share its ports; the service behind it chooses the site
   by the requested host name (name-based virtual hosting; for HTTPS via SNI).
-  On the matrix VM, Traefik does that: a new name there also needs a route in
+  Central nginx first chooses the HTTPS backend by SNI using `config/nginx.json`.
+  On the matrix VM, Traefik then chooses its application: a new name there also needs a route in
   MDAD's configuration, or Traefik does not know what to serve.
 - **HTTPS needs the name in the certificate, and the CA must allow it.** Use
   the full name (never a short name, see
@@ -5829,6 +6007,12 @@ Files: [vars.yml](ansible/matrix/inventory/host_vars/matrix.lab.internal/vars.ym
 
 ### Reverse proxy and TLS termination
 
+A central nginx VM first passes external HTTPS to the selected backend by SNI.
+It keeps the TLS stream encrypted; the application's existing TLS endpoint decrypts it.
+The mapping and its deployment are described in
+[Central nginx domain routing](#central-nginx-domain-routing). Server-to-server requests
+inside LabNet still use the backend VM's own split-DNS address.
+
 A **reverse proxy** accepts the connections of the clients and forwards each
 request to the right backend. On the matrix VM, Traefik owns ports 80 and 443:
 it terminates TLS (decrypts) with certificates it obtains itself through ACME
@@ -5859,11 +6043,11 @@ https://vault.lab.internal:8200/v1/pki_int/roles/acme-matrix/acme/directory
 
 For each of `matrix.lab.internal`, `element.lab.internal` and `lab.internal`:
 
-1. Traefik orders a certificate. OpenBao answers with an HTTP-01 challenge:
+1. Traefik orders a certificate through central nginx. OpenBao answers with an HTTP-01 challenge:
    serve this token at `http://<name>/.well-known/acme-challenge/<token>`.
 2. OpenBao fetches that URL from the vault VM. The lab DNS answers with the
-   matrix VM's own address, 10.10.10.30 (split horizon), so the request goes
-   over LabNet straight to Traefik's port 80, without passing the firewall.
+   central nginx address, 10.10.10.20 (split horizon), so the request goes
+   over LabNet through nginx to Traefik's port 80 at 10.10.10.30, without passing the firewall.
 3. The answer matches, and OpenBao issues a certificate from the default issuer,
    the current intermediate: 90 days, and only for names the role allows.
 4. Traefik keeps its ACME account, keys and certificates in
@@ -8521,7 +8705,7 @@ path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
   (the firewall's also through the maintenance step of `lab.ps1 up`), which
   recognises an old certificate by its authority key identifier, not by the
   CA's name.
-- An OpenBao snapshot after every deployment of Keycloak and Matrix, also after
+- An OpenBao snapshot after every deployment of Keycloak, Matrix and RustFS, also after
   a failed one: a first deployment creates secrets that exist nowhere but in
   OpenBao, and a failure later in the run does not undo them.
 - Renewals run from `lab.ps1 up` (step 7, the same as `.\lab.ps1 maintain`),

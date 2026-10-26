@@ -1,0 +1,163 @@
+# The dedicated ingress VM runs only Ubuntu's nginx and its official stream module.
+# No Docker, application database, standing deployment credentials or TLS private keys.
+- name: Central Nginx domain routing
+  hosts: nginx_servers
+  become: true
+  vars:
+    nginx_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', 'nginx') | first).ip }}"
+    nginx_routes: "{{ lookup('file', inventory_dir ~ '/../config/nginx.json') | from_json }}"
+    nginx_backend_addresses: "{{ dict(lab_config.vms | map(attribute='name') | zip(lab_config.vms | map(attribute='ip'))) | combine({'firewall': lab_config.firewall.lanIp}) }}"
+  tasks:
+    - name: Supported Ubuntu VM
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - nginx_routes.tls | length > 0
+        quiet: true
+
+    - name: Validate backend addresses and ports
+      ansible.builtin.assert:
+        that:
+          - item.vm in nginx_backend_addresses
+          - item.vm not in ['nginx', 'ansible-control']
+          - item.port | int > 0 and item.port | int < 65536
+        quiet: true
+      loop: "{{ nginx_routes.tls + nginx_routes.http + (nginx_routes.tcp | default([])) }}"
+
+    - name: Only OpenBao receives trusted client-address metadata
+      ansible.builtin.assert:
+        that:
+          - (item.proxyProtocol | default(false) | bool) == (item.vm == 'vault')
+        quiet: true
+      loop: "{{ nginx_routes.tls + (nginx_routes.tcp | default([])) }}"
+
+    - name: Validate the OpenBao compatibility listener
+      ansible.builtin.assert:
+        that:
+          - item.listen | int == 8200
+          - item.vm == 'vault'
+          - item.port | int == 8200
+        quiet: true
+      loop: "{{ nginx_routes.tcp | default([]) }}"
+
+    - name: Validate unique domain names per protocol
+      ansible.builtin.assert:
+        that:
+          - (nginx_routes[item] | map(attribute='names') | flatten | unique | length) == (nginx_routes[item] | map(attribute='names') | flatten | length)
+        quiet: true
+      loop: [tls, http]
+
+    - name: Validate domain labels before rendering nginx directives
+      ansible.builtin.assert:
+        that:
+          - item is match('^(@|[a-z0-9][a-z0-9.-]*[a-z0-9]|[a-z0-9])$')
+          - item not in ['ansible-control', 'nginx']
+        quiet: true
+      loop: "{{ (nginx_routes.tls + nginx_routes.http) | map(attribute='names') | flatten | unique }}"
+
+    - name: Discover base image services
+      ansible.builtin.service_facts:
+
+    - name: Disable the unused base image RPC port mapper
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop: [rpcbind.socket, rpcbind.service]
+      when: "'rpcbind.service' in ansible_facts.services"
+
+    - name: Nginx and its Ubuntu stream module
+      ansible.builtin.apt:
+        name: [nginx, libnginx-mod-stream]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        policy_rc_d: 101
+
+    - name: Nginx systemd configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/nginx.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Central TLS and HTTP domain configuration
+      ansible.builtin.template:
+        src: ../templates/nginx/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: "0644"
+        validate: /usr/sbin/nginx -t -c %s
+      notify: reload nginx
+
+    - name: Nginx service hardening
+      ansible.builtin.template:
+        src: ../templates/nginx/hardening.conf.j2
+        dest: /etc/systemd/system/nginx.service.d/20-lab.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart nginx
+
+    - name: Lab root CA for operators and subsequent endpoint checks
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+        mode: "0644"
+      notify: update CA bundle
+
+    - name: Nginx enabled and started
+      ansible.builtin.systemd_service:
+        name: nginx
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Apply Nginx configuration and service changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: HTTPS routing listener is ready
+      ansible.builtin.wait_for:
+        host: "{{ nginx_ip }}"
+        port: 443
+        timeout: 30
+      when: not ansible_check_mode
+
+    - name: OpenBao accepts trusted proxy traffic and remains unsealed before cutover
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../tests/openbao-ingress-check.py"
+          - --address
+          - "{{ nginx_ip }}"
+          - --port
+          - "8200"
+          - --hostname
+          - "vault.{{ lab_domain }}"
+          - --ca-file
+          - "{{ lab_pki_dir }}/root-ca.crt"
+          - --health
+          - --expect-status
+          - "200"
+      delegate_to: ansible-control
+      become: false
+      changed_when: false
+      when: not ansible_check_mode
+
+  handlers:
+    - name: reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+    - name: restart nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        daemon_reload: true
+        state: restarted
+
+    - name: update CA bundle
+      ansible.builtin.command: update-ca-certificates

@@ -1,0 +1,65 @@
+# Keep the original Host, URI and query string: S3 signatures depend on all three.
+# Native RustFS remains TLS-protected and is reachable only through local loopback.
+map $http_upgrade $rustfs_connection_upgrade {
+    default upgrade;
+    '' '';
+}
+
+server {
+    listen {{ rustfs_ip }}:443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+{% for site in [{'name': rustfs_fqdn, 'port': 9000}, {'name': rustfs_console_fqdn, 'port': 9001}] %}
+server {
+    listen {{ rustfs_ip }}:443 ssl;
+    server_name {{ site.name }};
+    server_tokens off;
+
+    ssl_certificate /etc/nginx/tls/rustfs.crt;
+    ssl_certificate_key /etc/nginx/tls/rustfs.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:rustfs:10m;
+    ssl_session_tickets off;
+
+    client_max_body_size 0;
+    ignore_invalid_headers off;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy same-origin always;
+
+    location / {
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Port 443;
+{% if site.port == 9001 %}
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $rustfs_connection_upgrade;
+{% else %}
+        proxy_set_header Connection '';
+{% endif %}
+        proxy_cache_convert_head off;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        chunked_transfer_encoding off;
+
+        # Validate the backend certificate against the lab CA despite its loopback address.
+        proxy_ssl_server_name on;
+        proxy_ssl_name {{ rustfs_fqdn }};
+        proxy_ssl_trusted_certificate /usr/local/share/ca-certificates/lab-root-ca-2026.crt;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 2;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_redirect off;
+        proxy_pass https://127.0.0.1:{{ site.port }};
+    }
+}
+
+{% endfor %}

@@ -76,6 +76,10 @@
 
 require "json"
 
+# Windows 10's Hyper-V objects must stay in native Windows PowerShell. Vagrant otherwise
+# prefers pwsh, where VM objects can fail its typed configuration helpers. Keep user overrides.
+ENV["VAGRANT_PREFERRED_POWERSHELL"] = "powershell" if ENV["VAGRANT_PREFERRED_POWERSHELL"].to_s.empty?
+
 # ---------------------------------------------------------------------------------------------
 # Paths and constants (__dir__ is the folder of this Vagrantfile, so the paths do not depend on
 # the current directory)
@@ -236,7 +240,7 @@ Vagrant.configure("2") do |config|
         # certificates and the revocation list. Its own SSH key is made on the VM itself
         # (bootstrap-ansible-control.sh). These provisioners run after the shared ones above, so
         # the user "ansible" and its ~/.ssh already exist.
-        %w[known_hosts revoked_host_keys].each do |file|
+        %w[known_hosts revoked_host_keys control_ssh_config].each do |file|
           next unless File.exist?(File.join(SSH_DIR, file))
           m.vm.provision "lab-ssh-#{file.tr('_', '-')}", type: "file",
             source: File.join(SSH_DIR, file), destination: "#{SSH_STAGING}/#{file}"

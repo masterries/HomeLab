@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Central domain routing on the dedicated nginx VM. Names are labels below lab.json's",
+    "domain; @ is the domain itself. Backend addresses are always taken from lab.json vms,",
+    "never from public DNS, to avoid proxy loops. TLS is passed through unchanged: the services",
+    "keep their own certificates and private keys. Publishing a route also requires the",
+    "corresponding lab.json published port to use targetVm: nginx.",
+    "Vault retains end-to-end TLS and receives the original client IP through trusted PROXY",
+    "protocol. This preserves source-bound tokens and the PC's certificate pinning.",
+    "Matrix media ports stay direct; only its HTTP and HTTPS entry points use nginx.",
+    "RustFS and firewall routes additionally enforce the existing source policy: the configured PC and",
+    "private lab network only, including connections arriving through another published IP."
+  ],
+  "tls": [
+    { "names": ["matrix", "element", "@"], "vm": "matrix", "port": 443 },
+    { "names": ["keycloak"], "vm": "keycloak", "port": 443 },
+    { "names": ["rustfs", "rustfs-console"], "vm": "rustfs", "port": 443 },
+    { "names": ["vault"], "vm": "vault", "port": 8200, "proxyProtocol": true },
+    { "names": ["firewall"], "vm": "firewall", "port": 443 }
+  ],
+  "http": [
+    { "names": ["matrix", "element", "@"], "vm": "matrix", "port": 80 },
+    { "names": ["vault"], "vm": "vault", "port": 80 }
+  ],
+  "tcp": [
+    { "listen": 8200, "vm": "vault", "port": 8200, "proxyProtocol": true }
+  ]
+}

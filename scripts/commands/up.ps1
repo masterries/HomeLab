@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
     Builds the lab or brings it up to date: the firewall VM and the lab VMs from
-    config\lab.json (ansible-control, matrix, keycloak, vault).
+    config\lab.json (ansible-control, nginx, matrix, keycloak, vault, rustfs).
 
 .DESCRIPTION
     This is the central orchestration script of the lab. It takes the firewall and the lab
@@ -23,7 +23,7 @@
       - It drives lab.ps1 firewall (the OPNsense firewall), Vagrant (Hyper-V provider,
         the Linux VMs) and the Hyper-V cmdlets, then tests the result over SSH. It does not
         deploy applications: that is done afterwards by .\lab.ps1 deploy vault (OpenBao), then
-        .\lab.ps1 deploy all (vault, firewall, keycloak, matrix; other playbooks through
+        .\lab.ps1 deploy all (vault, firewall, nginx, keycloak, matrix, rustfs; other playbooks through
         .\lab.ps1 run).
       - Run again (for example after a Windows restart), it also unseals OpenBao and renews
         what is due: certificates and the root CA's revocation list (step 7).
@@ -69,8 +69,10 @@
          *.lab.internal, NAT to the internet (package installs during provisioning) and
          SSH: Vagrant reaches the lab VMs only through the firewall as jump host, logged in
          as "ansible" with the PC's certificate. A DNS lookup from the PC then checks that the
-         firewall answers on the LabHost network.
-      5. Lab VMs (ansible-control, matrix, keycloak, vault; the list comes from
+         firewall answers on the LabHost network. For an existing lab, ansible-control is
+         started and its host certificate checked or renewed, then firewall-nginx.yml's bootstrap
+         stage adds nginx's DHCP and DNS without rebuilding or switching running services.
+      5. Lab VMs (ansible-control, nginx, matrix, keycloak, vault, rustfs; the list comes from
          config\lab.json). Started on LabNet only, then provisioned: user "ansible", SSH
          (own host keys, published to the PC through Hyper-V KVP, trust in the lab's SSH CAs,
          certificate logins only); ansible-control also gets its own SSH key and Ansible -
@@ -79,12 +81,13 @@
       6. Checks and the base setup. Name resolution from the PC and an SSH login to every
          VM through keys\ssh_config (with the PC's certificate, checking every host
          certificate); then two runs on ansible-control (lib\LabRun.ps1): base.yml (zsh, the
-         console autologin - not on vault) on every Ubuntu VM, and checks.yml, which reaches
+         console autologin - not on vault, rustfs or nginx) on every Ubuntu VM, and checks.yml, which reaches
          every machine by its DNS name with a certificate of its own and checks host
          certificates, sudo, sshd's settings and the firewall's bootstrap contract.
       7. Maintenance (once OpenBao is deployed): renewals that are due - OpenBao's TLS
          certificate, the root CA's revocation list, the intermediate CA (lab.ps1 deploy vault),
-         Keycloak's certificate (lab.ps1 deploy keycloak) and the firewall's GUI certificate
+         Keycloak's certificate (lab.ps1 deploy keycloak), RustFS's certificate (lab.ps1 deploy
+         rustfs) and the firewall's GUI certificate
          (lab.ps1 deploy firewall); see Get-LabMaintenanceDue in LabSecrets.ps1.
 
     Idempotency. The script can be run again at any time, also after a Windows reboot
@@ -100,7 +103,9 @@
     provision\ and to the base setup are applied by running this script again. Both are
     written so that they can be re-run safely. Changes to the firewall's configuration (opnsense\, and the VMs and
     "published" entries in config\lab.json) need a rebuild of the firewall:
-    .\lab.ps1 firewall -Rebuild.
+    .\lab.ps1 firewall -Rebuild. The bounded nginx addition is applied live as described in step 4;
+    its helper refuses conflicting existing records before changing the running configuration.
+    .\lab.ps1 deploy nginx validates nginx before switching managed web forwards to it.
 
 .PARAMETER StorageRoot
     Folder for Vagrant boxes, VM disks and Hyper-V files, so that drive C: stays free.
@@ -138,7 +143,7 @@
 
     Related scripts: lab.ps1 host-setup (once, before this script),
     lab.ps1 trust (make Windows trust the lab root CA), lab.ps1 deploy vault (OpenBao:
-    secrets and the intermediate CA), lab.ps1 deploy all (vault, firewall, keycloak, matrix,
+    secrets and the intermediate CA), lab.ps1 deploy all (vault, firewall, nginx, keycloak, matrix, rustfs,
     in this order after this script), lab.ps1 secret (read a password),
     lab.ps1 connect (SSH login), lab.ps1 run (run Ansible playbooks),
     lab.ps1 down (delete VMs).
@@ -256,8 +261,12 @@ if (-not $hostNetworkReady) {
 # previous value is restored in "finally": left in the shell, it would make every later
 # vagrant command (even "destroy" in another project's folder) act on these VMs.
 $previousVagrantCwd = $env:VAGRANT_CWD
+$previousVagrantPowerShell = $env:VAGRANT_PREFERRED_POWERSHELL
 $env:VAGRANT_CWD = $vagrantDir
 try {
+    # Prefer native Windows PowerShell for Windows 10 Hyper-V objects; Vagrant defaults to
+    # pwsh, whose VM objects can fail its typed helpers. An explicit caller setting wins.
+    if (-not $env:VAGRANT_PREFERRED_POWERSHELL) { $env:VAGRANT_PREFERRED_POWERSHELL = 'powershell' }
     # --- Step 1: storage. This comes first: once VMs exist, their disks can no longer be
     # moved by this script; that needs a rebuild (lab.ps1 down, then this script).
     Write-Host "== 1/7 Storage location $StorageRoot =="
@@ -364,6 +373,12 @@ try {
     # Hyper-V and OpenBao is unsealed over HTTPS first - no SSH involved.
     $firewallVm = Get-VM -Name $firewallName -ErrorAction SilentlyContinue
     if ($firewallVm -and $firewallVm.State -ne 'Running') { Start-VM -VM $firewallVm; Write-Host "Started:     $firewallName" }
+    # Vault's public and lab API paths use ingress after cutover. Start an existing nginx
+    # directly through Hyper-V before unsealing or renewing the first SSH certificate.
+    if ($states.Contains('nginx') -and $states['nginx'] -notin 'running', 'not_created') {
+        Start-VM -VM (Get-LabVM 'nginx')
+        Write-Host 'Started:     nginx (Hyper-V; routes OpenBao before SSH certificates are needed)'
+    }
     if ($states.Contains('vault') -and $states['vault'] -notin 'running', 'not_created') {
         Start-VM -VM (Get-LabVM 'vault')
         Write-Host 'Started:     vault (Hyper-V; OpenBao signs the SSH certificates)'
@@ -377,7 +392,37 @@ try {
     # opnsense\config.xml.template, first boot driven over the serial console, update to the
     # current 26.7.x. If the firewall already exists, the script only makes sure it runs and
     # re-checks it; .\lab.ps1 firewall -Rebuild builds it again from scratch.
-    & (Join-Path $PSScriptRoot 'firewall.ps1') -StorageRoot $StorageRoot
+    # An existing lab learns nginx's reservation before the new VM boots.
+    # The bootstrap stage preserves running service forwards. A new lab gets
+    # these records from the initial config.xml, before ansible-control exists.
+    $extendExistingFirewall = $firewallVm -and $states.Contains('ansible-control') -and $states['ansible-control'] -ne 'not_created'
+    # First repair/renew the bastion's host certificate and its PermitOpen list, including
+    # nginx. RustFS's deferred publication check runs after the additive configuration run.
+    & (Join-Path $PSScriptRoot 'firewall.ps1') -StorageRoot $StorageRoot -DeferRustfsCheck:$extendExistingFirewall
+    if ($extendExistingFirewall) {
+        if ($states['ansible-control'] -ne 'running') {
+            Start-VM -VM (Get-LabVM 'ansible-control')
+            Write-Host 'Started:     ansible-control (adds nginx to the existing firewall)'
+        }
+        # This early connection precedes step 5's normal host-certificate renewal. Repair a
+        # due/expired control certificate through the verified Hyper-V KVP key first too.
+        Update-LabVmHostCertificates @('ansible-control')
+        # The bastion and control node can need a moment after a Windows restart.
+        $controlReady = $false
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            if (Test-LabSshStrictLogin 'ansible-control') { $controlReady = $true; break }
+            Start-Sleep -Seconds 3
+        }
+        if (-not $controlReady) { throw 'ansible-control is not reachable with verified SSH; cannot safely add nginx to the running firewall.' }
+        Invoke-LabRun firewall-nginx @('-e', 'nginx_firewall_stage=bootstrap')
+        if ($LASTEXITCODE -ne 0) { throw "firewall-nginx.yml failed (exit code $LASTEXITCODE). The existing firewall has not been rebuilt." }
+        Clear-DnsClientCache
+        $rustfsPublished = $lab.published | Where-Object { $_.vm -eq 'rustfs' }
+        $rustfsAnswer = @(Resolve-LabName "rustfs.$labDomain")
+        if (($rustfsAnswer -join ',') -ne $rustfsPublished.address) {
+            throw "RustFS split DNS from the PC is '$($rustfsAnswer -join ', ')', expected $($rustfsPublished.address)."
+        }
+    }
 
     # Checks the whole DNS path from the PC: Windows resolver -> NRPT rule -> LabHost
     # network -> dnsmasq on the firewall's HOST adapter (hn2). With split-horizon DNS
@@ -463,12 +508,24 @@ try {
     # firewall's bootstrap contract (lib\LabRun.ps1, config\run-profiles.json).
     Invoke-LabRun base
     if ($LASTEXITCODE -ne 0) { throw "base.yml failed (exit code $LASTEXITCODE)." }
-    Invoke-LabRun checks
+    # Firewall DNS changes atomically with the final ingress cutover. Only the original
+    # firewall LAN answer identifies a bootstrap lab; after cutover checks require nginx.
+    $firewallLabDns = @(Invoke-LabSsh 'ansible-control' "getent ahostsv4 firewall.$labDomain" |
+        ForEach-Object { if ("$_" -match '^([0-9.]+)\s') { $Matches[1] } } | Sort-Object -Unique)
+    $nginxPrivateIp = ($lab.vms | Where-Object { $_.name -eq 'nginx' }).ip
+    if (($firewallLabDns -join ',') -eq $nginxPrivateIp) {
+        Invoke-LabRun checks
+    }
+    elseif (($firewallLabDns -join ',') -eq $lab.firewall.lanIp) {
+        Invoke-LabRun checks @('-e', 'lab_allow_bootstrap_dns=true')
+    }
+    else { throw "Unexpected firewall web DNS inside the lab: $($firewallLabDns -join ', ')." }
     if ($LASTEXITCODE -ne 0) { throw "checks.yml failed (exit code $LASTEXITCODE)." }
 }
 finally {
     # Restores the caller's value. If VAGRANT_CWD was not set before, assigning $null removes it.
     $env:VAGRANT_CWD = $previousVagrantCwd
+    $env:VAGRANT_PREFERRED_POWERSHELL = $previousVagrantPowerShell
 }
 
 # --- Step 7: maintenance - renewals that are due ------------------------------------------------
@@ -485,11 +542,11 @@ if (Test-Path (Join-Path $keyDir 'openbao\unseal-a.dpapi')) {
 }
 
 Write-Host ''
-Write-Host 'Done. Log in with:  .\lab.ps1 connect  (or: .\lab.ps1 connect matrix / keycloak / vault / firewall)'
+Write-Host 'Done. Log in with:  .\lab.ps1 connect  (or: .\lab.ps1 connect nginx / matrix / keycloak / vault / firewall)'
 if ((Test-Path (Join-Path $keyDir 'openbao\unseal-c.sha256')) -and -not (Test-LabSshCaInRecoveryKit)) {
     Write-Host 'PENDING: your recovery file has no copy of the current offline SSH CA. In your own PowerShell window:  .\lab.ps1 recovery -Renew'
 }
 if (-not $maintenanceDone) {
     Write-Host 'Next: .\lab.ps1 deploy vault (OpenBao), .\lab.ps1 trust (once per PC), .\lab.ps1 recovery (in your own window),'
-    Write-Host '      then .\lab.ps1 deploy keycloak and .\lab.ps1 deploy matrix (Element: https://element.lab.internal)'
+    Write-Host '      then .\lab.ps1 deploy all (central nginx, Keycloak, Matrix and RustFS)'
 }

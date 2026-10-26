@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Every task on the Windows PC goes through this script: building and starting the lab (up),
-    deploying the services (deploy vault | keycloak | matrix | firewall | all), running a playbook
+    deploying the services (deploy vault | nginx | keycloak | matrix | rustfs | firewall | all), running a playbook
     (run), logging in (connect), reading a secret (secret), tearing it down (down). Most commands
     hand the actual work to Ansible on the VM ansible-control; the PC keeps only what needs
     Windows (Hyper-V, DPAPI, the offline CAs) - scripts\lib\Lab.ps1 explains the rule.

@@ -1,0 +1,50 @@
+[Unit]
+Description=RustFS S3 object storage
+Documentation=https://docs.rustfs.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=rustfs
+Group=rustfs
+WorkingDirectory=/var/lib/rustfs
+EnvironmentFile=/etc/rustfs/rustfs.env
+LoadCredential=access-key:/etc/rustfs/access-key
+LoadCredential=secret-key:/etc/rustfs/secret-key
+Environment=RUSTFS_ACCESS_KEY_FILE=%d/access-key
+Environment=RUSTFS_SECRET_KEY_FILE=%d/secret-key
+ExecStart=/usr/local/bin/rustfs $RUSTFS_VOLUMES
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=60
+LimitNOFILE=1048576
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+# RustFS enumerates this VM's interfaces through netlink before accepting its bind address.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+ReadWritePaths=/var/lib/rustfs /var/log/rustfs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rustfs
+
+[Install]
+WantedBy=multi-user.target

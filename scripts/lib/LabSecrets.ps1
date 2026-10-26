@@ -400,6 +400,8 @@ function Get-LabSubjectKeyId($Certificate) {
 #                                    when the published copy differs from the PC's
 #   the intermediate CA              400 days before              lab.ps1 deploy vault
 #   Keycloak's TLS certificate       30 days before               lab.ps1 deploy keycloak
+#   RustFS's TLS certificate         30 days before, or when the  lab.ps1 deploy rustfs
+#                                    intermediate changed
 #   the firewall's GUI certificate   30 days before, and when it  lab.ps1 deploy firewall
 #                                    is not from the current
 #                                    intermediate (a new firewall
@@ -458,6 +460,15 @@ function Get-LabMaintenanceDue {
     $keycloak = Get-LabServedCertificate "keycloak.$($script:LabConfig.domain)" 443
     if ($keycloak -and $keycloak.NotAfter -lt $now.AddDays(30)) {
         $due += @{ What = "Keycloak's TLS certificate (valid until $($keycloak.NotAfter.ToString('yyyy-MM-dd')))"; Action = @('deploy', 'keycloak') }
+    }
+    $rustfs = Get-LabServedCertificate "rustfs.$($script:LabConfig.domain)" 443
+    if ($rustfs) {
+        if ($rustfs.NotAfter -lt $now.AddDays(30)) {
+            $due += @{ What = "RustFS's TLS certificate (valid until $($rustfs.NotAfter.ToString('yyyy-MM-dd')))"; Action = @('deploy', 'rustfs') }
+        }
+        elseif ($intermediate -and (Get-LabAuthorityKeyId $rustfs) -ne (Get-LabSubjectKeyId $intermediate)) {
+            $due += @{ What = "RustFS's TLS certificate (issued by another intermediate)"; Action = @('deploy', 'rustfs') }
+        }
     }
     return , $due
 }

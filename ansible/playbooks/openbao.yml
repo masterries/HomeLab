@@ -20,18 +20,27 @@
 #   - nginx on port 80 for the public CA certificates and revocation lists only
 #
 # Idempotent: yes. The package is pinned and held; files change only when templates change.
-# A changed configuration is applied with "reload" (SIGHUP), which does NOT seal OpenBao.
+# A changed server configuration requires a restart and seals OpenBao. Use lab.ps1 deploy
+# vault: its PC wrapper verifies the unseal shares before this run and unseals afterwards.
+# Certificate renewal still uses SIGHUP/tls_auto_reload without restarting the service.
 - name: OpenBao on the vault VM
   hosts: vault_servers
   become: true
   vars:
     # Pinned version: an upgrade is a deliberate change here (read the release notes first).
     openbao_version: "2.7.1"
+    openbao_nginx_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', 'nginx') | first).ip }}"
     # Primary key fingerprint of OpenBao's release signing key (openbao.org/docs/install).
     # The repository's key is downloaded and checked against it before apt trusts anything.
     openbao_key_url: https://openbao.org/assets/openbao-gpg-pub-20240618.asc
     openbao_key_fingerprint: 66D15FDD87287219C8E15478D200CD702853E6D0
   tasks:
+    - name: Exactly one trusted ingress VM is configured
+      ansible.builtin.assert:
+        that:
+          - (lab_config.vms | selectattr('name', 'equalto', 'nginx') | list | length) == 1
+        quiet: true
+
     # lab.ps1 deploy vault creates the key and certificate BEFORE the package: the package would
     # otherwise generate a self-signed certificate that nothing trusts.
     - name: The TLS certificate for OpenBao is in place
@@ -151,7 +160,7 @@
         owner: root
         group: openbao
         mode: "0640"
-      notify: reload openbao
+      notify: restart openbao
 
     - name: Log rotation for the audit log
       ansible.builtin.template:
@@ -235,10 +244,12 @@
     - name: update CA bundle
       ansible.builtin.command: update-ca-certificates
 
-    - name: reload openbao
+    # Listener options cannot be enabled by SIGHUP. The PC deploy wrapper restores the
+    # unsealed state after this playbook; fresh installations remain uninitialized here.
+    - name: restart openbao
       ansible.builtin.systemd_service:
         name: openbao
-        state: reloaded
+        state: restarted
 
     - name: reload nginx
       ansible.builtin.shell: nginx -t && systemctl reload nginx

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | firewall | keycloak | matrix | all
+    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | firewall | nginx | keycloak | matrix | rustfs | all
 
 .DESCRIPTION
     Runs on the Windows host, as your own Windows user (no administrator rights needed). The work
@@ -25,16 +25,22 @@
                MDAD inventory, the Matrix secrets in OpenBao), then ansible\bin\deploy-matrix
                (profile "matrix": MDAD's "install-all", its self-check, mas-cli doctor and
                ansible\playbooks\matrix-check.yml). Nothing is downloaded from GitHub.
-    all        vault, firewall, keycloak, matrix - in that order, stopping at the first failure.
+    rustfs     RustFS S3 object storage on its own VM (ansible\playbooks\rustfs.yml): credentials
+               from OpenBao, a VM-local TLS key signed by the lab CA, persistent data and separate
+               HTTPS names for the S3 API and console on the standard port 443.
+    nginx      Native nginx on its own VM, routing HTTPS by SNI and Matrix HTTP by hostname.
+               config/nginx.json owns the domains and fixed private backend addresses. TLS keys
+               and certificates stay on the application VMs; this run needs no secrets token.
+    all        vault, firewall, nginx, keycloak, matrix, rustfs - in that order, stopping at the first failure.
 
-    A snapshot of OpenBao follows every keycloak and matrix run (also after a failure): secrets
+    A snapshot of OpenBao follows every keycloak, matrix and rustfs run (also after a failure): secrets
     created by a first deployment exist only in OpenBao.
 
     Prerequisites: the lab is up (.\lab.ps1 up), and the firewall publishes the services
     ("published" in config\lab.json). Safe to run repeatedly: every step is idempotent.
 
 .PARAMETER Target
-    vault, firewall, keycloak, matrix or all.
+    vault, firewall, nginx, keycloak, matrix, rustfs or all.
 
 .PARAMETER RotateIntermediate
     vault: make a new intermediate CA now (see Invoke-LabVaultDeploy).
@@ -58,7 +64,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('vault', 'firewall', 'keycloak', 'matrix', 'all')]
+    [ValidateSet('vault', 'firewall', 'nginx', 'keycloak', 'matrix', 'rustfs', 'all')]
     [string]$Target,
     [switch]$RotateIntermediate,
     [switch]$Setup
@@ -92,6 +98,16 @@ function Deploy-LabKeycloak {
     Write-Host '  .\lab.ps1 secret keycloak/users/alice     (keycloak/users/bob, keycloak/admin)'
 }
 
+function Deploy-LabNginx {
+    Write-Host '== Nginx: central hostname routing with application TLS passthrough (nginx.yml) =='
+    Invoke-LabRun 'nginx'
+    if ($LASTEXITCODE -ne 0) { throw "nginx.yml failed on ansible-control (exit code $LASTEXITCODE)." }
+    # Configure and validate the listener before changing any running service's NAT target.
+    Invoke-LabRun 'firewall-nginx'
+    if ($LASTEXITCODE -ne 0) { throw "firewall-nginx.yml failed on ansible-control (exit code $LASTEXITCODE)." }
+    Write-Host 'Central nginx is ready. Domains and backends: config\nginx.json; apply changes with .\lab.ps1 deploy nginx.'
+}
+
 function Deploy-LabMatrix {
     # The pinned commit must be the same in vendor\mdad\.lab-vendored-commit and in
     # matrix-prepare.yml (mdad_version), or the wrong configuration could meet the wrong code.
@@ -109,15 +125,34 @@ function Deploy-LabMatrix {
     Write-Host 'alice may use Matrix admin tools (MAS policy admin_users).'
 }
 
+function Deploy-LabRustfs {
+    Write-Host '== RustFS: credentials and certificate from OpenBao, persistent object storage over TLS (rustfs.yml) =='
+    Invoke-LabDeployRun 'rustfs' 'rustfs.yml'
+    # The playbook verifies the lab-side endpoints. Also prove that DNS, the firewall's
+    # published IP/forwards and the PC's normal TLS trust work before declaring it ready.
+    foreach ($endpoint in @("https://rustfs.${domain}/health/ready", "https://rustfs-console.${domain}/rustfs/console/health")) {
+        $response = Invoke-WebRequest -Uri $endpoint -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        if ([int]$response.StatusCode -ne 200) { throw "RustFS is not ready from the PC: $endpoint (HTTP $($response.StatusCode))." }
+    }
+    Write-Host ''
+    Write-Host "RustFS S3 API:  https://rustfs.${domain}"
+    Write-Host "RustFS console: https://rustfs-console.${domain}"
+    Write-Host 'Credentials from OpenBao: .\lab.ps1 secret rustfs/admin/access-key (or rustfs/admin/secret-key).'
+}
+
 switch ($Target) {
     'vault' { Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate }
     'firewall' { Deploy-LabFirewall }
+    'nginx' { Deploy-LabNginx }
     'keycloak' { Deploy-LabKeycloak }
     'matrix' { Deploy-LabMatrix }
+    'rustfs' { Deploy-LabRustfs }
     'all' {
         Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate
         Deploy-LabFirewall
+        Deploy-LabNginx
         Deploy-LabKeycloak
         Deploy-LabMatrix
+        Deploy-LabRustfs
     }
 }

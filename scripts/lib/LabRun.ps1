@@ -45,7 +45,10 @@ function New-LabSyncArchive([string]$Path) {
         Copy-Item -Recurse (Join-Path $script:LabProjectRoot 'ansible') $stage
         New-Item -ItemType Directory -Force -Path (Join-Path $stage 'config'), (Join-Path $stage 'opnsense') | Out-Null
         Copy-Item (Join-Path $script:LabProjectRoot 'config\lab.json'), $script:LabRunProfilesFile (Join-Path $stage 'config')
-        Copy-Item (Join-Path $script:LabProjectRoot 'opnsense\lab-gui-cert.php') (Join-Path $stage 'opnsense')
+        Copy-Item (Join-Path $script:LabProjectRoot 'config\nginx.json') (Join-Path $stage 'config')
+        foreach ($helper in 'lab-gui-cert.php', 'lab-rustfs.php', 'lab-nginx.php') {
+            Copy-Item (Join-Path $script:LabProjectRoot "opnsense\$helper") (Join-Path $stage 'opnsense')
+        }
         if (Test-Path $script:LabRootCaCert) {
             New-Item -ItemType Directory -Force -Path (Join-Path $stage '.pki\pub') | Out-Null
             Copy-Item $script:LabRootCaCert (Join-Path $stage '.pki')

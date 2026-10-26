@@ -395,6 +395,10 @@ function New-FirewallConfig($Secrets, $Certificate) {
     }
     & $entry 'firewall' "$($lab.firewall.lanIp),$($lab.firewall.hostIp)" $null 'Firewall: lab address and management address'
 
+    # This is the first-boot configuration. Keep backend DNS, OpenBao's 80/8200 and the GUI
+    # direct until nginx is ready: bootstrapping its PROXY-protocol listener needs OpenBao.
+    # firewall-nginx's route stage migrates the exact DNS/NAT records together afterward;
+    # its bootstrap stage preserves an already-routed appliance rather than rendering over it.
     # Published VMs ("published" in lab.json): per VM one virtual IP on the HOST interface, one
     # port forward per listed port (same port number on the VM), and its names with two
     # addresses each (split horizon: the PC gets the published address, the lab the VM's own).
@@ -443,6 +447,14 @@ function New-FirewallConfig($Secrets, $Certificate) {
 "@)
         foreach ($port in $pub.ports) {
             if ($port.protocol -notin 'tcp', 'udp') { throw "lab.json, published: protocol '$($port.protocol)' for $($pub.vm) must be tcp or udp." }
+            $targetVm = if ($port.targetVm) { [string]$port.targetVm } else { [string]$pub.vm }
+            if (-not $vmIp.ContainsKey($targetVm)) { throw "lab.json, published: unknown target VM '$targetVm' for $($pub.vm):$($port.port)." }
+            if ($pub.vm -eq 'vault' -and $port.protocol -eq 'tcp' -and [int]$port.port -in @(80, 8200)) {
+                $targetVm = 'vault'
+            }
+            $targetIp = $vmIp[$targetVm]
+            # RustFS's API and console are published only to this PC, also on a fresh firewall.
+            $sourceNetwork = if ($pub.vm -eq 'rustfs') { $lab.firewall.pcIp } else { 'any' }
             [void]$forwards.Append(@"
     <rule>
       <sequence>$sequence</sequence>
@@ -450,13 +462,13 @@ function New-FirewallConfig($Secrets, $Certificate) {
       <ipprotocol>inet</ipprotocol>
       <protocol>$($port.protocol)</protocol>
       <source>
-        <network>any</network>
+        <network>$sourceNetwork</network>
       </source>
       <destination>
         <network>$($pub.address)</network>
         <port>$([int]$port.port)</port>
       </destination>
-      <target>$labIp</target>
+      <target>$targetIp</target>
       <local-port>$([int]$port.port)</local-port>
       <descr>$(& $xmlText "$($pub.vm): $($port.description)")</descr>
       <pass>rule</pass>
@@ -833,7 +845,7 @@ function Show-GuiCertificate {
 }
 
 # 8. Checks from your PC's point of view.
-function Test-Firewall {
+function Test-Firewall([switch]$DeferRustfsCheck) {
     Clear-DnsClientCache
     $fwName = "firewall.$($lab.domain)"
     $answer = @(Resolve-DnsName -Name $fwName -Type A -DnsOnly -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress })
@@ -842,6 +854,7 @@ function Test-Firewall {
     # One name per published VM: the PC must get that VM's published address, and only that
     # (split horizon: the lab address would be unreachable for the PC).
     foreach ($pub in $lab.published) {
+        if ($DeferRustfsCheck -and $pub.vm -eq 'rustfs') { continue }
         $firstName = @($pub.names)[0]
         $published = "$firstName.$($lab.domain)"
         if ($firstName -eq '@') { $published = $lab.domain }

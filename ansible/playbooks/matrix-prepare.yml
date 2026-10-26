@@ -202,8 +202,7 @@
     - name: Apply the CA bundle now, not at the end of the play
       ansible.builtin.meta: flush_handlers
 
-    # Inside the lab, every Matrix name must resolve to the VM's own LabNet address (the lab
-    # view of the firewall's split-horizon DNS). The LiveKit JWT service, for example, calls
+    # Inside the lab, every Matrix web name must resolve to central ingress. The LiveKit JWT service calls
     # https://lab.internal and https://matrix.lab.internal from the VM itself, and OpenBao's ACME
     # server checks each name over http://<name>/.well-known/acme-challenge/ from the vault VM.
     # getent asks the same resolver as every program on the VM.
@@ -219,14 +218,14 @@
       # Only reads: runs under --check too (a command task would be skipped there).
       check_mode: false
 
-    - name: The Matrix names resolve to this server
+    - name: The Matrix web names resolve to central ingress
       ansible.builtin.assert:
-        that: ansible_facts['default_ipv4']['address'] in item.stdout
+        that:
+          - (item.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) == [(lab_config.vms | selectattr('name', 'equalto', 'nginx') | first).ip]
         fail_msg: >-
-          {{ item.item }} does not resolve to {{ ansible_facts['default_ipv4']['address'] }} on the
-          Matrix VM (got: {{ item.stdout_lines | first | default('nothing') }}). Are matrix, element
-          and @ under "published" in config\lab.json, and was the firewall rebuilt since
-          (.\lab.ps1 firewall -Rebuild)?
+          {{ item.item }} does not resolve only to central nginx on the Matrix VM
+          (got: {{ item.stdout_lines | first | default('nothing') }}).
+          Apply the configured ingress and DNS routes with .\lab.ps1 deploy nginx.
         quiet: true
       loop: "{{ matrix_dns.results }}"
       loop_control:

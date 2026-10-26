@@ -1,0 +1,290 @@
+# RustFS on its own Ubuntu VM. Run with .\lab.ps1 deploy rustfs.
+# Only the target VM receives persistent secrets; ansible-control holds them in RAM.
+# Release and SHA256: https://github.com/rustfs/rustfs/releases/expanded_assets/1.0.3
+- name: RustFS - secrets for this run
+  hosts: control
+  gather_facts: false
+  tasks:
+    - name: Does RustFS already have persistent state?
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/rustfs/access-key
+        - /etc/rustfs/secret-key
+        - /var/lib/rustfs/data/.rustfs.sys
+      delegate_to: "{{ groups['rustfs_servers'][0] }}"
+      become: true
+      register: rustfs_existing
+
+    - name: Read or create RustFS credentials in OpenBao
+      ansible.builtin.include_tasks: tasks/openbao-secrets.yml
+      vars:
+        openbao_existing_state: "{{ rustfs_existing.results | selectattr('stat.exists') | list | length > 0 }}"
+        openbao_secrets:
+          - { path: rustfs/admin/access-key, field: value, policy: lab-alnum-24 }
+          - { path: rustfs/admin/secret-key, field: value, policy: lab-alnum-48 }
+
+- name: RustFS - pinned binary, TLS and isolated service
+  hosts: rustfs_servers
+  become: true
+  vars:
+    rustfs_version: "1.0.3"
+    rustfs_archive_sha256: 0cb0924df93734d14f708004eff4b0e48a147fbdc074756ca0d6b8ec919629b8
+    rustfs_release_dir: "/opt/rustfs/releases/{{ rustfs_version }}"
+    rustfs_fqdn: "rustfs.{{ lab_domain }}"
+    rustfs_console_fqdn: "rustfs-console.{{ lab_domain }}"
+    rustfs_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', 'rustfs') | first).ip }}"
+    tls_renew_before: +30d
+  tasks:
+    - name: Supported operating system and architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['architecture'] == 'x86_64'
+        quiet: true
+
+    - name: Runtime dependencies
+      ansible.builtin.apt:
+        name: [ca-certificates, unzip, python3, python3-cryptography, nginx]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        policy_rc_d: 101
+
+    - name: RustFS service group
+      ansible.builtin.group:
+        name: rustfs
+        system: true
+
+    - name: RustFS service user without a login shell
+      ansible.builtin.user:
+        name: rustfs
+        group: rustfs
+        system: true
+        create_home: false
+        home: /var/lib/rustfs
+        shell: /usr/sbin/nologin
+        password_lock: true
+
+    - name: Application, data and configuration directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /opt/rustfs, mode: "0755" }
+        - { path: /opt/rustfs/releases, mode: "0755" }
+        - { path: "{{ rustfs_release_dir }}", mode: "0755" }
+        - { path: /var/cache/rustfs, mode: "0750" }
+        - { path: /etc/rustfs, group: rustfs, mode: "0750" }
+        - { path: /etc/rustfs/tls, group: rustfs, mode: "0750" }
+        - { path: /var/lib/rustfs, owner: rustfs, group: rustfs, mode: "0750" }
+        - { path: /var/lib/rustfs/data, owner: rustfs, group: rustfs, mode: "0700" }
+        - { path: /var/log/rustfs, owner: rustfs, group: rustfs, mode: "0750" }
+        - { path: /usr/local/libexec, mode: "0755" }
+        - { path: /etc/nginx/tls, mode: "0700" }
+
+    - name: Lab root CA in the system trust store
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+        mode: "0644"
+      notify: update CA bundle
+
+    - name: Download the exact release and verify its SHA256
+      ansible.builtin.get_url:
+        url: "https://github.com/rustfs/rustfs/releases/download/{{ rustfs_version }}/rustfs-linux-x86_64-gnu-v{{ rustfs_version }}.zip"
+        dest: "/var/cache/rustfs/rustfs-{{ rustfs_version }}.zip"
+        checksum: "sha256:{{ rustfs_archive_sha256 }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Unpack the verified release
+      ansible.builtin.unarchive:
+        src: "/var/cache/rustfs/rustfs-{{ rustfs_version }}.zip"
+        dest: "{{ rustfs_release_dir }}"
+        remote_src: true
+        creates: "{{ rustfs_release_dir }}/rustfs"
+
+    - name: Root owns the executable
+      ansible.builtin.file:
+        path: "{{ rustfs_release_dir }}/rustfs"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Select the pinned release
+      ansible.builtin.file:
+        src: "{{ rustfs_release_dir }}/rustfs"
+        dest: /usr/local/bin/rustfs
+        state: link
+      notify: restart rustfs
+
+    - name: Credentials stored only on the RustFS VM, readable by root
+      ansible.builtin.copy:
+        content: "{{ hostvars['ansible-control'].lab_secrets[item.path] }}\n"
+        dest: "/etc/rustfs/{{ item.file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop:
+        - { path: rustfs/admin/access-key, file: access-key }
+        - { path: rustfs/admin/secret-key, file: secret-key }
+      no_log: true
+      diff: false
+      notify: restart rustfs
+
+    - name: TLS certificate with its private key generated on this VM
+      ansible.builtin.include_tasks: tasks/openbao-certificate.yml
+      vars:
+        openbao_cert_key: /etc/rustfs/tls/rustfs_key.pem
+        openbao_cert_file: /etc/rustfs/tls/rustfs_cert.pem
+        openbao_cert_names: ["{{ rustfs_fqdn }}"]
+        openbao_cert_role: rustfs
+        openbao_cert_key_group: rustfs
+        openbao_cert_key_mode: "0640"
+        openbao_cert_key_format: pkcs8
+        openbao_cert_renew_before: "{{ tls_renew_before }}"
+        openbao_cert_notify: restart rustfs
+
+    - name: Non-secret configuration and hardened systemd service
+      ansible.builtin.template:
+        src: "../templates/rustfs/{{ item.template }}.j2"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { template: rustfs.env, dest: /etc/rustfs/rustfs.env }
+        - { template: rustfs.service, dest: /etc/systemd/system/rustfs.service }
+      notify: restart rustfs
+
+    # Separate proxy key: only nginx's root master process can read it. RustFS keeps its own
+    # existing key for the TLS loopback backend; no private key leaves this VM.
+    - name: Browser-facing certificate for the API and console hostnames
+      ansible.builtin.include_tasks: tasks/openbao-certificate.yml
+      vars:
+        openbao_cert_key: /etc/nginx/tls/rustfs.key
+        openbao_cert_file: /etc/nginx/tls/rustfs.crt
+        openbao_cert_names: ["{{ rustfs_fqdn }}", "{{ rustfs_console_fqdn }}"]
+        openbao_cert_role: rustfs
+        openbao_cert_renew_before: "{{ tls_renew_before }}"
+        openbao_cert_notify: reload nginx
+
+    - name: RustFS HTTPS reverse proxy
+      ansible.builtin.template:
+        src: ../templates/rustfs/nginx.conf.j2
+        dest: /etc/nginx/sites-available/rustfs.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload nginx
+
+    - name: Enable the RustFS HTTPS site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/rustfs.conf
+        dest: /etc/nginx/sites-enabled/rustfs.conf
+        state: link
+      notify: reload nginx
+
+    - name: Remove nginx's default plaintext site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    - name: Validate nginx configuration before starting or reloading it
+      ansible.builtin.command: /usr/sbin/nginx -t
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Install S3 round-trip verification
+      ansible.builtin.copy:
+        src: ../files/rustfs/smoke-check.py
+        dest: /usr/local/libexec/rustfs-smoke-check.py
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Enable and start RustFS
+      ansible.builtin.systemd_service:
+        name: rustfs
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Enable and start the HTTPS proxy
+      ansible.builtin.service:
+        name: nginx
+        enabled: true
+        state: started
+
+    - name: Apply pending certificate and service changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: RustFS S3 storage and IAM are ready over verified HTTPS
+      ansible.builtin.uri:
+        url: "https://{{ rustfs_fqdn }}/health/ready"
+        ca_path: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+      register: rustfs_ready
+      until: rustfs_ready.status == 200
+      retries: 60
+      delay: 3
+      when: not ansible_check_mode
+
+    - name: RustFS web console is ready over verified HTTPS
+      ansible.builtin.uri:
+        url: "https://{{ rustfs_console_fqdn }}/rustfs/console/health"
+        ca_path: /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+      when: not ansible_check_mode
+
+    # Creates an isolated random bucket and deletes it, including on failure. No credentials
+    # are command-line arguments, environment values, logs or files on ansible-control.
+    - name: S3 rejects anonymous access and passes an authenticated upload/download/delete
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /usr/local/libexec/rustfs-smoke-check.py
+          - --endpoint
+          - "{{ item }}"
+          - --ca-file
+          - /usr/local/share/ca-certificates/lab-root-ca-2026.crt
+          - --access-key-file
+          - /etc/rustfs/access-key
+          - --secret-key-file
+          - /etc/rustfs/secret-key
+      # The bundled console uses its own origin for signed S3/STS calls too.
+      loop:
+        - "https://{{ rustfs_fqdn }}"
+        - "https://{{ rustfs_console_fqdn }}"
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Verify HTTPS endpoints from ansible-control inside the lab
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        ca_path: "{{ lab_pki_dir }}/root-ca.crt"
+      loop:
+        - "https://{{ rustfs_fqdn }}/health/ready"
+        - "https://{{ rustfs_console_fqdn }}/rustfs/console/health"
+      delegate_to: ansible-control
+      become: false
+      when: not ansible_check_mode
+
+  handlers:
+    - name: update CA bundle
+      ansible.builtin.command: update-ca-certificates
+
+    - name: restart rustfs
+      ansible.builtin.systemd_service:
+        name: rustfs
+        daemon_reload: true
+        state: restarted
+
+    - name: reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

@@ -16,11 +16,68 @@ need a deployed lab (OpenBao, Keycloak, Matrix) unless noted. No test prints a s
 test passed, 1 when one failed - so a script or a scheduled task can use it the way a CI
 pipeline uses its test stage.
 
+Central nginx and RustFS also have standalone firewall regression tests. They are
+**not part of the default PowerShell test runner** and need no deployed lab or credentials:
+
+```powershell
+.\tests\Test-LabNginxFirewallRender.ps1
+.\tests\Test-LabRustfsFirewallRender.ps1
+php tests/Test-LabNginxFirewall.php
+php tests/Test-LabRustfsFirewall.php
+```
+
+[Test-LabNginxFirewallRender.ps1](Test-LabNginxFirewallRender.ps1) checks the current
+initial-firewall rendering: nginx's private DHCP reservation, managed ingress forwards,
+preserved source restrictions, bootstrap Vault/GUI access and direct Matrix media.
+[Test-LabNginxFirewall.php](Test-LabNginxFirewall.php) exercises the current bounded
+`lab-nginx.php` planner in memory. Its bootstrap stage adds nginx DHCP/private DNS
+while leaving live forwards unchanged; its route stage changes the managed web
+targets and the internal web DNS graph, preserves unrelated configuration and is idempotent. Conflicting or altered
+managed records are refused before mutation. PHP tests require PHP 8.
+
+[Test-LabRustfsFirewallRender.ps1](Test-LabRustfsFirewallRender.ps1) renders the initial
+firewall configuration using inert credential fixtures. It checks RustFS's DHCP reservation,
+split DNS for the S3 and console names, HOST virtual IP and one PC-only HTTPS forward (443)
+to central nginx, while keeping the
+existing publication policies. It also uses `ssh -G` to verify RustFS's private transport address,
+certificate hostname, bastion and strict certificate checks for both its short and full name,
+and verifies another VM's SSH routing is preserved. [Test-LabRustfsFirewall.php](Test-LabRustfsFirewall.php)
+checks the **legacy** additive `lab-rustfs.php` helper with in-memory configurations: preserved records,
+idempotency and refusal of IP/MAC/name/VIP collisions, broad or inverted sources, duplicate or
+disabled NAT rules and extra published ports. It also checks migration from the previous
+9000/9001 publication to HTTPS on 443. It never loads OPNsense's config.inc.
+Current `lab.ps1 up` uses `firewall-nginx` rather than this legacy onboarding profile.
+
+The central proxy passes encrypted TLS streams by SNI and holds no application private
+keys. Live certificate checks continue checking the backend certificates through the
+existing service URLs. RustFS's own nginx remains its TLS terminator; Vault's API/CA
+HTTP and the firewall GUI also use central ingress after cutover. OpenBao accepts original
+client addresses through PROXY metadata only from nginx, retaining token CIDR restrictions.
+Matrix's media ports remain direct. Before cutover the nginx playbook requires OpenBao
+to answer through its trusted proxy with verified TLS and an unsealed health status.
+The other backend applications can still be deployed afterwards on a fresh lab.
+
+`ansible/tests/nginx-routing-check.py` compares the direct and central TLS certificates
+with normal CA/hostname validation and checks Matrix's HTTP challenge paths. Unknown
+or missing SNI must fail the handshake even with certificate verification disabled.
+Running it on nginx with `--denied-source 127.0.0.1` also checks that both RustFS
+names and the firewall GUI reject an unauthorized source while Matrix accepts that
+same source. This preserves their PC restrictions across published IPs. Vault's public
+CA/CRL paths must return the same bytes through ingress as directly from the backend.
+`ansible/tests/openbao-ingress-check.py` accepts test tokens only on stdin and verifies
+their source restrictions through both 443 and 8200. It also tests that a forged PROXY
+address from an untrusted direct client cannot impersonate the PC; no token is printed.
+The PC and control node keep explicit private SSH routes with FQDN `HostKeyAlias`,
+certificate-only host algorithms and revocation checks. `checks.yml` normally requires
+every published web domain to resolve only to nginx inside the lab; `up` enables its
+bootstrap DNS exception only while the firewall's web name still resolves to its original
+LAN address. Matrix preparation requires its web aliases to resolve to nginx as well.
+
 | Test | What it checks | Changes something? |
 |---|---|---|
 | `Test-LabLayout.ps1` | the repository and the `lab.ps1` dispatcher: `lab.ps1`'s command list and the command table in `scripts\lib\Lab.ps1` agree, and every command's script or function exists; PowerShell code only in `scripts\lib`, `commands`, `host` and `dev`; every run profile (`config\run-profiles.json`) names an existing playbook or script, valid SSH principals, existing OpenBao policies and a known token role; every playbook has a run profile (or is started by a script that has one) and every policy file is used; no code names a retired script or function, and README.md names them only in its rename table ([Where the old scripts went](../README.md#where-the-old-scripts-went)); every link in README.md, tests\README.md and vendor\README.md resolves; the dispatcher: help lists every command, an unknown command is refused (exit code 1), a command for your own window is refused with redirected output and `breakglass` without a command is refused (exit code 2), `run` without arguments lists the profiles | no, and it needs no lab (it reads files and starts `lab.ps1` in child processes) |
 | `Test-LabAnsible.ps1` | the Ansible side, through run profiles on ansible-control: every playbook parses (profile `syntax`, `ansible-playbook --syntax-check`), `checks.yml` passes on every machine, and `base.yml --check` and `firewall.yml --check` report `changed=0` on every host - the VMs' base setup and the firewall's GUI certificate match the repository, so a change made by hand shows up here (drift detection) | no (read-only runs and `--check` runs) |
-| `Test-LabCertificates.ps1` | every HTTPS endpoint: issued by the right CA (by key identifier: OpenBao's own certificate by the root; the firewall's GUI, Keycloak and the Matrix names by the current intermediate), valid for more than 30 days, trusted by Windows including the revocation check. A newly built firewall starts with a GUI certificate from the root and fails here until `lab.ps1 deploy firewall` (or the maintenance step of `lab.ps1 up`) has moved it to the intermediate | no |
+| `Test-LabCertificates.ps1` | every HTTPS endpoint: issued by the right CA (by key identifier: OpenBao's own certificate by the root; the firewall's GUI, Keycloak, both RustFS names on 443 and the Matrix names by the current intermediate), valid for more than 30 days, trusted by Windows including the revocation check. A newly built firewall starts with a GUI certificate from the root and fails here until `lab.ps1 deploy firewall` (or the maintenance step of `lab.ps1 up`) has moved it to the intermediate | no |
 | `Test-LabTlsPin.ps1` | the PC's OpenBao calls are pinned to the lab root (`LabTlsPin3` in `scripts\lib\LabSecrets.ps1`: only a certificate the root signed directly); other hosts keep Windows' validation; for the pinned host a foreign chain is refused, and so is a lab chain through OpenBao's intermediate (Keycloak's certificate, while keycloak is made the pinned host), which is accepted again once keycloak is not the pinned host - only the root itself may vouch for OpenBao | no (one HTTPS request to www.microsoft.com as the foreign chain) |
 | `Test-LabPasswordHash.ps1` | the firewall's password hashing over stdin gives exactly the hash of the command-line form (dummy value, also with a BOM-writing console) | no, local only |
 | `Test-LabRetiredDpapi.ps1` | DPAPI secrets in `keys\openbao-retired-*` can be read under their new names | no (a temporary copy, deleted again) |

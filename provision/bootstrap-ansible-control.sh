@@ -12,7 +12,8 @@
 #   (vagrant/Vagrantfile); no arguments. It runs after bootstrap-ansible-user.sh and
 #   harden-ssh.sh (shared provisioners run before machine-specific ones), so the user "ansible"
 #   and its ~/.ssh exist. It expects the PC's keys\ssh\known_hosts and revoked_host_keys, which
-#   the file provisioner "lab-ssh-known-hosts" uploads to $STAGING_DIR just before.
+#   the file provisioners upload to $STAGING_DIR just before. control_ssh_config is the
+#   public, generated private-IP routing map with strict host-certificate verification.
 #
 # RESULT
 #   - ansible-control's OWN SSH key, ~ansible/.ssh/id_ed25519, made here once; it never leaves
@@ -83,7 +84,7 @@ ssh-keygen -lf "$ssh_dir/id_ed25519.pub"
 echo "== SSH host key checking =="
 # known_hosts: "@cert-authority <the lab's host names> <CA>" lines, rendered on the PC. The
 # revocation list names host keys that must not be accepted any more (rebuilt machines).
-for file in known_hosts:/etc/ssh/ssh_known_hosts revoked_host_keys:/etc/ssh/lab_revoked_host_keys; do
+for file in known_hosts:/etc/ssh/ssh_known_hosts revoked_host_keys:/etc/ssh/lab_revoked_host_keys control_ssh_config:/etc/ssh/ssh_config.d/20-lab.conf; do
   source_file="$STAGING_DIR/${file%%:*}"
   target="${file#*:}"
   if [[ -f "$source_file" ]]; then
@@ -95,24 +96,9 @@ for file in known_hosts:/etc/ssh/ssh_known_hosts revoked_host_keys:/etc/ssh/lab_
   fi
 done
 rmdir --ignore-fail-on-non-empty "$STAGING_DIR" 2>/dev/null || true
-# Ubuntu's /etc/ssh/ssh_config includes ssh_config.d/*.conf at its top, and ssh keeps the first
-# value it finds, so these win for every lab machine:
-#   HostKeyAlgorithms   only certified ed25519 host keys (a plain key is never asked for)
-#   UserKnownHostsFile  /dev/null: nothing learned "on first use" counts or is stored
-#   RevokedHostKeys     keys of rebuilt machines are refused even with a certificate
-cat > /etc/ssh/ssh_config.d/20-lab.conf.tmp <<'EOF'
-# Managed by provision/bootstrap-ansible-control.sh: lab hosts only with an SSH host certificate.
-Host *.lab.internal
-    HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com
-    StrictHostKeyChecking yes
-    UserKnownHostsFile /dev/null
-    GlobalKnownHostsFile /etc/ssh/ssh_known_hosts
-    RevokedHostKeys /etc/ssh/lab_revoked_host_keys
-    CheckHostIP no
-    UpdateHostKeys no
-EOF
-install -m 0644 -o root -g root /etc/ssh/ssh_config.d/20-lab.conf.tmp /etc/ssh/ssh_config.d/20-lab.conf
-rm -f /etc/ssh/ssh_config.d/20-lab.conf.tmp
+# The installed control_ssh_config pins each FQDN to its VM's private address and uses
+# HostKeyAlias for the certificate identity, so central web DNS cannot redirect SSH.
+# Its host settings keep certified keys only, strict checking and the revocation list.
 
 echo "== Ansible =="
 # "|| true": if pipx list fails, treat it as "nothing installed" instead of aborting (set -e).

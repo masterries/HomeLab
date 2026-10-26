@@ -30,6 +30,12 @@ storage "raft" {
 listener "tcp" {
   address         = "0.0.0.0:8200"
   cluster_address = "127.0.0.1:8201"
+  # Preserve the original client IP through central nginx for token/AppRole CIDR checks.
+  # Only this private proxy address may supply PROXY metadata. Direct TLS clients keep
+  # their own socket IP; a PROXY header from any other source cannot impersonate a client.
+  # PROXY is consumed before TLS, so the pinned certificate and private key stay here.
+  proxy_protocol_behavior = "allow_authorized"
+  proxy_protocol_authorized_addrs = ["{{ openbao_nginx_ip }}/32"]
   # Certificate signed by the lab's offline root (lab.ps1 deploy vault), NOT by OpenBao itself:
   # otherwise an expired certificate could only be renewed through the server it protects.
   # (An empty tls_cert_file would also make OpenBao try Let's Encrypt.)

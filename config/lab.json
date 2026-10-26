@@ -14,8 +14,8 @@
     "livekit_server_config_rtc_node_ip in ansible/matrix/inventory/host_vars/.../vars.yml.",
     "",
     "vms: the Ubuntu VMs behind the firewall (built by Vagrant). New VMs are created by",
-    "lab.ps1 up; the firewall needs a rebuild (lab.ps1 firewall -Rebuild) to learn their",
-    "DHCP reservation and DNS name.",
+    "lab.ps1 up. firewall-nginx.yml adds nginx and reconciles the managed ingress forwards",
+    "on an existing firewall; other new VMs still need a firewall rebuild for DHCP and DNS.",
     "  mac: 12 hex digits without separators, as Hyper-V expects; 02 marks a locally administered",
     "       address. By convention the last four bytes are the VM's IP in hex (0a0a0a1e = 10.10.10.30).",
     "  cpus/memory (MB): the VM's size in Hyper-V. A change is applied with \"vagrant reload <vm>\" in",
@@ -27,24 +27,36 @@
     "",
     "published: what your PC may reach in the lab, per VM. Your PC never reaches a lab VM directly;",
     "it reaches a published address on the firewall's HOST network, and the firewall forwards the",
-    "listed ports to the VM (destination NAT). One address per VM, because two VMs may need the same",
+    "listed ports to the VM (destination NAT). A port's optional targetVm selects another VM,",
+    "such as the central nginx ingress. After route activation, web DNS inside the lab names",
+    "nginx; the private backend addresses remain available under <vm>-backend names and SSH pins.",
+    "One address per service VM, because two VMs may need the same",
     "port (443). Each name becomes <name>.lab.internal (\"@\" is lab.internal itself, as in DNS zone",
-    "files) with two addresses: your PC gets the published address, the lab VMs get the VM's own",
-    "address (split-horizon DNS). Applied by lab.ps1 firewall -Rebuild. Its final DNS check",
+    "files) with two addresses: your PC gets the published address, lab web clients get nginx's",
+    "private address. Fresh firewall bootstrap keeps backend DNS and Vault80/8200 direct until",
+    "nginx is ready; firewall-nginx.yml then activates the full central ingress graph.",
+    "centralIngress enables central firewall GUI ingress and internal web DNS; SSH and DNS",
+    "management remain direct. The live helper disables automatic system hosts-file DNS",
+    "registration so the firewall's own name has no extra direct LAN answer.",
+    "The firewall's final DNS check",
     "resolves the first name of every entry from the PC.",
     "  matrix:   matrix = Synapse (Matrix homeserver), Matrix Authentication Service (MAS) and the",
     "            LiveKit signalling/JWT service; element = Element Web; @ = lab.internal, which serves",
-    "            /.well-known/matrix/... for the user IDs @name:lab.internal. 443/80 go to Traefik,",
+    "            /.well-known/matrix/... for the user IDs @name:lab.internal. 443/80 go through",
+    "            central nginx to Traefik; TLS certificates remain on each application VM.",
     "            7881/tcp and 7882/udp are LiveKit's media ports (voice/video calls). LiveKit",
     "            announces the address itself (livekit_server_config_rtc_node_ip in vars.yml):",
     "            after changing it here, change it there too and run lab.ps1 deploy matrix.",
     "  keycloak: the identity provider (single sign-on); MAS sends browsers there to log in.",
+    "  rustfs:   S3-compatible object storage at rustfs.<domain> and the UI at rustfs-console.<domain>",
+    "            over HTTPS on 443; the RustFS backend ports remain private on the VM.",
     "  vault:    OpenBao, the secrets manager and certificate authority (PKI); its web UI and API",
-    "            on 8200 (OpenBao's standard port), e.g. https://vault.lab.internal:8200/ui/. Port 80",
+    "            on HTTPS 443, e.g. https://vault.lab.internal/ui/. Existing8200 API/UI URLs remain",
+    "            available through nginx with trusted client-IP forwarding. Port 80",
     "            serves only CA certificates and revocation lists (CRLs): certificates name these",
     "            plain-HTTP URLs, and clients such as Windows fetch them to check revocation.",
     "For HTTPS without a warning, every name must also be on the service's TLS certificate (issued by",
-    "the lab CA in ansible/playbooks/matrix-prepare.yml and keycloak.yml)."
+    "the lab CA in ansible/playbooks/matrix-prepare.yml, keycloak.yml and rustfs.yml)."
   ],
   "domain": "lab.internal",
   "labNetwork": "10.10.10.0/24",
@@ -54,11 +66,19 @@
     "hostIp": "10.10.99.2",
     "pcIp": "10.10.99.1"
   },
+  "centralIngress": {
+    "firewallGui": true,
+    "internalWebDns": true
+  },
   "vms": [
     { "name": "ansible-control", "mac": "02000A0A0A0A", "ip": "10.10.10.10", "cpus": 2, "memory": 2048 },
+    { "name": "nginx", "mac": "02000A0A0A14", "ip": "10.10.10.20", "cpus": 1, "memory": 1024,
+      "checkpoints": false, "consoleAutologin": false },
     { "name": "matrix", "mac": "02000A0A0A1E", "ip": "10.10.10.30", "cpus": 4, "memory": 8192 },
     { "name": "keycloak", "mac": "02000A0A0A28", "ip": "10.10.10.40", "cpus": 2, "memory": 4096 },
     { "name": "vault", "mac": "02000A0A0A32", "ip": "10.10.10.50", "cpus": 2, "memory": 2048,
+      "checkpoints": false, "consoleAutologin": false },
+    { "name": "rustfs", "mac": "02000A0A0A3C", "ip": "10.10.10.60", "cpus": 2, "memory": 4096,
       "checkpoints": false, "consoleAutologin": false }
   ],
   "published": [
@@ -67,8 +87,8 @@
       "address": "10.10.99.3",
       "names": ["matrix", "element", "@"],
       "ports": [
-        { "protocol": "tcp", "port": 443, "description": "HTTPS (Traefik: Synapse, MAS, Element, LiveKit signalling)" },
-        { "protocol": "tcp", "port": 80, "description": "HTTP (Traefik redirects to HTTPS)" },
+        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "description": "HTTPS (Traefik: Synapse, MAS, Element, LiveKit signalling)" },
+        { "protocol": "tcp", "port": 80, "targetVm": "nginx", "description": "HTTP (Traefik redirects to HTTPS)" },
         { "protocol": "udp", "port": 7882, "description": "LiveKit media (WebRTC over UDP)" },
         { "protocol": "tcp", "port": 7881, "description": "LiveKit media (WebRTC over TCP, fallback)" }
       ]
@@ -78,7 +98,7 @@
       "address": "10.10.99.4",
       "names": ["keycloak"],
       "ports": [
-        { "protocol": "tcp", "port": 443, "description": "HTTPS (Keycloak login pages and OIDC endpoints)" }
+        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "description": "HTTPS (Keycloak login pages and OIDC endpoints)" }
       ]
     },
     {
@@ -86,8 +106,17 @@
       "address": "10.10.99.5",
       "names": ["vault"],
       "ports": [
-        { "protocol": "tcp", "port": 8200, "description": "HTTPS (OpenBao API, web UI and ACME directory)" },
-        { "protocol": "tcp", "port": 80, "description": "HTTP: CA certificates and revocation lists only (nginx allow-list)" }
+        { "protocol": "tcp", "port": 8200, "targetVm": "nginx", "description": "HTTPS (OpenBao API compatibility and ACME directory through central nginx)" },
+        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "description": "HTTPS (OpenBao UI and API through central nginx)" },
+        { "protocol": "tcp", "port": 80, "targetVm": "nginx", "description": "HTTP: CA certificates and revocation lists only (nginx allow-list)" }
+      ]
+    },
+    {
+      "vm": "rustfs",
+      "address": "10.10.99.6",
+      "names": ["rustfs", "rustfs-console"],
+      "ports": [
+        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "description": "HTTPS (RustFS S3 API and console)" }
       ]
     }
   ]

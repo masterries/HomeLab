@@ -74,6 +74,10 @@
 .PARAMETER Rebuild
     Delete an existing firewall VM and build it again.
 
+.PARAMETER DeferRustfsCheck
+    Used by lab.ps1 up while adding RustFS to an existing firewall. All other checks run;
+    up verifies RustFS DNS after the additive Ansible run has installed its records.
+
 .EXAMPLE
     .\lab.ps1 firewall
     .\lab.ps1 firewall -Rebuild
@@ -84,7 +88,8 @@
 param(
     [string]$StorageRoot = 'G:\Vagrant',
     [string]$TimeZone = 'Europe/Berlin',
-    [switch]$Rebuild
+    [switch]$Rebuild,
+    [switch]$DeferRustfsCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -162,5 +167,5 @@ else {
 Install-DnsDropIn
 Update-Firewall
 Show-GuiCertificate
-Test-Firewall
+Test-Firewall -DeferRustfsCheck:$DeferRustfsCheck
 Write-Host "Firewall ready: https://firewall.$($lab.domain) (user root; password to the clipboard: .\lab.ps1 secret -Pc opnsense/root-password)"

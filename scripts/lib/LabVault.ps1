@@ -25,6 +25,8 @@
       2. OpenBao's own TLS certificate: key and certificate request made ON the vault VM, signed
          by the root on this PC, installed back. The private key never leaves the VM.
       3. ansible\playbooks\openbao.yml: package, configuration, service, nginx for CRLs.
+         A server configuration change restarts and seals OpenBao; the PC checks its unseal
+         shares first and unseals it again in step 5. Certificate-only renewals use SIGHUP.
       4. Initialisation (only the very first time): OpenBao creates its master key and splits
          the key that protects it into 3 shares (Shamir's secret sharing, any 2 unlock).
          Shares A and B go straight into DPAPI on this PC; share C waits (DPAPI-protected) until
@@ -154,8 +156,41 @@ function Invoke-LabVaultDeploy {
 
     # --- 3. Package and configuration --------------------------------------------------------------
     Write-Host '== 3/8 OpenBao package, configuration, service (openbao.yml) =='
-    Invoke-LabRun openbao
-    if ($LASTEXITCODE -ne 0) { throw "openbao.yml failed (exit code $LASTEXITCODE)." }
+    # Listener configuration (including trusted PROXY sources) is read only at process start.
+    # Check that this PC can recover an initialized service BEFORE Ansible may restart it.
+    # No share leaves the PC here; decrypted values are discarded without being printed or logged.
+    $beforeConfiguration = Get-LabVaultHealth
+    if (($beforeConfiguration -and $beforeConfiguration.initialized) -or (Test-LabSecret 'openbao/unseal-a')) {
+        foreach ($shareName in 'openbao/unseal-a', 'openbao/unseal-b') {
+            $unsealShare = $null
+            try {
+                if (-not (Test-LabSecret $shareName)) { throw 'missing local unseal share' }
+                $unsealShare = Unprotect-LabSecret $shareName
+                if ([string]::IsNullOrWhiteSpace([string]$unsealShare)) { throw 'empty local unseal share' }
+            }
+            catch {
+                throw 'OpenBao configuration may require a restart. The local unseal shares are unavailable; restore them with .\lab.ps1 recovery -Recover before deploying vault.'
+            }
+            finally { $unsealShare = $null }
+        }
+    }
+    try {
+        Invoke-LabRun openbao
+        if ($LASTEXITCODE -ne 0) { throw "openbao.yml failed (exit code $LASTEXITCODE)." }
+    }
+    catch {
+        # A later Ansible check can fail AFTER the handler restarted the server. Restore
+        # an initialized service's unsealed state before propagating the deployment error.
+        # This needs no OpenBao login token or new SSH certificate.
+        try {
+            $afterFailedConfiguration = Get-LabVaultHealth
+            if ($afterFailedConfiguration -and $afterFailedConfiguration.initialized -and $afterFailedConfiguration.sealed) {
+                Unlock-LabVault -TimeoutSeconds 60
+            }
+        }
+        catch { Write-Warning 'The failed OpenBao deployment also left it sealed; restore it with .\lab.ps1 unseal.' }
+        throw
+    }
 
     # --- 4. Initialisation (once) -----------------------------------------------------------------
     Write-Host '== 4/8 Initialisation =='
@@ -178,7 +213,7 @@ function Invoke-LabVaultDeploy {
         Write-Host '             share C waits for you: run .\lab.ps1 recovery in your own PowerShell window.'
     }
 
-    # --- 5. Unseal ----------------------------------------------------------------------------------
+    # --- 5. Unseal (also after a server configuration restart in step 3) ------------------------------
     Write-Host '== 5/8 Unseal =='
     Unlock-LabVault
 
@@ -257,7 +292,7 @@ function Invoke-LabVaultDeploy {
         #                   (pc-admin: changing how OpenBao works is an administrator's decision)
         $controlIp = ($script:LabConfig.vms | Where-Object { $_.name -eq 'ansible-control' }).ip
         $tokenRoles = [ordered]@{
-            'ansible-run'    = @{ allowed_policies = @('ansible-keycloak', 'ansible-matrix', 'ansible-firewall', 'ansible-web'); token_explicit_max_ttl = '2h' }
+            'ansible-run'    = @{ allowed_policies = @('ansible-keycloak', 'ansible-rustfs', 'ansible-matrix', 'ansible-firewall', 'ansible-web'); token_explicit_max_ttl = '2h' }
             'ansible-config' = @{ allowed_policies = @('openbao-config'); token_explicit_max_ttl = '30m' }
         }
         foreach ($role in $tokenRoles.Keys) {

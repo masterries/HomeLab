@@ -79,6 +79,8 @@ openbao_pki_roles:
   acme-matrix: { allowed_domains: ["matrix.{{ lab_domain }}", "element.{{ lab_domain }}", "{{ lab_domain }}"], key_type: any, ttl: 7776000, max_ttl: 7776000 }
   # Keycloak: Ansible sends a CSR made on the Keycloak VM (the key stays there).
   keycloak: { allowed_domains: ["keycloak.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
+  # RustFS: its S3 API and console have separate HTTPS names and a VM-local private key.
+  rustfs: { allowed_domains: ["rustfs.{{ lab_domain }}", "rustfs-console.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
   # The firewall's web GUI (firewall.yml): the key is made on the firewall.
   firewall-gui: { allowed_domains: ["firewall.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
   # The nginx demo (hello-nginx.yml) on a VM named "hello"; add names here for others.

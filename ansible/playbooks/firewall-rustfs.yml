@@ -1,0 +1,150 @@
+# Reconcile RustFS on a RUNNING firewall. No rebuild and no secrets-manager token; this run receives
+# only host-firewall. The helper validates the entire change before write_config() and keeps
+# OPNsense's normal configuration history. --check makes no persistent firewall changes.
+- name: Reconcile RustFS HTTPS on the existing lab firewall
+  hosts: firewalls
+  become: true
+  gather_facts: false
+  vars:
+    firewall_rustfs_address: "{{ (lab_config.published | selectattr('vm', 'equalto', 'rustfs') | first).address }}"
+    firewall_rustfs_private_address: "{{ (lab_config.vms | selectattr('name', 'equalto', 'rustfs') | first).ip }}"
+    firewall_rustfs_names: "{{ (lab_config.published | selectattr('vm', 'equalto', 'rustfs') | first).names }}"
+  tasks:
+    - name: A temporary folder for the public configuration and helper
+      ansible.builtin.tempfile:
+        state: directory
+        path: /tmp
+        prefix: lab-rustfs.
+      register: firewall_rustfs_tmp
+      check_mode: false
+      changed_when: false
+
+    - name: Validate and add the bounded RustFS configuration
+      block:
+        - name: Copy the helper and public lab configuration
+          ansible.builtin.copy:
+            src: "{{ item.src }}"
+            dest: "{{ firewall_rustfs_tmp.path }}/{{ item.name }}"
+            mode: "0600"
+          loop:
+            - { src: "{{ playbook_dir }}/../opnsense/lab-rustfs.php", name: lab-rustfs.php }
+            - { src: "{{ playbook_dir }}/../config/lab.json", name: lab.json }
+          loop_control:
+            label: "{{ item.name }}"
+          check_mode: false
+          changed_when: false
+
+        - name: Plan or save RustFS's DHCP, split DNS, virtual IP and PC-only HTTPS forward
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/php
+              - "{{ firewall_rustfs_tmp.path }}/lab-rustfs.php"
+              - "{{ '--check' if ansible_check_mode else '--apply' }}"
+              - "{{ firewall_rustfs_tmp.path }}/lab.json"
+          register: firewall_rustfs_result
+          check_mode: false
+          changed_when: "'changed' in firewall_rustfs_result.stdout_lines"
+
+        - name: A previous attempt still needs activation
+          ansible.builtin.stat:
+            path: /var/run/lab-rustfs.pending
+          register: firewall_rustfs_pending
+
+        - name: The virtual IPs currently active on HOST
+          ansible.builtin.command:
+            argv: [ifconfig, hn2, inet]
+          register: firewall_rustfs_host_addresses
+          check_mode: false
+          changed_when: false
+
+        - name: Whether configuration or runtime state needs activation
+          ansible.builtin.set_fact:
+            firewall_rustfs_needs_activation: >-
+              {{ firewall_rustfs_result is changed or firewall_rustfs_pending.stat.exists or
+                 firewall_rustfs_address not in
+                 (firewall_rustfs_host_addresses.stdout | regex_findall('inet\s+([0-9.]+)\s')) }}
+
+        - name: The current RustFS DNS answers inside the lab
+          ansible.builtin.command:
+            argv: [getent, ahostsv4, "{{ item }}.{{ lab_domain }}"]
+          loop: "{{ firewall_rustfs_names }}"
+          register: firewall_rustfs_dns_before
+          delegate_to: ansible-control
+          become: false
+          check_mode: false
+          changed_when: false
+          failed_when: false
+
+        - name: Repair stale runtime DNS even if the saved configuration is current
+          ansible.builtin.set_fact:
+            firewall_rustfs_needs_activation: >-
+              {{ firewall_rustfs_needs_activation or item.rc != 0 or
+                 (item.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) !=
+                 [firewall_rustfs_private_address] }}
+          loop: "{{ firewall_rustfs_dns_before.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Missing runtime VIP or DNS would be repaired
+          ansible.builtin.debug:
+            msg: "RustFS's saved configuration needs activation on HOST ({{ firewall_rustfs_address }})."
+          when: ansible_check_mode and firewall_rustfs_needs_activation
+          changed_when: true
+
+        # OPNsense stable/26.7 actions_interface.conf, actions_filter.conf and
+        # actions_dnsmasq.conf define these service actions. Configd splits dotted section
+        # names into separate CLI tokens: [vip.configure] is "interface vip configure".
+        # VIP activation does not reset HOST. A zero exit status alone does not prove success:
+        # configctl can return "Action not allowed or missing" with status 0.
+        - name: Activate the virtual IP, NAT rules and DHCP/DNS records
+          ansible.builtin.command:
+            argv: "{{ ['configctl'] + item.tokens }}"
+          loop:
+            - { tokens: [interface, vip, configure] }
+            - { tokens: [filter, reload] }
+            - { tokens: [dnsmasq, restart] }
+          register: firewall_rustfs_activation
+          when: not ansible_check_mode and firewall_rustfs_needs_activation
+          changed_when: true
+          failed_when: >-
+            firewall_rustfs_activation.rc != 0 or
+            firewall_rustfs_activation.stdout | trim != 'OK'
+
+        - name: The RustFS virtual IP is active on HOST
+          ansible.builtin.command:
+            argv: [ifconfig, hn2, inet]
+          register: firewall_rustfs_host_active
+          changed_when: false
+          failed_when: >-
+            firewall_rustfs_host_active.rc != 0 or firewall_rustfs_address not in
+            (firewall_rustfs_host_active.stdout | regex_findall('inet\s+([0-9.]+)\s'))
+          when: not ansible_check_mode
+
+        - name: Both RustFS names resolve only to the private address inside the lab
+          ansible.builtin.command:
+            argv: [getent, ahostsv4, "{{ item }}.{{ lab_domain }}"]
+          loop: "{{ firewall_rustfs_names }}"
+          register: firewall_rustfs_dns
+          delegate_to: ansible-control
+          become: false
+          changed_when: false
+          failed_when: >-
+            firewall_rustfs_dns.rc != 0 or
+            (firewall_rustfs_dns.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) !=
+            [firewall_rustfs_private_address]
+          when: not ansible_check_mode
+
+        - name: Activation completed
+          ansible.builtin.file:
+            path: /var/run/lab-rustfs.pending
+            state: absent
+          when: not ansible_check_mode
+          changed_when: false
+
+      always:
+        - name: Remove the temporary public input files
+          ansible.builtin.file:
+            path: "{{ firewall_rustfs_tmp.path }}"
+            state: absent
+          check_mode: false
+          changed_when: false
