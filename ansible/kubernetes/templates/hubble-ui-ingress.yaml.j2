@@ -1,0 +1,29 @@
+# Managed by ansible/kubernetes/rancher.yml. Hubble UI (Cilium's flow view, service hubble-ui in
+# kube-system, port 80) at https://{{ hubble_hostname }}, through Traefik with a certificate from
+# the lab PKI (tls-hubble-ui). Hubble UI has no login of its own: only the PC and the lab network
+# reach it (the firewall forward and nginx's management source policy). Enterprise equivalent:
+# an authenticating proxy (OAuth2 Proxy with the IdP) in front of it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hubble-ui
+  namespace: kube-system
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - {{ hubble_hostname }}
+      secretName: tls-hubble-ui
+  rules:
+    - host: {{ hubble_hostname }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hubble-ui
+                port:
+                  number: 80

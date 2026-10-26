@@ -11,6 +11,9 @@ function Get-PasswordHash($Value) { return 'inert-test-hash' }
 function New-RefId { return [guid]::NewGuid().ToString('N') }
 function ConvertTo-Base64($Value) { return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$Value)) }
 $lab = Get-Content -Raw (Join-Path $projectRoot 'config\lab.json') | ConvertFrom-Json
+# The network helpers the renderer calls (Get-LabSegments: segments such as LabK8s).
+$script:LabConfig = $lab
+. (Join-Path $projectRoot 'scripts\lib\LabNetwork.ps1')
 $TimeZone = 'Europe/Berlin'
 $scratchRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
 $scratch = Join-Path $scratchRoot "lab-nginx-render-$([guid]::NewGuid().ToString('N'))"

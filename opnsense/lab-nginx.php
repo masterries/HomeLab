@@ -129,8 +129,10 @@ function lab_nginx_valid_alias($alias)
 }
 
 // A publication is routed through nginx when one of its ports names targetVm nginx. Only
-// routed publications get the nginx-side split DNS and a <vm>-backend reservation; direct
-// publications (OpenBao, for example) keep their VM's own name and address in the lab.
+// routed publications get the nginx-side split DNS; direct publications (OpenBao, for example)
+// keep their VM's own name and address in the lab. The VM's DHCP reservation becomes
+// <vm>-backend only when the VM's own name is one of the routed names (matrix.<domain> then
+// means nginx); a VM published under other names only (k8s-server as rancher) keeps its own.
 function lab_nginx_plan_dns($hosts, $lab, $vms, $routed, $bootstrap)
 {
     $domain = $lab['domain']; $ip = $vms['nginx']['ip'];
@@ -141,7 +143,8 @@ function lab_nginx_plan_dns($hosts, $lab, $vms, $routed, $bootstrap)
             $vm = $vms[$pub['vm']]; $name = $pub['vm']; $mac = lab_nginx_mac($vm); $viaNginx = isset($routed[$name]);
             $direct = lab_nginx_host($name, $vm['ip'], $domain, $mac);
             $backend = lab_nginx_host($name . '-backend', $vm['ip'], $domain, $mac);
-            $slots[$name . '-reservation'] = ['variants' => [$direct, $backend], 'new' => $viaNginx ? $backend : $direct];
+            $ownNameRouted = $viaNginx && in_array($name, $pub['names'], true);
+            $slots[$name . '-reservation'] = ['variants' => [$direct, $backend], 'new' => $ownNameRouted ? $backend : $direct];
             foreach ($pub['names'] as $alias) {
                 $directAlias = lab_nginx_host($alias, $alias === $name ? $pub['address'] : $vm['ip'] . ',' . $pub['address'], $domain);
                 $routedAlias = lab_nginx_host($alias, $ip . ',' . $pub['address'], $domain);

@@ -11,7 +11,9 @@
       1. Pack the repository's ansible\ folder, config\lab.json and config\run-profiles.json, the
          firewall's helper opnsense\lab-gui-cert.php and the PUBLIC files of the lab root CA into
          one archive, and copy it to ansible-control (scp through the firewall, like every SSH
-         connection into the lab). With "syncMdad" also vendor\mdad.
+         connection into the lab). A profile's "vendor" list adds those folders of vendor\ to
+         the archive (~/lab/vendor/<name>: the Rancher chart, for example). With "syncMdad" also
+         vendor\mdad, which lives on in ~/mdad.
       2. Sign ansible-control's own key for this run: an SSH certificate valid 2 hours, only for the
          principals of the profile (LabSsh.ps1, Get-LabControlCertificate).
       3. If the profile needs OpenBao: a token for exactly its policies, through the profile's
@@ -38,14 +40,22 @@ function Get-LabRunProfiles {
 }
 
 # The archive for one run: ansible\, the run's data from config\, the firewall's GUI helper and the
-# public PKI files (an explicit list: nothing else from keys\ ever leaves the PC).
-function New-LabSyncArchive([string]$Path) {
+# public PKI files (an explicit list: nothing else from keys\ ever leaves the PC), and the folders
+# of vendor\ the profile names.
+function New-LabSyncArchive([string]$Path, [string[]]$Vendor = @()) {
     $stage = Join-Path ([IO.Path]::GetTempPath()) "lab-sync-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     try {
         Copy-Item -Recurse (Join-Path $script:LabProjectRoot 'ansible') $stage
         New-Item -ItemType Directory -Force -Path (Join-Path $stage 'config'), (Join-Path $stage 'opnsense') | Out-Null
         Copy-Item (Join-Path $script:LabProjectRoot 'config\lab.json'), $script:LabRunProfilesFile (Join-Path $stage 'config')
         Copy-Item (Join-Path $script:LabProjectRoot 'config\nginx.json') (Join-Path $stage 'config')
+        foreach ($name in $Vendor) {
+            if ($name -notmatch '^[a-z0-9-]+$' -or $name -eq 'mdad') { throw "run-profiles.json: vendor '$name' is not a vendor\ folder for ~/lab (mdad has syncMdad)." }
+            $source = Join-Path $script:LabProjectRoot "vendor\$name"
+            if (-not (Test-Path $source)) { throw "vendor\$name is missing." }
+            New-Item -ItemType Directory -Force -Path (Join-Path $stage 'vendor') | Out-Null
+            Copy-Item -Recurse $source (Join-Path $stage "vendor\$name")
+        }
         foreach ($helper in 'lab-gui-cert.php', 'lab-rustfs.php', 'lab-nginx.php') {
             Copy-Item (Join-Path $script:LabProjectRoot "opnsense\$helper") (Join-Path $stage 'opnsense')
         }
@@ -106,7 +116,7 @@ function Invoke-LabRun([string]$Name, [string[]]$ExtraArgs = @()) {
     $mdadArchive = Join-Path ([IO.Path]::GetTempPath()) "lab-mdad-$id.tgz"
     $options = @()
     try {
-        New-LabSyncArchive $archive
+        New-LabSyncArchive $archive @($runProfile.vendor | Where-Object { $_ })
         $files = @($archive)
         if ($runProfile.syncMdad) {
             & tar -czf $mdadArchive -C (Join-Path $script:LabProjectRoot 'vendor\mdad') .

@@ -1,0 +1,17 @@
+# kubernetes/site.yml -- the whole Kubernetes cluster of the lab, in order: what
+# ".\lab.ps1 deploy k8s" runs (profile "k8s")
+#
+#   rke2.yml     RKE2 with Cilium on k8s-server and k8s-agent-1..3
+#   rancher.yml  Rancher Manager and Hubble UI, with certificates from OpenBao
+#   check.yml    the checks (read-only)
+#
+# Each can also run alone: .\lab.ps1 run k8s-rke2 | k8s-rancher | k8s-check. ansible/kubernetes/
+# is a folder of its own because the cluster is a stack of its own (README: Kubernetes).
+- name: RKE2 with Cilium
+  ansible.builtin.import_playbook: rke2.yml
+
+- name: Rancher Manager and Hubble UI
+  ansible.builtin.import_playbook: rancher.yml
+
+- name: Checks
+  ansible.builtin.import_playbook: check.yml

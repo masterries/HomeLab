@@ -1,0 +1,403 @@
+# kubernetes/rke2.yml -- the lab's Kubernetes cluster: RKE2 with Cilium on k8s-server (the control
+# plane) and k8s-agent-1..3 (the workers), in the network segment LabK8s
+#
+# Where it runs: on ansible-control, as part of ".\lab.ps1 deploy k8s" (profile "k8s":
+# kubernetes/site.yml), or alone: .\lab.ps1 run k8s-rke2. The run gets an SSH certificate for the
+# four nodes only and an OpenBao token with the policy ansible-k8s.
+#
+# What a Kubernetes cluster needs, and who provides it here:
+#   container runtime        containerd, part of RKE2
+#   control plane            API server, scheduler, controller manager and etcd (the cluster's
+#                            database), static pods that RKE2 runs on k8s-server
+#   node agent               the kubelet on every node, part of RKE2
+#   network (CNI)            Cilium: pod addresses, routing between the nodes, Kubernetes Services
+#                            (in eBPF, instead of kube-proxy), network policies, Hubble
+#   DNS, ingress, metrics    CoreDNS, Traefik, metrics-server: Helm charts RKE2 installs itself
+#
+# Plays, in order:
+#   1. ansible-control: the two join tokens from OpenBao (generated there on the very first run).
+#   2. every node: RKE2 itself from its release files, checked against the pinned SHA-256
+#      (vars/kubernetes.yml), and the image archives of RKE2 and Cilium.
+#   3. k8s-server: config.yaml and the add-on settings (Cilium, Traefik), then the server starts
+#      and its API server answers; its agent-token file (the token with the cluster CA's hash) is
+#      read for the agents.
+#   4. the agents: config.yaml with that token, then they join. Only now can the cluster finish
+#      starting: cilium-operator and most add-ons run on agents only (play 5 explains why).
+#   5. k8s-server: every node Ready, Cilium and its operator, Hubble and Traefik running, Cilium
+#      healthy and replacing kube-proxy.
+# Rancher Manager follows in rancher.yml.
+#
+# Idempotent: a second run changes nothing. A changed config.yaml or a new RKE2 version restarts
+# that node's service - the server first, then the agents (an agent's kubelet must never be newer
+# than the API server). RKE2 cannot change the CNI or the cluster networks on an existing cluster:
+# for that, rebuild the nodes (.\lab.ps1 down k8s-server ..., .\lab.ps1 up, deploy k8s).
+- name: Kubernetes - the join tokens in OpenBao
+  hosts: control
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    # An existing cluster was set up with the tokens in OpenBao; new ones would not match it (the
+    # server token also decrypts RKE2's bootstrap data in etcd).
+    - name: Does the cluster exist already?
+      ansible.builtin.stat:
+        path: /var/lib/rancher/rke2/server/token
+      delegate_to: "{{ groups['rke2_servers'][0] }}"
+      become: true
+      register: k8s_server_token
+
+    - name: The join tokens (created on the very first run)
+      ansible.builtin.include_tasks: ../playbooks/tasks/openbao-secrets.yml
+      vars:
+        openbao_secrets:
+          - { path: k8s/rke2/token, field: value, policy: lab-alnum-64 }
+          - { path: k8s/rke2/agent-token, field: value, policy: lab-alnum-64 }
+        openbao_existing_state: "{{ k8s_server_token.stat.exists }}"
+
+- name: Kubernetes - RKE2 on every node
+  hosts: k8s_cluster
+  become: true
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    # Cilium 1.20 needs Linux 5.10 or newer for its eBPF datapath (Ubuntu 24.04 has 6.8).
+    - name: An Ubuntu node with a kernel Cilium supports
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['kernel'] is version('5.10', '>=')
+        fail_msg: "{{ inventory_hostname }}: {{ ansible_facts['distribution'] }} with kernel {{ ansible_facts['kernel'] }}; Cilium needs Linux 5.10 or newer."
+        quiet: true
+
+    - name: Download folder
+      ansible.builtin.file:
+        path: "{{ rke2_download_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # get_url with a checksum: an existing file with the right hash is kept, a download with the
+    # wrong hash is refused. The same as install.sh's tar method, step by step and pinned
+    # (install.sh itself is served from RKE2's master branch, unversioned).
+    - name: RKE2 release archive, checked against its pinned SHA-256
+      ansible.builtin.get_url:
+        url: "{{ rke2_release_url }}/{{ rke2_install_archive.name }}"
+        dest: "{{ rke2_download_dir }}/{{ rke2_install_archive.name }}"
+        checksum: "sha256:{{ rke2_install_archive.sha256 }}"
+        mode: "0644"
+        timeout: 60
+
+    - name: The installed RKE2 version
+      ansible.builtin.command: /usr/local/bin/rke2 --version
+      register: rke2_installed
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # The archive holds bin/rke2 (and its uninstall and kill scripts), the systemd units
+    # rke2-server and rke2-agent and their environment files: unpacked into /usr/local, as
+    # install.sh does. Neither unit is enabled here; plays 3 and 4 start the right one.
+    - name: RKE2 unpacked into /usr/local
+      ansible.builtin.unarchive:
+        src: "{{ rke2_download_dir }}/{{ rke2_install_archive.name }}"
+        dest: /usr/local
+        remote_src: true
+      when: rke2_version not in (rke2_installed.stdout | default(''))
+      register: rke2_unpacked
+
+    - name: systemd knows the RKE2 units
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: rke2_unpacked is changed
+
+    - name: Image folder
+      ansible.builtin.file:
+        path: "{{ rke2_images_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # About 1.2 GB per node. containerd imports every archive in this folder when RKE2 starts.
+    - name: Image archives of RKE2 and Cilium, checked against their pinned SHA-256
+      ansible.builtin.get_url:
+        url: "{{ rke2_release_url }}/{{ item.name }}"
+        dest: "{{ rke2_images_dir }}/{{ item.name }}"
+        checksum: "sha256:{{ item.sha256 }}"
+        mode: "0644"
+        timeout: 60
+      loop: "{{ rke2_image_archives }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # With this (empty) file, RKE2 re-imports an archive only when its size or date changed,
+    # instead of all 1.2 GB at every start.
+    - name: Import unchanged image archives only once
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ rke2_images_dir }}/.cache.json"
+        force: false
+        mode: "0644"
+
+    - name: Configuration folder
+      ansible.builtin.file:
+        path: /etc/rancher/rke2
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+- name: Kubernetes - the server (control plane and etcd)
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  vars:
+    k8s_node_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', inventory_hostname) | first).ip }}"
+    rke2_token: "{{ hostvars[groups['control'][0]].lab_secrets['k8s/rke2/token'] }}"
+    rke2_agent_token: "{{ hostvars[groups['control'][0]].lab_secrets['k8s/rke2/agent-token'] }}"
+  tasks:
+    # diff: false - the file holds the tokens; a --diff run must not print them.
+    - name: RKE2 server configuration
+      ansible.builtin.template:
+        src: templates/rke2-server-config.yaml.j2
+        dest: /etc/rancher/rke2/config.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      diff: false
+      notify: restart rke2-server
+
+    # Created here only because the add-on settings must be there before the first start; RKE2
+    # owns the folder and sets its mode itself when it starts (so no mode here: the two would
+    # keep changing it back and forth).
+    - name: Add-on folder
+      ansible.builtin.file:
+        path: "{{ rke2_manifests_dir }}"
+        state: directory
+        owner: root
+        group: root
+
+    # Before the first start: Cilium is installed with these values from the beginning.
+    - name: Settings for RKE2's Cilium and Traefik
+      ansible.builtin.template:
+        src: "templates/{{ item }}.j2"
+        dest: "{{ rke2_manifests_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop:
+        - rke2-cilium-config.yaml
+        - rke2-traefik-config.yaml
+
+    # Which version is RUNNING? Unpacking replaces /usr/local/bin/rke2 (the old file is unlinked;
+    # the running process keeps it), so the running process's binary can be asked directly. This
+    # also catches an upgrade whose run stopped before this restart: the next run unpacks nothing,
+    # but the running version is still the old one.
+    - name: The running rke2-server version
+      ansible.builtin.shell: |
+        pid=$(systemctl show -p MainPID --value rke2-server)
+        if [ "${pid:-0}" -gt 0 ]; then "/proc/$pid/exe" --version | head -n 1; fi
+      register: rke2_running
+      changed_when: false
+      check_mode: false
+
+    - name: A new RKE2 version needs a restart
+      ansible.builtin.debug:
+        msg: "rke2-server runs {{ rke2_running.stdout | default('', true) or 'nothing yet' }}; it (re)starts with RKE2 {{ rke2_version }}."
+      changed_when: true
+      when: >-
+        hostvars[inventory_hostname].rke2_unpacked is changed
+        or (rke2_running.stdout | length > 0 and rke2_version not in rke2_running.stdout)
+      notify: restart rke2-server
+
+    # Restarts a running server for a changed configuration or version, before the start below.
+    - name: Apply a changed configuration first
+      ansible.builtin.meta: flush_handlers
+
+    # The first start takes a few minutes: containerd imports the image archives, etcd and the
+    # control plane come up, then RKE2 installs Cilium, CoreDNS and the other add-ons.
+    - name: rke2-server enabled and started
+      ansible.builtin.systemd_service:
+        name: rke2-server
+        enabled: true
+        state: started
+      # RKE2's units wait without a time limit until RKE2 reports itself started: give up after
+      # 20 minutes instead of hanging (journalctl -u rke2-server on the node tells why).
+      async: 1200
+      poll: 15
+
+    # Not "the server node is Ready": it cannot be yet. Cilium's agent waits for the CRDs that
+    # cilium-operator registers, and the operator does not tolerate the server's taint, so it
+    # starts only once an agent has joined; until then the server has no pod network and stays
+    # NotReady. The API server answering /readyz is what the agents need to join.
+    - name: The API server is ready
+      ansible.builtin.command: "{{ rke2_kubectl }} get --raw /readyz"
+      register: k8s_api_ready
+      until: k8s_api_ready.rc == 0 and k8s_api_ready.stdout == 'ok'
+      retries: 60
+      delay: 10
+      changed_when: false
+      check_mode: false
+
+    # "K10<SHA-256 of the cluster CA>::node:<agent token>": the form agents should join with.
+    - name: The agent token in its full form
+      ansible.builtin.slurp:
+        src: "{{ rke2_agent_token_file }}"
+      register: rke2_agent_token_file_content
+      no_log: true
+      check_mode: false
+
+    - name: Agent token for the next play
+      ansible.builtin.set_fact:
+        rke2_join_token: "{{ rke2_agent_token_file_content.content | b64decode | trim }}"
+      no_log: true
+
+    - name: The token has the secure form with the cluster CA's hash
+      ansible.builtin.assert:
+        that: rke2_join_token is match('^K10[0-9a-f]{64}::node:')
+        fail_msg: "{{ rke2_agent_token_file }} does not hold a K10...::node: token."
+        quiet: true
+
+  handlers:
+    # Like the start task: RKE2's unit waits for "ready" without a time limit, so give up after
+    # 20 minutes instead of hanging (journalctl -u rke2-server on the node tells why).
+    - name: restart rke2-server
+      ansible.builtin.shell: if systemctl is-active --quiet rke2-server; then timeout 1200 systemctl restart rke2-server; fi
+
+- name: Kubernetes - the agents (workers)
+  hosts: rke2_agents
+  become: true
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  vars:
+    k8s_node_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', inventory_hostname) | first).ip }}"
+    k8s_server_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', groups['rke2_servers'][0]) | first).ip }}"
+    rke2_join_token: "{{ hostvars[groups['rke2_servers'][0]].rke2_join_token }}"
+  tasks:
+    - name: RKE2 agent configuration
+      ansible.builtin.template:
+        src: templates/rke2-agent-config.yaml.j2
+        dest: /etc/rancher/rke2/config.yaml
+        owner: root
+        group: root
+        mode: "0600"
+      diff: false
+      notify: restart rke2-agent
+
+    # Which version is RUNNING? Unpacking replaces /usr/local/bin/rke2 (the old file is unlinked;
+    # the running process keeps it), so the running process's binary can be asked directly. This
+    # also catches an upgrade whose run stopped before this restart: the next run unpacks nothing,
+    # but the running version is still the old one.
+    - name: The running rke2-agent version
+      ansible.builtin.shell: |
+        pid=$(systemctl show -p MainPID --value rke2-agent)
+        if [ "${pid:-0}" -gt 0 ]; then "/proc/$pid/exe" --version | head -n 1; fi
+      register: rke2_running
+      changed_when: false
+      check_mode: false
+
+    - name: A new RKE2 version needs a restart
+      ansible.builtin.debug:
+        msg: "rke2-agent runs {{ rke2_running.stdout | default('', true) or 'nothing yet' }}; it (re)starts with RKE2 {{ rke2_version }}."
+      changed_when: true
+      when: >-
+        hostvars[inventory_hostname].rke2_unpacked is changed
+        or (rke2_running.stdout | length > 0 and rke2_version not in rke2_running.stdout)
+      notify: restart rke2-agent
+
+    - name: Apply a changed configuration first
+      ansible.builtin.meta: flush_handlers
+
+    # The agent registers with the server, imports its image archives and starts its kubelet.
+    - name: rke2-agent enabled and started
+      ansible.builtin.systemd_service:
+        name: rke2-agent
+        enabled: true
+        state: started
+      # RKE2's units wait without a time limit until RKE2 reports itself started: give up after
+      # 20 minutes instead of hanging (journalctl -u rke2-agent on the node tells why).
+      async: 1200
+      poll: 15
+
+  handlers:
+    # Like the start task: RKE2's unit waits for "ready" without a time limit, so give up after
+    # 20 minutes instead of hanging (journalctl -u rke2-agent on the node tells why).
+    - name: restart rke2-agent
+      ansible.builtin.shell: if systemctl is-active --quiet rke2-agent; then timeout 1200 systemctl restart rke2-agent; fi
+
+- name: Kubernetes - the cluster is up
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    # The single quotes keep the double quotes and the \n of the jsonpath for kubectl: the command
+    # module splits its line like a shell would and would strip them.
+    - name: Every node is Ready
+      ansible.builtin.command: >-
+        {{ rke2_kubectl }} get nodes
+        -o 'jsonpath={range.items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+      register: k8s_nodes
+      until: >-
+        k8s_nodes.rc == 0 and
+        (k8s_nodes.stdout_lines | select('match', '^.+=True$') | map('regex_replace', '=True$', '') | sort)
+        == (groups['k8s_cluster'] | sort)
+      retries: 60
+      delay: 10
+      changed_when: false
+      check_mode: false
+
+    # The kubelet's version is RKE2's: a node that still reports another one was not restarted.
+    - name: Every node runs RKE2 {{ rke2_version }}
+      ansible.builtin.command: >-
+        {{ rke2_kubectl }} get nodes
+        -o 'jsonpath={range.items[*]}{.metadata.name}={.status.nodeInfo.kubeletVersion}{"\n"}{end}'
+      register: k8s_versions
+      check_mode: false
+      # Under --check no restart has run, so a pending upgrade shows as "changed", not as an error
+      # (the restart tasks above already report it).
+      changed_when: ansible_check_mode and k8s_versions_other | length > 0
+      failed_when: k8s_versions.rc != 0 or (not ansible_check_mode and k8s_versions_other | length > 0)
+      vars:
+        k8s_versions_other: "{{ k8s_versions.stdout_lines | default([]) | reject('match', '^.+=' ~ (rke2_version | regex_escape) ~ '$') | list }}"
+
+    # The rollouts of the add-ons RKE2 installs. Most of them run only on the agents (they do
+    # not tolerate the server's taint), so they could not start before the agents joined.
+    # "wait --for=create" first: right after the start the objects may not exist yet.
+    - name: The add-ons exist
+      ansible.builtin.command: "{{ rke2_kubectl }} -n kube-system wait --for=create {{ item }} --timeout=600s"
+      loop: [daemonset/cilium, deployment/cilium-operator, deployment/hubble-relay, deployment/hubble-ui, daemonset/rke2-traefik]
+      changed_when: false
+      check_mode: false
+
+    - name: The add-ons are rolled out
+      ansible.builtin.command: "{{ rke2_kubectl }} -n kube-system rollout status {{ item }} --timeout=600s"
+      loop: [daemonset/cilium, deployment/cilium-operator, deployment/hubble-relay, deployment/hubble-ui, daemonset/rke2-traefik]
+      changed_when: false
+      check_mode: false
+
+    # Cilium's own view: every node's agent healthy, Services handled in eBPF.
+    - name: Cilium's settings
+      ansible.builtin.command: >-
+        {{ rke2_kubectl }} -n kube-system get configmap cilium-config
+        -o jsonpath={.data.kube-proxy-replacement}/{.data.routing-mode}
+      register: cilium_settings
+      changed_when: false
+      check_mode: false
+      failed_when: cilium_settings.stdout != 'true/native'
+
+    - name: Cilium is healthy
+      ansible.builtin.command: "{{ rke2_kubectl }} -n kube-system exec daemonset/cilium -c cilium-agent -- cilium-dbg status --brief"
+      register: cilium_status
+      until: cilium_status.rc == 0 and cilium_status.stdout | trim == 'OK'
+      retries: 12
+      delay: 10
+      changed_when: false
+      check_mode: false
+
+    - name: No kube-proxy
+      ansible.builtin.command: "{{ rke2_kubectl }} -n kube-system get pods -l component=kube-proxy -o name"
+      register: kube_proxy
+      changed_when: false
+      check_mode: false
+      failed_when: kube_proxy.rc != 0 or kube_proxy.stdout | length > 0

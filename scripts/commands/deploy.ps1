@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | firewall | nginx | keycloak | matrix | rustfs | all
+    Deploys (or updates) a service of the lab: .\lab.ps1 deploy vault | firewall | nginx | keycloak | matrix | rustfs | k8s | all
 
 .DESCRIPTION
     Runs on the Windows host, as your own Windows user (no administrator rights needed). The work
@@ -31,16 +31,22 @@
     nginx      Native nginx on its own VM, routing HTTPS by SNI and Matrix HTTP by hostname.
                config/nginx.json owns the domains and fixed private backend addresses. TLS keys
                and certificates stay on the application VMs; this run needs no secrets token.
-    all        vault, firewall, nginx, keycloak, matrix, rustfs - in that order, stopping at the first failure.
+    k8s        The Kubernetes cluster in its own network segment (LabK8s): RKE2 with Cilium on
+               k8s-server and k8s-agent-1..3, then Rancher Manager and Hubble UI with certificates
+               from OpenBao (ansible\kubernetes\site.yml, profile "k8s", with the vendored Rancher
+               chart vendor\rancher). The first run downloads about 1.2 GB per node (RKE2's image
+               archives, checked against pinned hashes) and Rancher's images.
+    all        vault, firewall, nginx, keycloak, matrix, rustfs, k8s - in that order, stopping at the
+               first failure.
 
-    A snapshot of OpenBao follows every keycloak, matrix and rustfs run (also after a failure): secrets
-    created by a first deployment exist only in OpenBao.
+    A snapshot of OpenBao follows every keycloak, matrix, rustfs and k8s run (also after a failure):
+    secrets created by a first deployment exist only in OpenBao.
 
     Prerequisites: the lab is up (.\lab.ps1 up), and the firewall publishes the services
     ("published" in config\lab.json). Safe to run repeatedly: every step is idempotent.
 
 .PARAMETER Target
-    vault, firewall, nginx, keycloak, matrix, rustfs or all.
+    vault, firewall, nginx, keycloak, matrix, rustfs, k8s or all.
 
 .PARAMETER RotateIntermediate
     vault: make a new intermediate CA now (see Invoke-LabVaultDeploy).
@@ -64,7 +70,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('vault', 'firewall', 'nginx', 'keycloak', 'matrix', 'rustfs', 'all')]
+    [ValidateSet('vault', 'firewall', 'nginx', 'keycloak', 'matrix', 'rustfs', 'k8s', 'all')]
     [string]$Target,
     [switch]$RotateIntermediate,
     [switch]$Setup
@@ -140,6 +146,21 @@ function Deploy-LabRustfs {
     Write-Host 'Credentials from OpenBao: .\lab.ps1 secret rustfs/admin/access-key (or rustfs/admin/secret-key).'
 }
 
+function Deploy-LabK8s {
+    Write-Host '== Kubernetes: RKE2 with Cilium, Rancher Manager, Hubble UI, checks (kubernetes\site.yml; the first run downloads about 1.2 GB per node) =='
+    Invoke-LabDeployRun 'k8s' 'The Kubernetes deployment'
+    # The playbooks check the lab-side path. This is the PC's: its DNS, the firewall's forward to
+    # nginx and Windows' trust in the lab root.
+    foreach ($endpoint in @("https://rancher.${domain}/ping", "https://hubble.${domain}/")) {
+        $response = Invoke-WebRequest -Uri $endpoint -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        if ([int]$response.StatusCode -ne 200) { throw "Not ready from the PC: $endpoint (HTTP $($response.StatusCode))." }
+    }
+    Write-Host ''
+    Write-Host "Rancher Manager: https://rancher.${domain}  (user admin; the first password to the clipboard: .\lab.ps1 secret k8s/rancher/bootstrap-password)"
+    Write-Host "Hubble UI:       https://hubble.${domain}  (Cilium's network flows)"
+    Write-Host 'kubectl on the server: .\lab.ps1 connect k8s-server, then: sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes'
+}
+
 switch ($Target) {
     'vault' { Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate }
     'firewall' { Deploy-LabFirewall }
@@ -147,6 +168,7 @@ switch ($Target) {
     'keycloak' { Deploy-LabKeycloak }
     'matrix' { Deploy-LabMatrix }
     'rustfs' { Deploy-LabRustfs }
+    'k8s' { Deploy-LabK8s }
     'all' {
         Invoke-LabVaultDeploy -RotateIntermediate:$RotateIntermediate
         Deploy-LabFirewall
@@ -154,5 +176,6 @@ switch ($Target) {
         Deploy-LabKeycloak
         Deploy-LabMatrix
         Deploy-LabRustfs
+        Deploy-LabK8s
     }
 }

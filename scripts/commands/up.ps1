@@ -56,9 +56,10 @@
          as jump host. lab.ps1 firewall configures the firewall over SSH with this file,
          and Vagrant uses it to reach the lab VMs (ssh.proxy_command in the Vagrantfile), so
          it has to exist before steps 4 and 5.
-      3. LabNet. The private Hyper-V switch for the lab network behind the firewall. It
-         must exist before the firewall is built, because the firewall's LAN adapter is
-         attached to it.
+      3. LabNet and the segments. The private Hyper-V switches of the networks behind the
+         firewall: LabNet, and one per entry of "segments" in config\lab.json (LabK8s for the
+         Kubernetes nodes). They must exist before the firewall is built, because its LAN
+         adapter and its segment adapters are attached to them.
       4. Firewall (OPNsense, lab.ps1 firewall). First, if they exist, the firewall and the
          vault VM are started directly in Hyper-V and OpenBao is unsealed: once deployed,
          OpenBao signs the SSH certificates, and after a Windows restart the PC's certificate
@@ -72,8 +73,9 @@
          firewall answers on the LabHost network. For an existing lab, ansible-control is
          started and its host certificate checked or renewed, then firewall-nginx.yml's bootstrap
          stage adds nginx's DHCP and DNS without rebuilding or switching running services.
-      5. Lab VMs (ansible-control, nginx, matrix, keycloak, vault, rustfs; the list comes from
-         config\lab.json). Started on LabNet only, then provisioned: user "ansible", SSH
+      5. Lab VMs (ansible-control, nginx, matrix, keycloak, vault, rustfs, and the Kubernetes
+         nodes k8s-server and k8s-agent-1..3; the list comes from config\lab.json). Started on
+         their private network only (LabNet or their segment), then provisioned: user "ansible", SSH
          (own host keys, published to the PC through Hyper-V KVP, trust in the lab's SSH CAs,
          certificate logins only); ansible-control also gets its own SSH key and Ansible -
          only what must exist before Ansible can reach a VM. Then every VM gets its host
@@ -349,20 +351,17 @@ try {
     $states = Get-VagrantMachineStates
     $labMachines = @($states.Keys | Where-Object { $_ -ne $firewallName })
 
-    # --- Step 3: the lab network. Hyper-V has three switch types: External (VMs share a
+    # --- Step 3: the lab networks. Hyper-V has three switch types: External (VMs share a
     # physical network adapter of the PC), Internal (VMs plus a virtual adapter on the PC;
-    # that is LabHost) and Private (VMs only). LabNet is private: the PC has no address in
-    # 10.10.10.0/24 and reaches the lab VMs only through the firewall, like servers in an
-    # internal network segment behind a perimeter firewall. The switch must exist before
-    # the firewall is built, because the firewall's LAN adapter (hn1) is attached to it.
-    Write-Host "== 3/7 Lab network: private switch $labSwitch =="
-    if (-not (Get-VMSwitch -Name $labSwitch -ErrorAction SilentlyContinue)) {
-        New-VMSwitch -Name $labSwitch -SwitchType Private | Out-Null
-        Write-Host "Created (private: VMs only, no access from the PC)."
-    }
-    else {
-        Write-Host 'Already exists.'
-    }
+    # that is LabHost) and Private (VMs only). LabNet and the segments (LabK8s) are private:
+    # the PC has no address in 10.10.10.0/24 or 10.10.20.0/24 and reaches the lab VMs only
+    # through the firewall, like servers in internal network segments behind a perimeter
+    # firewall. The switches must exist before the firewall is built, because its LAN adapter
+    # (hn1) and its segment adapters (hn3, ...) are attached to them (lib\LabNetwork.ps1).
+    $privateSwitches = @($labSwitch) + @(Get-LabSegments | ForEach-Object { $_.switch })
+    Write-Host "== 3/7 Lab networks: private switches $($privateSwitches -join ', ') =="
+    Initialize-LabPrivateSwitches
+    Write-Host 'Present (private: VMs only, no access from the PC).'
 
     # --- Step 4: the firewall, before every other VM (see the build order in the help).
     Write-Host "== 4/7 Firewall (OPNsense) =="
@@ -442,7 +441,8 @@ try {
     }
     Write-Host "DNS from the PC: $firewallName.$labDomain -> $($fwIps -join ', ')"
 
-    # --- Step 5: the lab VMs. They are attached only to the private LabNet. Each one has a
+    # --- Step 5: the lab VMs. Each is attached only to its private network (LabNet, or its
+    # segment's switch, e.g. LabK8s: Vagrantfile, "network" in lab.json). Each one has a
     # fixed MAC address (Vagrantfile), and dnsmasq on the firewall holds a DHCP reservation
     # for that MAC, so a VM always gets the same IP and name. Vagrant reads the IP from
     # Hyper-V and connects through the firewall (ssh.proxy_command with keys\ssh_config).

@@ -9,6 +9,8 @@
       vault.lab.internal:8200 (directly, never via nginx) the offline root CA
       firewall, keycloak, matrix, element, lab.internal  the current intermediate CA in OpenBao
       rustfs.lab.internal and rustfs-console.lab.internal the current intermediate CA in OpenBao
+      rancher.lab.internal and hubble.lab.internal        the current intermediate CA in OpenBao
+                                                          (Kubernetes: lab.ps1 deploy k8s)
     (A newly built firewall starts with a certificate from the root; lab.ps1 up and
     lab.ps1 deploy firewall move it to the intermediate.)
     The "current intermediate" is compared by key identifier (authority key identifier of the
@@ -35,7 +37,9 @@ $endpoints = @(
     @{ Host = "rustfs-console.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = "matrix.$domain"; Port = 443; Issuer = 'intermediate' },
     @{ Host = "element.$domain"; Port = 443; Issuer = 'intermediate' },
-    @{ Host = $domain; Port = 443; Issuer = 'intermediate' }
+    @{ Host = $domain; Port = 443; Issuer = 'intermediate' },
+    @{ Host = "rancher.$domain"; Port = 443; Issuer = 'intermediate' },
+    @{ Host = "hubble.$domain"; Port = 443; Issuer = 'intermediate' }
 )
 Write-Host "Certificates (current intermediate: $($issuing.Subject -replace '^CN=', ''))"
 foreach ($e in $endpoints) {

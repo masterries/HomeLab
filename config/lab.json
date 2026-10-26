@@ -24,6 +24,15 @@
     "       saves its RAM to disk; for vault that RAM holds the unsealed OpenBao keys.",
     "  consoleAutologin (default true): false keeps the normal login prompt on the Hyper-V console",
     "       (no password-less root shell for whoever opens the console of vault).",
+    "  network (default LabNet): the name of a segment (below) the VM lives in instead.",
+    "",
+    "segments: further networks behind the firewall, each with its own private Hyper-V switch,",
+    "firewall interface (opt2/hn3, opt3/hn4, ... in this order), address, DHCP range and filter",
+    "rules. scripts/lib/LabNetwork.ps1 checks them, scripts/lib/LabFirewall.ps1 renders them into",
+    "the firewall; a new segment needs lab.ps1 firewall -Rebuild (the firewall gets an adapter).",
+    "  k8s: the Kubernetes cluster (RKE2 with Cilium, Rancher Manager; ansible/kubernetes/). Its",
+    "       nodes may use only DNS on the firewall and the internet; from LabNet only",
+    "       ansible-control (SSH) and central nginx (the published web ports) reach into it.",
     "",
     "published: what your PC may reach in the lab, per VM. Your PC never reaches a lab VM directly;",
     "it reaches a published address on the firewall's HOST network, and the firewall forwards the",
@@ -53,6 +62,9 @@
     "  keycloak: the identity provider (single sign-on); MAS sends browsers there to log in.",
     "  rustfs:   S3-compatible object storage at rustfs.<domain> and the UI at rustfs-console.<domain>",
     "            over HTTPS on 443; the RustFS backend ports remain private on the VM.",
+    "  k8s-server: rancher = Rancher Manager, the cluster's management UI; hubble = Hubble UI,",
+    "            Cilium's view of the network flows between the pods. Both through central nginx",
+    "            to the cluster's ingress (Traefik on k8s-server), for the PC only.",
     "  vault:    OpenBao, the secrets manager and certificate authority (PKI); its web UI and API",
     "            on 8200 (OpenBao's standard port), e.g. https://vault.lab.internal:8200/ui/, directly",
     "            to the VM, never through nginx: OpenBao binds logins to client addresses. Port 80",
@@ -73,6 +85,10 @@
     "firewallGui": true,
     "internalWebDns": true
   },
+  "segments": [
+    { "name": "k8s", "switch": "LabK8s", "cidr": "10.10.20.0/24", "firewallIp": "10.10.20.1",
+      "interface": "opt2", "device": "hn3", "mac": "02000A0A1401" }
+  ],
   "vms": [
     { "name": "ansible-control", "mac": "02000A0A0A0A", "ip": "10.10.10.10", "cpus": 2, "memory": 2048 },
     { "name": "nginx", "mac": "02000A0A0A14", "ip": "10.10.10.20", "cpus": 1, "memory": 1024,
@@ -82,7 +98,12 @@
     { "name": "vault", "mac": "02000A0A0A32", "ip": "10.10.10.50", "cpus": 2, "memory": 2048,
       "checkpoints": false, "consoleAutologin": false },
     { "name": "rustfs", "mac": "02000A0A0A3C", "ip": "10.10.10.60", "cpus": 2, "memory": 4096,
-      "checkpoints": false, "consoleAutologin": false }
+      "checkpoints": false, "consoleAutologin": false },
+    { "name": "k8s-server", "network": "k8s", "mac": "02000A0A140A", "ip": "10.10.20.10", "cpus": 2, "memory": 4096,
+      "checkpoints": false },
+    { "name": "k8s-agent-1", "network": "k8s", "mac": "02000A0A140B", "ip": "10.10.20.11", "cpus": 2, "memory": 4096 },
+    { "name": "k8s-agent-2", "network": "k8s", "mac": "02000A0A140C", "ip": "10.10.20.12", "cpus": 2, "memory": 4096 },
+    { "name": "k8s-agent-3", "network": "k8s", "mac": "02000A0A140D", "ip": "10.10.20.13", "cpus": 2, "memory": 4096 }
   ],
   "published": [
     {
@@ -119,6 +140,14 @@
       "names": ["rustfs", "rustfs-console"],
       "ports": [
         { "protocol": "tcp", "port": 443, "targetVm": "nginx", "source": "pc", "description": "HTTPS (RustFS S3 API and console)" }
+      ]
+    },
+    {
+      "vm": "k8s-server",
+      "address": "10.10.99.7",
+      "names": ["rancher", "hubble"],
+      "ports": [
+        { "protocol": "tcp", "port": 443, "targetVm": "nginx", "source": "pc", "description": "HTTPS (Rancher Manager and Hubble UI, through the cluster's ingress)" }
       ]
     }
   ]

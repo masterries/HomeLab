@@ -1,0 +1,12 @@
+# Managed by ansible/kubernetes/rke2.yml: /etc/rancher/rke2/config.yaml of an RKE2 agent (a
+# worker). Root only (0600): it holds the join token.
+#
+# server  the server's supervisor port (9345): the agent registers there, gets its certificates
+#         and the cluster's settings (no kube-proxy, for example), and then talks to the API
+#         server through a small load balancer of its own on 127.0.0.1:6443.
+# token   the agent token in its full form "K10<hash>::node:<secret>": the hash is the SHA-256 of
+#         the cluster CA, so the agent refuses a server that presents another CA before it sends
+#         the secret (no trust on first use). Read from the server's agent-token file.
+server: https://{{ k8s_server_ip }}:9345
+token: {{ rke2_join_token | to_json }}
+node-ip: {{ k8s_node_ip }}

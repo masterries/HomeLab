@@ -11,14 +11,17 @@
     "tcp: plain TCP passthrough inside the lab. 8448 carries Synapse's federation listener,",
     "which serves only the openid resource: the LiveKit JWT service checks callers there, and",
     "inside the lab matrix.<domain> resolves to nginx.",
-    "RustFS and firewall routes additionally enforce the existing source policy: the configured PC and",
-    "private lab network only, including connections arriving through another published IP."
+    "source \"management\": the route also enforces the management source policy: the configured PC",
+    "and the private lab network only, including connections arriving through another published",
+    "IP (RustFS, the firewall GUI, Rancher and Hubble UI). The Kubernetes ingress is Traefik on",
+    "k8s-server (hostPort 443); it picks Rancher or Hubble UI by host name and terminates TLS there."
   ],
   "tls": [
     { "names": ["matrix", "element", "@"], "vm": "matrix", "port": 443 },
     { "names": ["keycloak"], "vm": "keycloak", "port": 443 },
-    { "names": ["rustfs", "rustfs-console"], "vm": "rustfs", "port": 443 },
-    { "names": ["firewall"], "vm": "firewall", "port": 443 }
+    { "names": ["rustfs", "rustfs-console"], "vm": "rustfs", "port": 443, "source": "management" },
+    { "names": ["firewall"], "vm": "firewall", "port": 443, "source": "management" },
+    { "names": ["rancher", "hubble"], "vm": "k8s-server", "port": 443, "source": "management" }
   ],
   "http": [
     { "names": ["matrix", "element", "@"], "vm": "matrix", "port": 80 }

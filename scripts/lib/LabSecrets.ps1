@@ -402,6 +402,8 @@ function Get-LabSubjectKeyId($Certificate) {
 #   Keycloak's TLS certificate       30 days before               lab.ps1 deploy keycloak
 #   RustFS's TLS certificate         30 days before, or when the  lab.ps1 deploy rustfs
 #                                    intermediate changed
+#   Rancher's and Hubble UI's TLS    30 days before, or when the  lab.ps1 deploy k8s
+#   certificates (Kubernetes)        intermediate changed
 #   the firewall's GUI certificate   30 days before, and when it  lab.ps1 deploy firewall
 #                                    is not from the current
 #                                    intermediate (a new firewall
@@ -468,6 +470,15 @@ function Get-LabMaintenanceDue {
         }
         elseif ($intermediate -and (Get-LabAuthorityKeyId $rustfs) -ne (Get-LabSubjectKeyId $intermediate)) {
             $due += @{ What = "RustFS's TLS certificate (issued by another intermediate)"; Action = @('deploy', 'rustfs') }
+        }
+    }
+    # The Kubernetes cluster's web names (only once it is deployed: no answer, nothing due).
+    foreach ($name in 'rancher', 'hubble') {
+        $served = Get-LabServedCertificate "$name.$($script:LabConfig.domain)" 443
+        if (-not $served) { continue }
+        if ($served.NotAfter -lt $now.AddDays(30) -or ($intermediate -and (Get-LabAuthorityKeyId $served) -ne (Get-LabSubjectKeyId $intermediate))) {
+            $due += @{ What = "the Kubernetes cluster's TLS certificates ($name.$($script:LabConfig.domain), valid until $($served.NotAfter.ToString('yyyy-MM-dd')))"; Action = @('deploy', 'k8s') }
+            break
         }
     }
     return , $due

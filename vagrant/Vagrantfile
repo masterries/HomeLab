@@ -23,6 +23,9 @@
 #   matrix           The Matrix stack: Synapse, MAS, Element Web, LiveKit (Docker, deployed with
 #                    matrix-docker-ansible-deploy by scripts/commands/deploy.ps1)
 #   keycloak         Keycloak, the identity provider (single sign-on) the Matrix logins go to
+#   nginx, vault, rustfs  central ingress, OpenBao (secrets and CA), S3 object storage
+#   k8s-server, k8s-agent-1..3  a Kubernetes cluster (RKE2 with Cilium, Rancher Manager) in a
+#                    network segment of its own (LabK8s, 10.10.20.0/24)
 #   The names, MACs, IPs and sizes of these VMs come from config/lab.json, which the firewall
 #   build reads as well (DHCP reservations, DNS names, published addresses and ports).
 #
@@ -39,11 +42,15 @@
 #                           | firewall |              10.10.99.3 published: matrix
 #                           | OPNsense |              10.10.99.4 published: keycloak
 #                           +----------+              (switch "LabHost", shared with PC 10.10.99.1)
-#                             hn1 (LAN) 10.10.10.1
-#                                 |
-#      Hyper-V "LabNet"  (private switch: VMs only, your PC has no adapter on it)
-#            |                          |                          |
-#   ansible-control 10.10.10.10   matrix 10.10.10.30        keycloak 10.10.10.40
+#                  hn1 (LAN) 10.10.10.1      hn3 (K8S) 10.10.20.1
+#                           |                         |
+#      Hyper-V "LabNet" (private switch)       Hyper-V "LabK8s" (private switch)
+#            |                  |                     |                    |
+#   ansible-control .10   matrix .30 ...      k8s-server 10.10.20.10   k8s-agent-1..3 .11-.13
+#
+# Both are private switches: VMs only, your PC has no adapter on them. The firewall lets
+# LabK8s reach only DNS and the internet; from LabNet only ansible-control (SSH) and central
+# nginx (the published web ports) may reach into it.
 #
 # Your PC does not reach the lab VMs directly, only through the firewall. From the PC only these
 # are open: SSH, the web GUI and DNS on 10.10.99.2, and the ports listed under "published" in
@@ -136,12 +143,20 @@ SSH_STAGING = "/home/vagrant/lab-ssh"
 # enterprise networks too: addresses stay stable, but they are managed in one central place
 # instead of being typed into every machine.
 LAB = JSON.parse(File.read(File.expand_path("../config/lab.json", __dir__)))
+# The networks behind the firewall: LabNet, and the "segments" of lab.json (LabK8s for the
+# Kubernetes nodes). A VM with "network": "<segment>" is connected to that segment's private
+# switch and reaches everything else through the firewall's address there (its gateway); every
+# other VM is on LabNet. scripts/lib/LabNetwork.ps1 checks the same data on the PC.
+LAB_SEGMENTS = (LAB["segments"] || []).map { |s| [s["name"], s] }.to_h
 LAB_VMS = LAB["vms"].map { |vm|
+  segment = (vm["network"].nil? || vm["network"] == "lab") ? nil : LAB_SEGMENTS.fetch(vm["network"])
   [vm["name"], { mac: vm["mac"], ip: vm["ip"], cpus: vm["cpus"] || 2, memory: vm["memory"] || 2048,
-                 # "false" in lab.json only for VMs that hold keys in RAM (vault): see below.
-                 checkpoints: vm.fetch("checkpoints", true) }]
+                 # "false" in lab.json for VMs that hold keys in RAM (vault) or a database whose
+                 # restored copy would disagree with its peers (etcd on k8s-server): see below.
+                 checkpoints: vm.fetch("checkpoints", true),
+                 switch: segment ? segment["switch"] : "LabNet",
+                 gateway: segment ? segment["firewallIp"] : LAB["firewall"]["lanIp"] }]
 }.to_h
-LAB_SWITCH = "LabNet"
 
 # Defines one VM with the settings that all lab VMs share; a block passed to lab_vm adds the
 # machine-specific parts (provisioners).
@@ -151,10 +166,19 @@ LAB_SWITCH = "LabNet"
 #   checkpoints: false disables Hyper-V checkpoints for the VM (CheckpointType Disabled). A
 #            checkpoint of a running VM writes its RAM to disk (G:, unencrypted); for vault that
 #            RAM holds OpenBao's unsealed keys. Applied by Vagrant on every start of the VM.
-def lab_vm(config, name, switch:, mac:, cpus: 2, memory: 2048, checkpoints: true)
+#   gateway: the firewall's address in the VM's network: the jump host's source address, the
+#            only one (besides ansible-control) from which provision/harden-ssh.sh lets logins in
+def lab_vm(config, name, switch:, mac:, gateway:, cpus: 2, memory: 2048, checkpoints: true)
   config.vm.define name do |m|
     m.vm.hostname = name
     m.vm.network "public_network", bridge: switch
+    # Own SSH host keys per VM (the box ships the same keys for every VM), published to the PC
+    # through Hyper-V KVP; trust in the lab's SSH CAs; certificate logins only, from the jump
+    # host (the firewall's address in this VM's network) and ansible-control only. Defined per
+    # VM because that address depends on the network; it runs after the shared provisioners.
+    m.vm.provision "ssh-hardening", type: "shell",
+      path: File.join(PROVISION_DIR, "harden-ssh.sh"),
+      args: [gateway, LAB_VMS.fetch("ansible-control")[:ip]]
     m.vm.provider "hyperv" do |h|
       # Name of the VM in Hyper-V Manager
       h.vmname = name
@@ -211,16 +235,12 @@ Vagrant.configure("2") do |config|
   end
   config.vm.provision "ansible-user", type: "shell",
     path: File.join(PROVISION_DIR, "bootstrap-ansible-user.sh")
-  # Own SSH host keys per VM (the box ships the same keys for every VM), published to the PC
-  # through Hyper-V KVP; trust in the lab's SSH CAs; certificate logins only, from the jump host
-  # and ansible-control only (the addresses come from config/lab.json).
-  config.vm.provision "ssh-hardening", type: "shell",
-    path: File.join(PROVISION_DIR, "harden-ssh.sh"),
-    args: [LAB["firewall"]["lanIp"], LAB_VMS.fetch("ansible-control")[:ip]]
+  # Then, per VM (lab_vm above): "ssh-hardening", with the jump host's address in its network.
 
-  # --- the lab VMs (ansible-control, matrix, keycloak, vault) ----------------------------------
-  # The lab VMs are connected only to the private LabNet. Vagrant reads their IP (10.10.10.x)
-  # from Hyper-V, but your PC has no adapter in LabNet, so Vagrant reaches them through the
+  # --- the lab VMs (config/lab.json "vms") ------------------------------------------------------
+  # The lab VMs are connected only to their private network (LabNet, or a segment such as
+  # LabK8s). Vagrant reads their IP (10.10.10.x, 10.10.20.x) from Hyper-V, but your PC has no
+  # adapter in these networks, so Vagrant reaches them through the
   # firewall as jump host (bastion), like an administrator in an enterprise network:
   # proxy_command opens an SSH connection to the firewall (as "ansible" with the PC's SSH
   # certificate, settings from keys/ssh_config, the firewall's host certificate checked), and
@@ -232,8 +252,8 @@ Vagrant.configure("2") do |config|
   # known hosts") off stderr: Windows PowerShell 5.1 can turn stderr output of native programs
   # into a terminating error when the output is redirected (e.g. lab.ps1 up *> log).
   LAB_VMS.each do |name, vm|
-    lab_vm(config, name, switch: LAB_SWITCH, mac: vm[:mac], cpus: vm[:cpus], memory: vm[:memory],
-           checkpoints: vm[:checkpoints]) do |m|
+    lab_vm(config, name, switch: vm[:switch], mac: vm[:mac], gateway: vm[:gateway], cpus: vm[:cpus],
+           memory: vm[:memory], checkpoints: vm[:checkpoints]) do |m|
       m.ssh.proxy_command = "#{SYSTEM_SSH} -F #{SSH_CONFIG} -o LogLevel=ERROR -W %h:%p firewall"
       if name == "ansible-control"
         # The control VM checks the other machines' host certificates: it gets the CAs for host

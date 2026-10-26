@@ -1,0 +1,37 @@
+# Managed by ansible/kubernetes/rke2.yml. RKE2 installs Cilium from its own chart (rke2-cilium);
+# a HelmChartConfig with the same name adds our values to it. RKE2 applies every file in
+# /var/lib/rancher/rke2/server/manifests/ at start and again when it changes; this one must be
+# there before the first start.
+#
+# kubeProxyReplacement  Cilium implements Kubernetes Services in eBPF instead of kube-proxy's
+#                       iptables rules (disable-kube-proxy in config.yaml). Without kube-proxy,
+#                       Cilium needs the API server's address itself: 127.0.0.1:6443 is the API
+#                       server on the server node and RKE2's local load balancer on each agent.
+# routingMode native    pod-to-pod traffic between nodes is plainly routed, not wrapped in VXLAN
+#                       tunnels: all nodes are on one network (LabK8s), so each node can reach the
+#                       others' pod ranges directly (autoDirectNodeRoutes). Full 1500-byte MTU and
+#                       packets you can read with tcpdump. Traffic to anything outside
+#                       ipv4NativeRoutingCIDR (the pod network) is masqueraded to the node's address.
+# hubble                Cilium's flow visibility: the agents record every flow, hubble-relay
+#                       collects them cluster-wide, Hubble UI shows them (rancher.yml publishes it).
+# Enterprise equivalent: the same building blocks; GKE Dataplane V2 and "Azure CNI powered by
+# Cilium" are built on Cilium, usually with Hubble and network policies.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-cilium
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    kubeProxyReplacement: true
+    k8sServiceHost: "127.0.0.1"
+    k8sServicePort: "6443"
+    routingMode: native
+    ipv4NativeRoutingCIDR: {{ k8s_cluster_cidr }}
+    autoDirectNodeRoutes: true
+    hubble:
+      enabled: true
+      relay:
+        enabled: true
+      ui:
+        enabled: true

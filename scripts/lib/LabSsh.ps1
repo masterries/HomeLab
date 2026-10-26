@@ -93,11 +93,12 @@ $script:LabSshHostRenewDays = 30
 #                 stays off.
 #   SourceAddress critical option: the certificate works only from these addresses. The PC
 #                 reaches the firewall from its LabHost address and every VM from the firewall's
-#                 LAN address (the jump); ansible-control only from its own. A copied certificate
-#                 is useless anywhere else.
+#                 address in that VM's network (the jump: LAN, or a segment such as LabK8s);
+#                 ansible-control only from its own. A copied certificate is useless anywhere
+#                 else.
 $script:LabSshRoles = [ordered]@{
     'pc' = @{ Type = 'user'; Hours = 8; Extensions = @('permit-port-forwarding', 'permit-pty')
-        SourceAddress = "$($script:LabConfig.firewall.pcIp)/32,$($script:LabConfig.firewall.lanIp)/32" }
+        SourceAddress = (@($script:LabConfig.firewall.pcIp) + @(Get-LabFirewallVmAddresses) | ForEach-Object { "$_/32" }) -join ',' }
     'ansible-control' = @{ Type = 'user'; Hours = 2; Extensions = @('permit-pty')
         SourceAddress = "$(($script:LabConfig.vms | Where-Object { $_.name -eq 'ansible-control' }).ip)/32" }
     'lab-hosts' = @{ Type = 'host'; Hours = 8760; Extensions = @(); SourceAddress = $null }
@@ -444,6 +445,11 @@ function New-LabSshCertificate([string]$PublicKeyFile, [string]$Role, [string[]]
             $token = Get-LabBaoToken 'pc-deploy'
             try {
                 $body = @{ public_key = $keyLine; cert_type = $spec.Type; valid_principals = ($Principals -join ','); ttl = "$([int]($Hours * 60))m" }
+                # The source addresses as this PC computes them now (lab.json: a new segment adds
+                # its firewall address), not the role's default from the last deploy vault: else a
+                # new segment would make every renewal fail until deploy vault - which itself needs
+                # a renewed certificate. The role allows the option (allowed_critical_options).
+                if ($spec.Type -eq 'user' -and $spec.SourceAddress) { $body.critical_options = @{ 'source-address' = $spec.SourceAddress } }
                 $answer = Invoke-LabBao POST "$($script:LabSshMount)/sign/$Role" $body -Token $token
                 [IO.File]::WriteAllText($certFile, $answer.data.signed_key.Trim() + "`n", (New-Object Text.UTF8Encoding $false))
             }
@@ -481,13 +487,16 @@ function New-LabSshCertificate([string]$PublicKeyFile, [string]$Role, [string[]]
 
 # --- The PC's own certificate -------------------------------------------------------------------
 
-# True while the PC's certificate is valid for at least $MinHours more hours and was signed by a
-# CA that every machine trusts. Reads only a small file; no network.
+# True while the PC's certificate is valid for at least $MinHours more hours, was signed by a
+# CA that every machine trusts, and allows the source addresses lab.json gives now (a new segment
+# adds the firewall's address there, the jump's source). Reads only a small file; no network.
+# The file: "<valid until> <CA fingerprint> <source addresses>" (the Vagrantfile reads the first).
 function Test-LabPcCertificateFresh([double]$MinHours = $script:LabSshPcRenewHours) {
     if (-not (Test-Path $script:LabSshPcCertInfo) -or -not (Test-Path "$($script:LabSshPcKey)-cert.pub")) { return $false }
-    $until, $caFingerprint = [IO.File]::ReadAllText($script:LabSshPcCertInfo).Trim() -split '\s+'
+    $until, $caFingerprint, $sourceAddress = [IO.File]::ReadAllText($script:LabSshPcCertInfo).Trim() -split '\s+'
     $validTo = [datetime]::Parse($until, [Globalization.CultureInfo]::InvariantCulture, 'AdjustToUniversal')
-    return ($validTo -gt [datetime]::UtcNow.AddHours($MinHours)) -and ((Get-LabSshTrustedCaFingerprints) -contains $caFingerprint)
+    return ($validTo -gt [datetime]::UtcNow.AddHours($MinHours)) -and ((Get-LabSshTrustedCaFingerprints) -contains $caFingerprint) -and
+        ($sourceAddress -eq $script:LabSshRoles['pc'].SourceAddress)
 }
 
 # A new certificate for the PC's key (the key pair itself stays; Initialize-LabSshCa (lib\LabSsh.ps1) made it once).
@@ -500,15 +509,16 @@ function Update-LabPcCertificate([switch]$BreakGlass) {
         Copy-Item "$($script:LabSshPcKey).pub" (Join-Path $work 'pc_ed25519.pub')
         $issued = New-LabSshCertificate (Join-Path $work 'pc_ed25519.pub') 'pc' @('lab-all') 'pc' -BreakGlass:$BreakGlass
         Move-Item -Force $issued.Path "$($script:LabSshPcKey)-cert.pub"
-        [void](Write-LabSshFile $script:LabSshPcCertInfo @("$($issued.ValidTo.ToString('yyyy-MM-ddTHH:mm:ssZ')) $($issued.CaFingerprint)"))
+        [void](Write-LabSshFile $script:LabSshPcCertInfo @("$($issued.ValidTo.ToString('yyyy-MM-ddTHH:mm:ssZ')) $($issued.CaFingerprint) $($script:LabSshRoles['pc'].SourceAddress)"))
         Write-Host "SSH:         new certificate for this PC, signed by $($issued.Signer), valid until $($issued.ValidTo.ToLocalTime().ToString('yyyy-MM-dd HH:mm')) (key ID $($issued.KeyId))"
     }
     finally { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $work }
 }
 
 # THE ENTRY POINT for every script that uses ssh, scp or vagrant: renews the PC's certificate
-# when it expires within 4 hours (or its CA is no longer trusted) and returns the path of
-# keys\ssh_config. Costs no network call while the certificate is fresh.
+# when it expires within 4 hours (or its CA is no longer trusted, or lab.json now names other
+# source addresses) and returns the path of keys\ssh_config. Costs no network call while the
+# certificate is fresh.
 function Get-LabSshConfig([switch]$BreakGlass) {
     if (-not (Test-Path $script:LabSshConfigFile)) { throw 'No SSH configuration (keys\ssh_config). Run .\lab.ps1 up first.' }
     if (-not (Test-LabPcCertificateFresh)) {

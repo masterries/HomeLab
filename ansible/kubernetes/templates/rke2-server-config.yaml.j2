@@ -1,0 +1,33 @@
+# Managed by ansible/kubernetes/rke2.yml: /etc/rancher/rke2/config.yaml of the RKE2 server
+# (control plane and etcd). RKE2 reads it at start; every key is a command-line flag of
+# "rke2 server". Holds the join tokens: root only (0600).
+#
+# token        the server token: joins further servers, and encrypts RKE2's bootstrap data in
+#              etcd (back it up with the etcd snapshots). From OpenBao (lab/k8s/rke2/token).
+# agent-token  a separate token that only joins agents (workers), so a worker never holds the
+#              token of the control plane. RKE2 writes its full form, with the hash of the
+#              cluster CA, to /var/lib/rancher/rke2/server/agent-token; agents join with that.
+token: {{ rke2_token | to_json }}
+agent-token: {{ rke2_agent_token | to_json }}
+# The node's address in LabK8s, and the extra names on the API server's certificate (RKE2 has
+# its own cluster CA for Kubernetes; the lab PKI is not involved here).
+node-ip: {{ k8s_node_ip }}
+tls-san:
+  - {{ inventory_hostname }}.{{ lab_domain }}
+  - {{ k8s_node_ip }}
+# Cilium as the CNI (network plugin), and no kube-proxy: Cilium implements Services itself in
+# eBPF ("kube-proxy replacement", rke2-cilium-config.yaml). Only possible at the first start: RKE2
+# cannot change the CNI or these networks on an existing cluster.
+cni: cilium
+disable-kube-proxy: true
+cluster-cidr: {{ k8s_cluster_cidr }}
+service-cidr: {{ k8s_service_cidr }}
+# Traefik as the ingress controller (RKE2's default since v1.36; ingress-nginx is retired).
+ingress-controller: traefik
+# A dedicated control plane: only pods that tolerate this taint run here (Cilium's agent,
+# CoreDNS, Traefik through rke2-traefik-config.yaml), everything else on the agents. With 4 GB,
+# etcd and the API server need the room. "NoExecute" also evicts pods that do not tolerate it.
+node-taint:
+  - "CriticalAddonsOnly=true:NoExecute"
+# The admin kubeconfig (/etc/rancher/rke2/rke2.yaml) for root only.
+write-kubeconfig-mode: "0600"

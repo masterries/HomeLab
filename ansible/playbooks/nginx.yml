@@ -7,6 +7,19 @@
     nginx_ip: "{{ (lab_config.vms | selectattr('name', 'equalto', 'nginx') | first).ip }}"
     nginx_routes: "{{ lookup('file', inventory_dir ~ '/../config/nginx.json') | from_json }}"
     nginx_backend_addresses: "{{ dict(lab_config.vms | map(attribute='name') | zip(lab_config.vms | map(attribute='ip'))) | combine({'firewall': lab_config.firewall.lanIp}) }}"
+    # The VMs whose routed HTTPS port (443 to nginx) lab.json limits to the PC, and the firewall
+    # (its GUI). Only that port reaches a TLS route; a direct port's source is the firewall's
+    # business alone (its forward).
+    nginx_pc_only_vms: >-
+      {%- set ns = namespace(out=['firewall']) -%}
+      {%- for pub in lab_config.published -%}
+      {%- if pub.ports | selectattr('targetVm', 'defined') | selectattr('targetVm', 'equalto', 'nginx')
+             | selectattr('port', 'equalto', 443) | selectattr('source', 'defined')
+             | selectattr('source', 'equalto', 'pc') | list | length > 0 -%}
+      {%- set ns.out = ns.out + [pub.vm] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
   tasks:
     - name: Supported Ubuntu VM
       ansible.builtin.assert:
@@ -24,6 +37,14 @@
         quiet: true
       loop: "{{ nginx_routes.tls + nginx_routes.http + (nginx_routes.tcp | default([])) }}"
 
+    - name: Validate the source policy of the TLS routes
+      ansible.builtin.assert:
+        that: item.source | default('any') in ['any', 'management']
+        quiet: true
+      loop: "{{ nginx_routes.tls }}"
+      loop_control:
+        label: "{{ item.vm }}"
+
     # No backend may trust what nginx says about a client: OpenBao, the one service that binds
     # logins to client addresses, is forwarded directly by the firewall and never routed here.
     - name: No route sends client-address metadata (PROXY protocol), and OpenBao is not routed
@@ -33,6 +54,38 @@
           - item.vm != 'vault'
         quiet: true
       loop: "{{ nginx_routes.tls + nginx_routes.http + (nginx_routes.tcp | default([])) }}"
+
+    # The management source policy (PC and LabNet only) protects the firewall GUI and every
+    # publication whose routed HTTPS port lab.json limits to the PC (RustFS, Rancher, Hubble UI,
+    # which has no login): a route of theirs must not lose "source": "management" by an edit of
+    # nginx.json.
+    - name: PC-only publications keep nginx's management source policy
+      ansible.builtin.assert:
+        that: (item.source | default('any') == 'management') == (item.vm in nginx_pc_only_vms)
+        fail_msg: >-
+          The route for {{ item.vm }} ({{ item.names | join(', ') }}) in config/nginx.json must have
+          "source": "management" exactly when lab.json publishes it for the PC only (or it is the firewall).
+        quiet: true
+      loop: "{{ nginx_routes.tls }}"
+      loop_control:
+        label: "{{ item.vm }}"
+
+    # nginx enforces "source" only in the TLS routes (the stream geo/map); an HTTP or TCP route
+    # would ignore it and let any client in through another published address. So: no "source"
+    # there, and no plain HTTP or TCP route to a PC-only VM.
+    - name: Only TLS routes carry a source policy, and PC-only VMs get no HTTP or TCP route
+      ansible.builtin.assert:
+        that:
+          - item.source is not defined
+          - item.vm not in nginx_pc_only_vms
+        fail_msg: >-
+          config/nginx.json: the http/tcp route to {{ item.vm }} must have no "source" (nginx enforces
+          it only for TLS routes), and a VM that lab.json publishes for the PC only (or the firewall)
+          must not get an http or tcp route.
+        quiet: true
+      loop: "{{ nginx_routes.http + (nginx_routes.tcp | default([])) }}"
+      loop_control:
+        label: "{{ item.vm }}"
 
     - name: Validate plain TCP passthrough listeners (lab-internal, same port on the backend)
       ansible.builtin.assert:

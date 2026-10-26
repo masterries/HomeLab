@@ -3,9 +3,11 @@
 # in the lab's SSH certificate authorities, and logins with certificates only.
 #
 # WHERE AND HOW IT RUNS
-#   On the Ubuntu lab VMs (ansible-control, matrix, keycloak, vault), as root, through Vagrant's
-#   shell provisioner "ssh-hardening" (vagrant/Vagrantfile):
-#     harden-ssh.sh <firewall LAN address> <ansible-control address>
+#   On the Ubuntu lab VMs (every VM of config/lab.json), as root, through Vagrant's shell
+#   provisioner "ssh-hardening" (vagrant/Vagrantfile):
+#     harden-ssh.sh <firewall address in the VM's network> <ansible-control address>
+#   The first address is the firewall's LAN address (10.10.10.1) for VMs on LabNet, its segment
+#   address (10.10.20.1 on LabK8s) for VMs in a segment: the jump host connects from there.
 #   It expects keys\ssh\lab_user_ca.pub from the PC, which the file provisioner "lab-ssh-ca"
 #   uploads to $STAGING just before (or an earlier run's copy in /etc/ssh). (The OPNsense
 #   firewall is not made from the box; lab.ps1 firewall sets up its SSH.)
@@ -41,8 +43,8 @@
 #     (Installed later by the PC; until then sshd logs that the file is missing and carries on.)
 #   - Passwords off: the box ships the well-known user/password "vagrant"/"vagrant" with
 #     passwordless sudo.
-#   - AllowUsers: ansible only from the firewall's LAN address (every login from the PC arrives
-#     through the jump host) and from ansible-control; Vagrant's own user "vagrant" (it keeps its
+#   - AllowUsers: ansible only from the firewall's address in this VM's network (every login from
+#     the PC arrives through the jump host) and from ansible-control; Vagrant's own user "vagrant" (it keeps its
 #     per-VM key from Vagrant) only through the jump host. No lateral SSH from one lab VM to
 #     another.
 #   - No forwarding of any kind on the VMs: only the firewall, as jump host, forwards.
@@ -56,8 +58,8 @@
 # changes; sshd is reloaded only when something changed.
 set -euo pipefail
 
-FIREWALL_IP="${1:?usage: harden-ssh.sh <firewall LAN address> <ansible-control address>}"
-CONTROL_IP="${2:?usage: harden-ssh.sh <firewall LAN address> <ansible-control address>}"
+FIREWALL_IP="${1:?usage: harden-ssh.sh <firewall address in this network> <ansible-control address>}"
+CONTROL_IP="${2:?usage: harden-ssh.sh <firewall address in this network> <ansible-control address>}"
 STAGING=/home/vagrant/lab-ssh
 MARKER=/etc/ssh/.lab-host-keys-regenerated
 DROPIN=/etc/ssh/sshd_config.d/10-lab-hardening.conf

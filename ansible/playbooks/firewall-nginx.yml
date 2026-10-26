@@ -164,9 +164,11 @@
             [firewall_nginx_private_address]
           when: not ansible_check_mode
 
+        # <vm>-backend exists when the VM's own name is routed (matrix); a VM published under
+        # other names only (k8s-server as rancher) keeps its own name, checked the same way.
         - name: Backend DHCP names of routed publications retain their private management addresses
           ansible.builtin.command:
-            argv: [getent, ahostsv4, "{{ item.vm }}-backend.{{ lab_domain }}"]
+            argv: [getent, ahostsv4, "{{ item.vm ~ ('-backend' if item.vm in item.names else '') }}.{{ lab_domain }}"]
           loop: "{{ firewall_nginx_routed }}"
           loop_control:
             label: "{{ item.vm }}"

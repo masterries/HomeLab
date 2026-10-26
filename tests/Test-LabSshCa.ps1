@@ -33,7 +33,7 @@ try {
     Assert-LabTest 'user certificate: certifies the requested key' ($cert.KeyFingerprint -eq $keyFingerprint)
     Assert-LabTest 'user certificate: principal lab-all only' ((@($cert.Principals) -join ',') -eq 'lab-all')
     Assert-LabTest 'user certificate: extensions exactly permit-port-forwarding, permit-pty' ((@($cert.Extensions | Sort-Object) -join ',') -eq 'permit-port-forwarding,permit-pty') ($cert.Extensions -join ', ')
-    Assert-LabTest 'user certificate: source-address PC + firewall LAN' ((@($cert.CriticalOptions) -join '|') -eq "source-address $($pc.SourceAddress)") ($cert.CriticalOptions -join ', ')
+    Assert-LabTest 'user certificate: source-address PC + the firewall in every VM network' ((@($cert.CriticalOptions) -join '|') -eq "source-address $($pc.SourceAddress)") ($cert.CriticalOptions -join ', ')
     Assert-LabTest 'user certificate: valid about 6 minutes, backdated 5' ($cert.ValidTo -lt [datetime]::UtcNow.AddMinutes(8) -and $cert.ValidFrom -lt [datetime]::UtcNow.AddMinutes(-4)) "$($cert.ValidFrom) - $($cert.ValidTo)"
     Assert-LabTest 'user certificate: random serial, key ID names the purpose' ($cert.Serial -gt 0 -and $cert.KeyId -like 'offline-pc-test-*') "serial $($cert.Serial)"
 

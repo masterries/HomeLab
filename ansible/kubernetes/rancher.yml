@@ -1,0 +1,324 @@
+# kubernetes/rancher.yml -- Rancher Manager and Hubble UI on the lab's Kubernetes cluster
+#
+# Where it runs: on ansible-control, as part of ".\lab.ps1 deploy k8s" (profile "k8s":
+# kubernetes/site.yml, after rke2.yml), or alone: .\lab.ps1 run k8s-rancher. The run gets an SSH
+# certificate for k8s-server, an OpenBao token with the policy ansible-k8s, and the vendored chart
+# (vendor/rancher, the profile's "vendor" list) in ~/lab/vendor/rancher.
+#
+# Rancher Manager is SUSE's web UI and API for Kubernetes: clusters, workloads, users and roles,
+# app catalogs, Fleet (GitOps). Here it manages one cluster, the one it runs on ("local").
+#
+# How it is installed - no Helm on ansible-control, no Helm repository:
+#   1. ansible-control packs the vendored chart (vendor/rancher/chart) into a .tgz the same way
+#      every time (sorted, fixed dates and owners), so its content changes only when the chart
+#      does, and hands it base64-encoded to the server.
+#   2. On k8s-server: the TLS certificates of rancher.<domain> and hubble.<domain> (keys made on
+#      k8s-server, signed by OpenBao's intermediate CA: role k8s-ingress), and from them the
+#      Kubernetes secrets Traefik serves; the lab root as Rancher's CA (tls-ca); the first admin
+#      password from OpenBao (bootstrap-secret).
+#   3. A HelmChart object in RKE2's manifest folder: RKE2's Helm controller runs "helm install"
+#      (later "helm upgrade" when the chart or the values change) in a job.
+#   4. Wait until that job ran with the current settings and Rancher is rolled out, then ask
+#      https://rancher.<domain>/ping through central nginx.
+#
+# Secrets: the first admin password lives in OpenBao (lab/k8s/rancher/bootstrap-password, copy it
+# with .\lab.ps1 secret k8s/rancher/bootstrap-password) and in the Kubernetes secret
+# bootstrap-secret; Rancher reads it on its very first start only. The chart also renders it into
+# its install hook, so it ends up in Helm's release record (another secret in cattle-system).
+# Rancher asks for a new admin password at the first login; that one is yours.
+# Enterprise equivalent: log in through the IdP (Keycloak OIDC) instead of a local admin, and
+# keep the local admin as break-glass in a vault.
+- name: Rancher Manager - the chart and the first admin password
+  hosts: control
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  vars:
+    rancher_vendor_dir: "{{ playbook_dir }}/../vendor/rancher"
+  tasks:
+    # The vendored chart must be the version this file names (.\lab.ps1 rancher-upgrade changes
+    # both): the wrong configuration must never meet the wrong chart.
+    - name: Which Rancher chart is vendored?
+      ansible.builtin.slurp:
+        src: "{{ rancher_vendor_dir }}/.lab-vendored-version"
+      register: rancher_marker
+      failed_when: false
+
+    - name: The vendored chart is the pinned version
+      ansible.builtin.assert:
+        that:
+          - rancher_marker.content is defined
+          - (rancher_marker.content | b64decode).split() | first == rancher_chart_version
+        fail_msg: >-
+          ~/lab/vendor/rancher holds chart {{ ((rancher_marker.content | default('') | b64decode).split() + ['nothing']) | first }},
+          not {{ rancher_chart_version }} (rancher_chart_version in kubernetes/vars/kubernetes.yml).
+          Start this playbook through its run profile (.\lab.ps1 deploy k8s), which copies
+          vendor\rancher; after .\lab.ps1 rancher-upgrade also change rancher_chart_version.
+        quiet: true
+
+    # Reproducible: sorted names, fixed dates, owners and modes, gzip without a timestamp. The
+    # top folder is renamed to "rancher", the chart's name, as in Rancher's own package.
+    - name: The chart, packed the same way every time
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=a=rX,u+w
+        --transform=s,^chart,rancher, -C {{ rancher_vendor_dir }} -cf - chart
+        | gzip -n | base64 -w0
+      args:
+        executable: /bin/bash
+      register: rancher_chart_packed
+      changed_when: false
+      check_mode: false
+
+    - name: The packed chart for the server's play
+      ansible.builtin.set_fact:
+        rancher_chart_content: "{{ rancher_chart_packed.stdout }}"
+
+    # Rancher reads the password only before its first admin exists; on an installation that
+    # exists, a missing one is an error, not something to generate.
+    - name: Has Rancher been installed before?
+      ansible.builtin.stat:
+        path: "{{ rke2_manifests_dir }}/rancher.yaml"
+      delegate_to: "{{ groups['rke2_servers'][0] }}"
+      become: true
+      register: rancher_installed
+
+    - name: The first admin password (created on the very first run)
+      ansible.builtin.include_tasks: ../playbooks/tasks/openbao-secrets.yml
+      vars:
+        openbao_secrets:
+          - { path: k8s/rancher/bootstrap-password, field: value, policy: lab-alnum-24 }
+        openbao_existing_state: "{{ rancher_installed.stat.exists }}"
+
+- name: Rancher Manager - certificates, secrets and the chart on the server
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  vars:
+    rancher_bootstrap_password: "{{ hostvars[groups['control'][0]].lab_secrets['k8s/rancher/bootstrap-password'] }}"
+    rancher_chart_content: "{{ hostvars[groups['control'][0]].rancher_chart_content }}"
+    kubectl: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml]
+    # "kubectl create ... --dry-run=client -o yaml | kubectl apply -f -": create or update a
+    # secret from files on the server, and report "unchanged" when it is already so.
+    k8s_apply: "{{ rke2_kubectl }} apply -f -"
+  tasks:
+    - name: TLS folder (root only)
+      ansible.builtin.file:
+        path: "{{ k8s_tls_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # Rancher's CA for its agents (privateCA, tls-ca): the lab root only, so it stays the same
+    # when a new intermediate CA comes (lab.ps1 deploy vault -RotateIntermediate).
+    - name: The lab root CA as Rancher's CA
+      ansible.builtin.copy:
+        src: "{{ lab_pki_dir }}/root-ca.crt"
+        dest: "{{ k8s_tls_dir }}/cacerts.pem"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # Renewed 30 days before they expire and after a new intermediate CA; the secrets below
+    # are updated in the same run, and Traefik picks up a changed secret by itself.
+    - name: Certificate for Rancher (key made here, signed by OpenBao)
+      ansible.builtin.include_tasks: ../playbooks/tasks/openbao-certificate.yml
+      vars:
+        openbao_cert_key: "{{ k8s_tls_dir }}/rancher.key"
+        openbao_cert_file: "{{ k8s_tls_dir }}/rancher.crt"
+        openbao_cert_names: ["{{ rancher_hostname }}"]
+        openbao_cert_role: k8s-ingress
+        openbao_cert_notify: k8s certificate renewed
+
+    - name: Certificate for Hubble UI (key made here, signed by OpenBao)
+      ansible.builtin.include_tasks: ../playbooks/tasks/openbao-certificate.yml
+      vars:
+        openbao_cert_key: "{{ k8s_tls_dir }}/hubble.key"
+        openbao_cert_file: "{{ k8s_tls_dir }}/hubble.crt"
+        openbao_cert_names: ["{{ hubble_hostname }}"]
+        openbao_cert_role: k8s-ingress
+        openbao_cert_notify: k8s certificate renewed
+
+    - name: Namespace cattle-system (Rancher's)
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ rke2_kubectl }} create namespace cattle-system --dry-run=client -o yaml | {{ k8s_apply }}
+      args:
+        executable: /bin/bash
+      register: k8s_namespace
+      changed_when: "'unchanged' not in k8s_namespace.stdout"
+
+    # kubernetes.io/tls secrets: tls.crt (certificate and intermediate CA) and tls.key. Kubernetes
+    # keeps secrets in etcd, which RKE2 encrypts at rest.
+    # no_log: when an update fails, kubectl's error message repeats the whole change, and after a
+    # renewal that holds the new private key. The next task reports a failure without it (and
+    # must not loop over these results: a looped assert prints each one).
+    - name: TLS secrets for Traefik
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ rke2_kubectl }} -n {{ item.namespace }} create secret tls {{ item.name }}
+        --cert={{ k8s_tls_dir }}/{{ item.file }}.crt --key={{ k8s_tls_dir }}/{{ item.file }}.key
+        --dry-run=client -o yaml | {{ k8s_apply }}
+      args:
+        executable: /bin/bash
+      loop:
+        - { namespace: cattle-system, name: tls-rancher-ingress, file: rancher }
+        - { namespace: kube-system, name: tls-hubble-ui, file: hubble }
+      loop_control:
+        label: "{{ item.namespace }}/{{ item.name }}"
+      register: k8s_tls_secrets
+      changed_when: k8s_tls_secrets.rc == 0 and 'unchanged' not in k8s_tls_secrets.stdout
+      failed_when: false
+      no_log: true
+      when: not ansible_check_mode
+
+    # One assert over the failed results, without a loop: a looped assert would print each raw
+    # result (its stderr included) next to the message. The message itself hides kubectl's patch
+    # section and any long base64 run (a key, also inside the last-applied annotation).
+    - name: The TLS secrets are in Kubernetes
+      ansible.builtin.assert:
+        that: k8s_tls_failed | length == 0
+        fail_msg: >-
+          kubectl apply failed for {{ k8s_tls_failed | map(attribute='item.name') | join(', ') }}:
+          {{ k8s_tls_failed | map(attribute='stderr')
+             | map('regex_replace', '(?s)applying patch:.*\nfor:', 'applying patch (not shown: it holds the private key) for:')
+             | map('regex_replace', '[A-Za-z0-9+/]{40,}={0,2}', '(hidden)') | join(' / ') }}
+        quiet: true
+      vars:
+        k8s_tls_failed: "{{ k8s_tls_secrets.results | default([]) | rejectattr('rc', 'eq', 0) | list }}"
+      when: not ansible_check_mode
+
+    - name: Rancher's CA secret (tls-ca, key cacerts.pem)
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ rke2_kubectl }} -n cattle-system create secret generic tls-ca
+        --from-file=cacerts.pem={{ k8s_tls_dir }}/cacerts.pem --dry-run=client -o yaml | {{ k8s_apply }}
+      args:
+        executable: /bin/bash
+      register: k8s_ca_secret
+      changed_when: "'unchanged' not in k8s_ca_secret.stdout"
+      when: not ansible_check_mode
+
+    - name: Does bootstrap-secret exist?
+      ansible.builtin.command:
+        argv: "{{ kubectl + ['-n', 'cattle-system', 'get', 'secret', 'bootstrap-secret', '-o', 'name'] }}"
+      register: rancher_bootstrap_secret
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # The value goes in on stdin, never on a command line (other processes could read it).
+    - name: bootstrap-secret with the first admin password from OpenBao
+      ansible.builtin.command:
+        argv: "{{ kubectl + ['-n', 'cattle-system', 'create', 'secret', 'generic', 'bootstrap-secret', '--from-file=bootstrapPassword=/dev/stdin'] }}"
+        stdin: "{{ rancher_bootstrap_password }}"
+        stdin_add_newline: false
+      no_log: true
+      when: rancher_bootstrap_secret.rc != 0 and not ansible_check_mode
+
+    # The Helm controller re-runs its job "helm-install-rancher" when the chart or the values
+    # change; the job carries a hash of them. Remembered here to tell the new run from the old.
+    - name: The install job's settings before this run
+      ansible.builtin.command:
+        argv: "{{ kubectl + ['-n', 'kube-system', 'get', 'job', 'helm-install-rancher', '-o', 'jsonpath={.spec.template.metadata.annotations.helmcharts\\.helm\\.cattle\\.io/configHash}'] }}"
+      register: rancher_job_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: The HelmChart manifest before this run
+      ansible.builtin.slurp:
+        src: "{{ rke2_manifests_dir }}/rancher.yaml"
+      register: rancher_manifest_before
+      failed_when: false
+      check_mode: false
+
+    # diff: false - the file carries the whole chart (base64).
+    - name: Rancher's HelmChart in RKE2's manifest folder
+      ansible.builtin.template:
+        src: templates/rancher-helmchart.yaml.j2
+        dest: "{{ rke2_manifests_dir }}/rancher.yaml"
+        owner: root
+        group: root
+        mode: "0600"
+      diff: false
+      register: rancher_manifest
+
+    - name: The HelmChart manifest now
+      ansible.builtin.slurp:
+        src: "{{ rke2_manifests_dir }}/rancher.yaml"
+      register: rancher_manifest_now
+      when: rancher_manifest is changed and not ansible_check_mode
+
+    # Only a changed object makes the Helm controller run a new job; a file that differs only in
+    # its comments does not. So the objects are compared, not the files.
+    - name: Did the HelmChart object change?
+      ansible.builtin.set_fact:
+        rancher_object_changed: >-
+          {{ rancher_manifest_now.content is defined and (rancher_manifest_before.content is not defined
+          or (rancher_manifest_before.content | b64decode | from_yaml) != (rancher_manifest_now.content | b64decode | from_yaml)) }}
+
+    - name: Hubble UI's Ingress in RKE2's manifest folder
+      ansible.builtin.template:
+        src: templates/hubble-ui-ingress.yaml.j2
+        dest: "{{ rke2_manifests_dir }}/hubble-ui-ingress.yaml"
+        owner: root
+        group: root
+        mode: "0600"
+
+    # Checked on every run, not only after a change: with failurePolicy abort a failed job stays
+    # failed, and the next run must not report success over it. After a change, the job must be
+    # a new one (another configHash): RKE2 notices a changed file within 15 seconds, then the job
+    # runs "helm install" or "helm upgrade" (the first time it also pulls Rancher's images, about
+    # 1 GB). The loop ends as soon as the job succeeded or failed for good (its Failed condition,
+    # backOffLimit used up); failed_when then judges which.
+    - name: Helm ran with the current chart and values
+      ansible.builtin.command:
+        argv: "{{ kubectl + ['-n', 'kube-system', 'get', 'job', 'helm-install-rancher', '-o', 'jsonpath={.spec.template.metadata.annotations.helmcharts\\.helm\\.cattle\\.io/configHash}|{.status.succeeded}|{.status.conditions[?(@.type==\"Failed\")].status}'] }}"
+      register: rancher_job
+      vars:
+        # configHash | succeeded | Failed condition
+        rancher_job_fields: "{{ rancher_job.stdout.split('|') if (rancher_job.rc | default(1)) == 0 and rancher_job.stdout.count('|') == 2 else ['', '', ''] }}"
+        rancher_job_current: "{{ not (rancher_object_changed | bool) or rancher_job_fields[0] != rancher_job_before.stdout }}"
+      until: rancher_job_current | bool and (rancher_job_fields[1] == '1' or rancher_job_fields[2] == 'True')
+      failed_when: not (rancher_job_current | bool and rancher_job_fields[1] == '1')
+      retries: 90
+      delay: 10
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Rancher's deployment exists
+      ansible.builtin.command:
+        argv: "{{ kubectl + ['-n', 'cattle-system', 'wait', '--for=create', 'deployment/rancher', '--timeout=900s'] }}"
+      changed_when: false
+      check_mode: false
+
+    # Helm does not wait for the pods; this does. The first start on 2 vCPUs takes minutes.
+    - name: Rancher is rolled out
+      ansible.builtin.command:
+        argv: "{{ kubectl + ['-n', 'cattle-system', 'rollout', 'status', 'deployment/rancher', '--timeout=1200s'] }}"
+      changed_when: false
+      check_mode: false
+
+  handlers:
+    - name: k8s certificate renewed
+      ansible.builtin.debug:
+        msg: A new certificate from OpenBao; its Kubernetes secret was updated in the same run.
+
+- name: Rancher Manager - answers through central nginx
+  hosts: control
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    # ansible-control trusts the lab root and resolves rancher.<domain> to nginx, which passes
+    # the TLS connection on to Traefik on k8s-server: the whole path the PC uses, from inside.
+    - name: https://{{ rancher_hostname }}/ping answers pong
+      ansible.builtin.uri:
+        url: "https://{{ rancher_hostname }}/ping"
+        return_content: true
+      register: rancher_ping
+      until: rancher_ping.status == 200 and rancher_ping.content | trim == 'pong'
+      retries: 30
+      delay: 10
+      check_mode: false

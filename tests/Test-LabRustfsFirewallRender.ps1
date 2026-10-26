@@ -15,6 +15,9 @@ function Get-PasswordHash($Value) { return 'inert-test-hash' }
 function New-RefId { return [guid]::NewGuid().ToString('N') }
 function ConvertTo-Base64($Value) { return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$Value)) }
 $lab = Get-Content -Raw (Join-Path $projectRoot 'config\lab.json') | ConvertFrom-Json
+# The network helpers the renderer calls (Get-LabSegments: segments such as LabK8s).
+$script:LabConfig = $lab
+. (Join-Path $projectRoot 'scripts\lib\LabNetwork.ps1')
 $TimeZone = 'Europe/Berlin'
 $scratchRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
 $scratch = Join-Path $scratchRoot "lab-rustfs-render-$([guid]::NewGuid().ToString('N'))"
@@ -37,8 +40,14 @@ try {
     foreach ($rule in $rules) {
         if ($rule.source.network -ne $lab.firewall.pcIp -or $rule.interface -ne 'opt1' -or $rule.protocol -ne 'tcp' -or $rule.'local-port' -ne $rule.destination.port -or $rule.pass -ne 'rule') { throw 'RustFS NAT must be PC-only and have its registered filter rule.' }
     }
-    $otherRules = @($xml.opnsense.nat.rule | Where-Object { $_.destination.network -ne '10.10.99.6' })
-    if (@($otherRules | Where-Object { $_.source.network -ne 'any' }).Count -gt 0) { throw 'A pre-existing publication changed its source policy.' }
+    # Every other forward keeps the source policy its port declares in lab.json (pc or any).
+    foreach ($pub in @($lab.published | Where-Object { $_.address -ne '10.10.99.6' })) {
+        foreach ($port in $pub.ports) {
+            $wanted = if ($port.source -eq 'pc') { $lab.firewall.pcIp } else { 'any' }
+            $forward = @($xml.opnsense.nat.rule | Where-Object { $_.destination.network -eq $pub.address -and $_.destination.port -eq [string]$port.port -and $_.protocol -eq $port.protocol })
+            if ($forward.Count -ne 1 -or $forward[0].source.network -ne $wanted) { throw "A publication's source policy differs from lab.json: $($pub.vm) $($port.protocol)/$($port.port)." }
+        }
+    }
     # ssh -G parses a generated configuration without connecting. Inert paths ensure that no
     # real SSH keys, certificates, known_hosts or revocation files are read by this test.
     $sshTree = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $projectRoot 'scripts\lib\LabSsh.ps1'), [ref]$tokens, [ref]$parseErrors)

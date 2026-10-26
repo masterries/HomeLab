@@ -60,13 +60,17 @@ foreach ($property in $profiles.PSObject.Properties) {
     $missing = @($p.policies | Where-Object { $_ -and -not (Test-Path (Join-Path $policyDir "$_.hcl")) })
     if ($p.policies) { Assert-LabTest "profile $name`: OpenBao policies exist" ($missing.Count -eq 0) ($missing -join ', ') }
     if ($p.tokenRole) { Assert-LabTest "profile $name`: token role $($p.tokenRole)" ($p.tokenRole -in 'ansible-run', 'ansible-config') }
+    $badVendor = @($p.vendor | Where-Object { $_ -and ($_ -eq 'mdad' -or -not (Test-Path (Join-Path $root "vendor\$_"))) })
+    if ($p.vendor) { Assert-LabTest "profile $name`: vendor folders exist" ($badVendor.Count -eq 0) ($badVendor -join ', ') }
 }
 $profileText = Get-Content -Raw (Join-Path $root 'config\run-profiles.json')
 # Playbooks that a script in a profile starts (bin/deploy-matrix runs matrix-check.yml).
 $startedByScripts = (Get-ChildItem (Join-Path $root 'ansible\bin') | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n"
-foreach ($playbook in Get-ChildItem (Join-Path $root 'ansible\playbooks') -Filter '*.yml') {
-    $used = $profileText -match [regex]::Escape("playbooks/$($playbook.Name)") -or $startedByScripts -match [regex]::Escape("playbooks/$($playbook.Name)")
-    Assert-LabTest "playbook $($playbook.Name) has a run profile" $used
+foreach ($folder in 'playbooks', 'kubernetes') {
+    foreach ($playbook in Get-ChildItem (Join-Path $root "ansible\$folder") -Filter '*.yml') {
+        $used = $profileText -match [regex]::Escape("$folder/$($playbook.Name)") -or $startedByScripts -match [regex]::Escape("$folder/$($playbook.Name)")
+        Assert-LabTest "playbook $folder/$($playbook.Name) has a run profile" $used
+    }
 }
 $vaultCode = Get-Content -Raw (Join-Path $root 'scripts\lib\LabVault.ps1')
 foreach ($policy in Get-ChildItem $policyDir -Filter '*.hcl') {

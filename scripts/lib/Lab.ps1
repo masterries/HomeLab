@@ -28,6 +28,8 @@
     THE LIBRARIES (scripts\lib)
       LabSecrets.ps1   DPAPI on the PC, OpenBao's REST API (TLS pinned to the lab root), unseal,
                        logins, run tokens, the maintenance due list
+      LabNetwork.ps1   the networks behind the firewall (LabNet and the segments of lab.json),
+                       their checks and private Hyper-V switches
       LabSsh.ps1       SSH CAs, certificates, trust files, host keys (offline CA + OpenBao)
       LabPki.ps1       the offline root CA (create, revocation list, sign)
       LabRun.ps1       runs on ansible-control (copy ansible\, per-run certificate and token)
@@ -46,6 +48,7 @@ foreach ($marker in 'lab.ps1', 'config\lab.json', 'vagrant\Vagrantfile') {
 }
 
 . (Join-Path $PSScriptRoot 'LabSecrets.ps1')
+. (Join-Path $PSScriptRoot 'LabNetwork.ps1')
 . (Join-Path $PSScriptRoot 'LabSsh.ps1')
 . (Join-Path $PSScriptRoot 'LabPki.ps1')
 . (Join-Path $PSScriptRoot 'LabRun.ps1')
@@ -64,7 +67,7 @@ $script:LabCommands = [ordered]@{
     'up'           = @{ File = 'scripts\commands\up.ps1'; Elevated = $true; Group = 'Build'; Help = 'build or start the lab and bring it up to date (also after every Windows restart)' }
     'down'         = @{ File = 'scripts\commands\down.ps1'; Elevated = $true; Group = 'Build'; Help = 'delete the lab VMs (or one VM: down matrix); asks first' }
     'firewall'     = @{ File = 'scripts\commands\firewall.ps1'; Elevated = $true; Group = 'Build'; Help = 'build (-Rebuild) or check the OPNsense firewall VM' }
-    'deploy'       = @{ File = 'scripts\commands\deploy.ps1'; Group = 'Deploy'; Help = 'deploy vault | firewall | nginx | keycloak | matrix | rustfs | all' }
+    'deploy'       = @{ File = 'scripts\commands\deploy.ps1'; Group = 'Deploy'; Help = 'deploy vault | firewall | nginx | keycloak | matrix | rustfs | k8s | all' }
     'run'          = @{ Function = 'Invoke-LabRunCli'; PassExitCode = $true; Group = 'Deploy'; Help = 'run a profile on ansible-control (run <profile|playbook.yml> [ansible-playbook options]; alone: list them)' }
     'maintain'     = @{ Function = 'Invoke-LabMaintenance'; Group = 'Deploy'; Help = 'renew what is due (certificates, revocation lists); -List only shows it' }
     'connect'      = @{ File = 'scripts\commands\connect.ps1'; PassExitCode = $true; Group = 'Use'; Help = 'SSH to a lab machine as ansible (connect [vm] [command])' }
@@ -79,6 +82,7 @@ $script:LabCommands = [ordered]@{
     'trust'        = @{ File = 'scripts\host\Install-LabRootCA.ps1'; UserOnly = $true; Group = 'Your own window'; Help = 'let Windows trust the lab root CA (-Remove, -RemoveRetired)' }
     'recovery'     = @{ File = 'scripts\commands\recovery.ps1'; UserOnly = $true; Group = 'Your own window'; Help = 'the recovery kit (-Renew, -Open <file>, -Recover <file>)' }
     'mdad-upgrade' = @{ File = 'scripts\dev\Update-LabMdad.ps1'; Group = 'Maintainer'; Help = 'take a new matrix-docker-ansible-deploy commit into vendor\mdad' }
+    'rancher-upgrade' = @{ File = 'scripts\dev\Update-LabRancherChart.ps1'; Group = 'Maintainer'; Help = 'take another Rancher Manager chart version into vendor\rancher (-Version, -Sha256)' }
 }
 
 # lab.ps1's arguments for the command behind it, as @{ Positional = @(...); Named = @{...} } for

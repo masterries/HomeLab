@@ -1,0 +1,16 @@
+# Managed by ansible/kubernetes/rke2.yml. RKE2's ingress controller, Traefik (chart rke2-traefik),
+# runs as a DaemonSet with hostPort 80 and 443 on every node it may run on. By default it does not
+# tolerate the server's CriticalAddonsOnly taint, so it would run on the agents only. Central nginx
+# sends rancher.<domain> and hubble.<domain> to k8s-server:443 (config/nginx.json), so Traefik
+# runs on the server too. Traefik terminates TLS there with the certificates from the lab PKI
+# (Kubernetes secrets, rancher.yml) and passes the requests to the pods by host name.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists

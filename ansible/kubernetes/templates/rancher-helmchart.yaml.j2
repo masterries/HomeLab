@@ -1,0 +1,52 @@
+# Managed by ansible/kubernetes/rancher.yml. Rancher Manager, installed by RKE2's Helm controller:
+# a HelmChart object in /var/lib/rancher/rke2/server/manifests/ makes it run "helm install" (later
+# "helm upgrade" when this file changes) in a job, with the chart carried in the object itself
+# (chartContent: the vendored chart vendor/rancher/chart, packed and base64-encoded) - no Helm
+# repository is contacted. Release "rancher" in namespace cattle-system, as Rancher expects.
+#
+# failurePolicy abort: a failed install or upgrade stays failed for you to look at. The default
+# ("reinstall") would uninstall the release first, and the chart's post-delete hook would then
+# delete bootstrap-secret.
+#
+# Values (vendor/rancher/chart/values.yaml):
+#   replicas 1             one Rancher pod: the agents have 4 GB each (SUSE sizes production
+#                          Rancher at 16 GB per node, three nodes)
+#   ingress                Traefik terminates TLS with tls-rancher-ingress (a certificate from the
+#                          lab PKI, created by rancher.yml), HTTPS only (entrypoint websecure)
+#   privateCA, tls-ca      Rancher knows its certificate's CA: the lab root in tls-ca (cacerts.pem),
+#                          shown to agents as Rancher's CA; agentTLSMode strict = agents trust only
+#                          that CA, not the operating system's store
+#   useBundledSystemChart  Rancher's own system charts from its image, not from git.rancher.io
+#   CATTLE_FEATURES        features switched off (vars/kubernetes.yml)
+#   startupProbe           up to 10 minutes for the first start on 2 vCPUs (default 2 minutes)
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rancher
+  namespace: kube-system
+spec:
+  targetNamespace: cattle-system
+  createNamespace: true
+  failurePolicy: abort
+  # A failing job is retried 5 times (Kubernetes' default for the controller is 1000), so a
+  # broken install shows up as failed instead of retrying for hours.
+  backOffLimit: 5
+  chartContent: {{ rancher_chart_content }}
+  valuesContent: |-
+    hostname: {{ rancher_hostname }}
+    replicas: 1
+    ingress:
+      ingressClassName: traefik
+      tls:
+        source: secret
+        secretName: tls-rancher-ingress
+      extraAnnotations:
+        traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    privateCA: true
+    agentTLSMode: strict
+    useBundledSystemChart: true
+    extraEnv:
+      - name: CATTLE_FEATURES
+        value: "{{ rancher_features }}"
+    startupProbe:
+      failureThreshold: 60

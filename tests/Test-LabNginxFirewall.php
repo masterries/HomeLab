@@ -89,12 +89,12 @@ foreach ($lab['published'] as $pub) {
         check($rule['target'] === $wanted, $pub['vm'] . ' ' . $port['protocol'] . '/' . $port['port'] . ' targets ' . (($port['targetVm'] ?? '') === 'nginx' ? 'nginx' : 'its VM'));
     }
     $vm = $vms[$pub['vm']];
-    if (routed($pub)) {
+    if (routed($pub) && in_array($pub['vm'], $pub['names'], true)) {
         $reservation = $planned['dnsmasq']['hosts'][host_index($planned, $pub['vm'] . '-backend', true)];
         check($reservation['ip'] === $vm['ip'] && $reservation['hwaddr'] === lab_nginx_mac($vm), $pub['vm'] . ' backend reservation retains its IP/MAC');
     } else {
         $reservation = $planned['dnsmasq']['hosts'][host_index($planned, $pub['vm'], true)];
-        check($reservation['ip'] === $vm['ip'], $pub['vm'] . ' is direct and keeps its own reservation name');
+        check($reservation['ip'] === $vm['ip'], $pub['vm'] . (routed($pub) ? ' is routed under other names only and keeps its own reservation name' : ' is direct and keeps its own reservation name'));
     }
     foreach ($pub['names'] as $alias) {
         $expected = routed($pub) ? lab_nginx_host($alias, $nginxIp . ',' . $pub['address'], $lab['domain'])
@@ -224,18 +224,25 @@ $bad = $planned; unset($bad['dnsmasq']['hosts'][host_index($bad, 'nginx', true)]
 check(count($repaired['dnsmasq']['hosts']) === count($planned['dnsmasq']['hosts']) && $repaired['nat'] === $planned['nat'], 'bootstrap repairs only a missing nginx reservation on an initialized appliance');
 
 // --- Labs this helper did not know when it was written ---------------------------------------------
-// VMs in a further segment (Kubernetes, for example) and a new routed publication.
+// VMs in a further segment (Kubernetes, for example) and new routed publications: one under the
+// VM's own name (app), one under another name only (seg-node as seg-web, like k8s-server as
+// rancher), whose VM keeps its own reservation name.
 $segmentLab = $lab;
-$segmentLab['segments'] = [['name' => 'k8s', 'cidr' => '10.10.20.0/24']];
-$segmentLab['vms'][] = ['name' => 'k8s-server', 'mac' => '02000A0A140A', 'ip' => '10.10.20.10'];
+$segmentLab['segments'][] = ['name' => 'seg', 'cidr' => '10.10.30.0/24'];
+$segmentLab['vms'][] = ['name' => 'seg-node', 'network' => 'seg', 'mac' => '02000A0A1E3C', 'ip' => '10.10.30.60'];
 $segmentLab['vms'][] = ['name' => 'app', 'mac' => '02000A0A0A46', 'ip' => '10.10.10.70'];
-$segmentLab['published'][] = ['vm' => 'app', 'address' => '10.10.99.9', 'names' => ['app'], 'ports' => [['protocol' => 'tcp', 'port' => 443, 'targetVm' => 'nginx', 'description' => 'HTTPS (a new web service)']]];
+$segmentLab['published'][] = ['vm' => 'app', 'address' => '10.10.99.29', 'names' => ['app'], 'ports' => [['protocol' => 'tcp', 'port' => 443, 'targetVm' => 'nginx', 'description' => 'HTTPS (a new web service)']]];
+$segmentLab['published'][] = ['vm' => 'seg-node', 'address' => '10.10.99.30', 'names' => ['seg-web'], 'ports' => [['protocol' => 'tcp', 'port' => 443, 'targetVm' => 'nginx', 'description' => 'HTTPS (a web service in the segment)']]];
 $segmentBase = fresh_firewall($segmentLab);
 $segmentBase['dnsmasq']['hosts'] = array_values(array_filter($segmentBase['dnsmasq']['hosts'], fn($host) => ($host['host'] ?? '') !== 'other'));
 $segmentPlanned = lab_nginx_plan(lab_nginx_plan($segmentBase, $segmentLab, true), $segmentLab);
-check($segmentPlanned['nat']['rule'][rule_index($segmentPlanned, '10.10.99.9', 443)]['target'] === $nginxIp && lab_nginx_plan($segmentPlanned, $segmentLab) === $segmentPlanned, 'a new routed publication and a VM in a further segment are accepted');
-$outside = $segmentLab; $outside['vms'][] = ['name' => 'stray', 'mac' => '02000A0A1E0A', 'ip' => '10.10.30.10'];
+check($segmentPlanned['nat']['rule'][rule_index($segmentPlanned, '10.10.99.29', 443)]['target'] === $nginxIp && lab_nginx_plan($segmentPlanned, $segmentLab) === $segmentPlanned, 'a new routed publication and a VM in a further segment are accepted');
+check($segmentPlanned['nat']['rule'][rule_index($segmentPlanned, '10.10.99.30', 443)]['target'] === $nginxIp, 'the routed port of a segment VM goes to nginx');
+check($segmentPlanned['dnsmasq']['hosts'][host_index($segmentPlanned, 'seg-node', true)]['ip'] === '10.10.30.60', 'a VM published under another name only keeps its own reservation name');
+check(lab_nginx_managed_host($segmentPlanned['dnsmasq']['hosts'][host_index($segmentPlanned, 'seg-web')], lab_nginx_host('seg-web', $nginxIp . ',10.10.99.30', $lab['domain'])), 'its published name resolves to nginx in the lab');
+check(lab_nginx_managed_host($segmentPlanned['dnsmasq']['hosts'][host_index($segmentPlanned, 'app-backend', true)], lab_nginx_host('app-backend', '10.10.10.70', $lab['domain'], lab_nginx_mac(['mac' => '02000A0A0A46']))), 'a VM published under its own name moves to <vm>-backend');
+$outside = $segmentLab; $outside['vms'][] = ['name' => 'stray', 'mac' => '02000A0A280A', 'ip' => '10.10.40.10'];
 refused($segmentBase, $outside, 'a VM outside every lab network');
-$nginxElsewhere = $segmentLab; foreach ($nginxElsewhere['vms'] as &$vm) { if ($vm['name'] === 'nginx') { $vm['ip'] = '10.10.20.20'; } } unset($vm);
+$nginxElsewhere = $segmentLab; foreach ($nginxElsewhere['vms'] as &$vm) { if ($vm['name'] === 'nginx') { $vm['ip'] = '10.10.30.20'; } } unset($vm);
 refused($segmentBase, $nginxElsewhere, 'nginx outside the lab network');
 echo "nginx firewall plan: all tests passed\n";

@@ -19,6 +19,19 @@ the lab did not write itself lives here, unchanged, at one pinned version
 | Used by | `.\lab.ps1 deploy matrix` (`scripts\commands\deploy.ps1`, which first checks that `mdad\.lab-vendored-commit` and `mdad_version` in `ansible\playbooks\matrix-prepare.yml` name the same commit). Its first run is the run profile `matrix-prepare` (`config\run-profiles.json`), which has `syncMdad`: `scripts\lib\LabRun.ps1` packs `vendor\mdad` into an archive of its own for that run, and `ansible\bin\lab-run` replaces `~/mdad` on ansible-control with it (like `~/lab`: nothing of an earlier copy survives). Then `matrix-prepare.yml` checks the pinned commit and adds the lab's inventory and its entry point `lab-setup.yml`; the profile `matrix` (or `matrix-setup` with `-Setup`) runs MDAD in `~/mdad` through `ansible\bin\deploy-matrix` |
 | Upgrade | `.\lab.ps1 mdad-upgrade -Commit <sha>`: `git subtree pull` for MDAD, then its roles at the new versions, two commits; then read MDAD's CHANGELOG.md and follow the steps the script prints |
 
+## vendor\rancher - the Rancher Manager Helm chart
+
+| | |
+|---|---|
+| What | The Helm chart that installs Rancher Manager (SUSE's web UI and API for Kubernetes) on the lab's cluster: Kubernetes manifest templates (`chart\templates\`), default values (`chart\values.yaml`), the hook scripts (`chart\scripts\`) |
+| Upstream | the community Helm repository <https://releases.rancher.com/server-charts/stable>, file `rancher-<version>.tgz`; source <https://github.com/rancher/rancher/tree/v2.15.2/chart> |
+| Version | 2.15.2 (Rancher v2.15.2). `rancher\.lab-vendored-version` names it with the SHA-256 of the downloaded `.tgz`, `855cb9be954f65a31b9a8c77f7aebce125c2d7797425257d21d35e3380816ac8`, the `digest` of that version in the repository's `index.yaml`. Rancher publishes no signature (no `.prov` file), so this hash is the trust anchor |
+| How | `rancher\chart\` is the unpacked archive (its folder `rancher`), unchanged. No Git history to link: the archive is the release |
+| Licence | Rancher is Apache-2.0 (<https://github.com/rancher/rancher/blob/v2.15.2/LICENSE>). The chart's own README opens with a notice that installing it means accepting SUSE's End User License Agreement (<https://www.suse.com/licensing/eula/>) |
+| Changed | nothing |
+| Used by | `.\lab.ps1 deploy k8s`: the run profiles `k8s` and `k8s-rancher` list it under `vendor` (`config\run-profiles.json`), so `scripts\lib\LabRun.ps1` copies it to `~/lab/vendor/rancher` for that run. `ansible\kubernetes\rancher.yml` checks that `.lab-vendored-version` names `rancher_chart_version` (`ansible\kubernetes\vars\kubernetes.yml`), packs `chart\` reproducibly into a `.tgz` and hands it to RKE2's Helm controller inside a HelmChart object (`chartContent`): no Helm repository is contacted at deployment time |
+| Upgrade | `.\lab.ps1 rancher-upgrade -Version <v> -Sha256 <hash>` (`scripts\dev\Update-LabRancherChart.ps1`): downloads the `.tgz`, refuses it unless its SHA-256 matches, replaces `rancher\chart` and the marker. Then check the chart's `kubeVersion` against RKE2's version, set `rancher_chart_version`, commit, `.\lab.ps1 deploy k8s` |
+
 Why vendored and not cloned at deployment time:
 
 - **Transparency**: the code that runs is the code you can read here.

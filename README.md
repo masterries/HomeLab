@@ -865,7 +865,7 @@ with a warning.
 
 | Profile | What runs (in `~/lab` on ansible-control) | SSH certificate for | OpenBao token (policies) | Started by |
 |---|---|---|---|---|
-| `base`, `checks` | `base.yml` (zsh, console autologin), `checks.yml` (read-only checks of every machine) | base: nginx, matrix, keycloak, vault, rustfs (ansible-control itself is managed locally); checks: every machine | none | `lab.ps1 up`; `lab.ps1 test` (`checks`, and `base` with `--check`) |
+| `base`, `checks` | `base.yml` (zsh, console autologin), `checks.yml` (read-only checks of every machine) | base: nginx, matrix, keycloak, vault, rustfs and the four Kubernetes nodes (ansible-control itself is managed locally); checks: every machine | none | `lab.ps1 up`; `lab.ps1 test` (`checks`, and `base` with `--check`) |
 | `ping` | `ping.yml` | every machine | none | by hand |
 | `openbao` | `openbao.yml`: OpenBao's package, configuration file and service, nginx | vault | none | `lab.ps1 deploy vault` (also `lab.ps1 up` / `lab.ps1 maintain` when one of its renewals is due) |
 | `openbao-config` | `openbao-config.yml`: OpenBao's configuration plane, through its API | none | `openbao-config`, token role `ansible-config` | `lab.ps1 deploy vault` (as `openbao`); `lab.ps1 test` (`--check`) |
@@ -874,6 +874,7 @@ with a warning.
 | `firewall-nginx` | `firewall-nginx.yml`: bounded nginx DHCP/DNS bootstrap or web-forward cutover | firewall | none | `lab.ps1 up` (bootstrap only), then `lab.ps1 deploy nginx` (cutover) |
 | `keycloak` | `keycloak.yml` | keycloak | `ansible-keycloak` | `lab.ps1 deploy keycloak` (also `lab.ps1 up` / `lab.ps1 maintain` when its certificate is due) |
 | `matrix-prepare`, `matrix`, `matrix-setup`, `mdad` | `matrix-prepare.yml` (with `syncMdad`: `vendor\mdad` to `~/mdad` first), then `bin/deploy-matrix install-all` (`matrix-setup`: `setup-all`); `mdad` runs an MDAD playbook directly in `~/mdad` | matrix | `ansible-matrix` | `lab.ps1 deploy matrix` (`-Setup`: `matrix-setup`); `mdad` by hand |
+| `k8s`, `k8s-rke2`, `k8s-rancher`, `k8s-check` | `kubernetes/site.yml` (= `rke2.yml`, `rancher.yml`, `check.yml`, each also on its own); `k8s` and `k8s-rancher` also carry `vendor\rancher` (the profile's `vendor` list) to `~/lab/vendor/rancher` | k8s-server and the three agents (`k8s-rancher`, `k8s-check`: k8s-server only) | `ansible-k8s` (`k8s-check`: none) | `lab.ps1 deploy k8s` (also `lab.ps1 up` / `lab.ps1 maintain` when its certificates are due); the others by hand |
 | `hello-nginx` | `hello-nginx.yml`, the nginx demo | every machine | `ansible-web` | by hand |
 | `syntax`, `test-run-token`, `test-config-token`, `test-secret-creation`, `test-sleep` | `bin/syntax-check` (every playbook), the tests' helpers in `ansible/tests/`, `sleep 20` | none | `test-run-token` and `test-secret-creation`: `ansible-keycloak`; `test-config-token`: `openbao-config` (role `ansible-config`) | `lab.ps1 test` (`test-sleep`: by hand) |
 
@@ -893,11 +894,15 @@ automation that uses them.
 | Hyper-V switch | Switch type | Subnet | Members | Purpose |
 |---|---|---|---|---|
 | Default Switch | Built-in, NAT via Windows ICS | Chosen by Windows, changes on every reboot | PC, firewall `hn0` (WAN) | Internet uplink for the lab (the firewall's WAN side) |
-| LabHost | Internal (host + VMs) | 10.10.99.0/24 | PC `10.10.99.1`, firewall `hn2` (HOST) `10.10.99.2` and the virtual IPs `10.10.99.3` (matrix), `10.10.99.4` (keycloak), `10.10.99.5` (vault) and `10.10.99.6` (rustfs) | Fixed path from the PC into the lab: SSH to the bastion, DNS and the web GUI on `.2`; the published ports of each published VM on its own address |
+| LabHost | Internal (host + VMs) | 10.10.99.0/24 | PC `10.10.99.1`, firewall `hn2` (HOST) `10.10.99.2` and the virtual IPs `10.10.99.3` (matrix), `10.10.99.4` (keycloak), `10.10.99.5` (vault), `10.10.99.6` (rustfs) and `10.10.99.7` (k8s-server: Rancher, Hubble UI) | Fixed path from the PC into the lab: SSH to the bastion, DNS and the web GUI on `.2`; the published ports of each published VM on its own address |
 | LabNet | Private (VMs only, the PC has no adapter on it) | 10.10.10.0/24 | firewall `hn1` (LAN) `.1`, ansible-control `.10`, nginx `.20`, matrix `.30`, keycloak `.40`, vault `.50`, rustfs `.60`, DHCP pool `.100`-`.199` | The segmented lab network, reachable only through the firewall |
+| LabK8s | Private (VMs only) | 10.10.20.0/24 | firewall `hn3` (K8S, OPNsense `opt2`) `.1`, k8s-server `.10`, k8s-agent-1..3 `.11`-`.13`, DHCP pool `.100`-`.199` | The Kubernetes cluster's own segment: it may use DNS on `.1` and the internet, nothing in LabNet; from LabNet only ansible-control (SSH) and nginx (the published web ports) reach into it ([Kubernetes](#kubernetes-rke2-with-cilium-and-rancher-manager)) |
 
-LabHost is created once by `scripts/host/Initialize-LabHost.ps1`. LabNet is
-created by `scripts/commands/up.ps1`. Almost all addresses come from
+LabHost is created once by `scripts/host/Initialize-LabHost.ps1`. LabNet and
+the segments of `config/lab.json` (LabK8s) are created by `scripts/commands/up.ps1`
+and `lab.ps1 firewall` (`Initialize-LabPrivateSwitches` in
+[scripts/lib/LabNetwork.ps1](scripts/lib/LabNetwork.ps1), which also checks the
+segments' data for every reader). Almost all addresses come from
 [config/lab.json](config/lab.json), the main source for the lab's data (domain,
 networks, firewall addresses, lab VMs and what is published to your PC). The
 Vagrantfile, `lab.ps1 firewall` and `lab.ps1 up` read it;
@@ -919,7 +924,7 @@ and the matrix VM's published address as LiveKit's node IP,
 `livekit_server_config_rtc_node_ip` in the same `vars.yml`.
 
 **Why several addresses on the HOST side?** `10.10.99.2` is the firewall's
-management address (GUI, SSH, DNS). `10.10.99.3` to `10.10.99.6` are virtual
+management address (GUI, SSH, DNS). `10.10.99.3` to `10.10.99.7` are virtual
 IPs (VIPs: IP aliases on the same interface), one per published VM, listed under
 `published` in `config/lab.json`. A port forward is chosen by destination
 address **and** port, so `10.10.99.3:443` can lead to the matrix VM and
@@ -936,7 +941,7 @@ rules for administrators and for users never mix.
 
 ### Virtual machines
 
-The six Ubuntu VMs use the Vagrant box `gusztavvargadr/ubuntu-server-2404-lts`
+The ten Ubuntu VMs use the Vagrant box `gusztavvargadr/ubuntu-server-2404-lts`
 (Ubuntu 24.04 LTS) as Hyper-V linked clones; their names, MACs, IPs and sizes
 come from `vms` in `config/lab.json`. The firewall is built by
 `lab.ps1 firewall` from the official OPNsense 26.7 "nano" image (a
@@ -949,13 +954,15 @@ explains why that matters.
 
 | VM | Role | Addresses | DNS names | Size |
 |---|---|---|---|---|
-| firewall | OPNsense: router/NAT, pf packet filter, dnsmasq DHCP + DNS, SSH bastion, web GUI + REST API | `hn0` WAN: DHCP from the Default Switch (MAC 02:00:0a:0a:0a:fe); `hn1` LAN: 10.10.10.1 (MAC 02:00:0a:0a:0a:01); `hn2` HOST: 10.10.99.2 + virtual IPs 10.10.99.3, 10.10.99.4 and 10.10.99.5 (MAC 02:00:0a:0a:0a:02) | `firewall.lab.internal` (PC gets 10.10.99.2, lab gets central nginx 10.10.10.20 after ingress cutover) | Hyper-V Generation 1, 1 vCPU, 3 GB static RAM, 16 GB disk |
+| firewall | OPNsense: router/NAT, pf packet filter, dnsmasq DHCP + DNS, SSH bastion, web GUI + REST API | `hn0` WAN: DHCP from the Default Switch (MAC 02:00:0a:0a:0a:fe); `hn1` LAN: 10.10.10.1 (MAC 02:00:0a:0a:0a:01); `hn2` HOST: 10.10.99.2 + virtual IPs 10.10.99.3 to 10.10.99.7 (MAC 02:00:0a:0a:0a:02); `hn3` K8S: 10.10.20.1 (MAC 02:00:0a:0a:14:01) | `firewall.lab.internal` (PC gets 10.10.99.2, lab gets central nginx 10.10.10.20 after ingress cutover) | Hyper-V Generation 1, 1 vCPU, 3 GB static RAM, 16 GB disk |
 | ansible-control | Ansible control node: runs all playbooks and MDAD; holds the copy of the Ansible project (`~/lab`, replaced by a fresh copy on every run, see [Where code runs](#where-code-runs-the-pc-and-ansible-control)), a copy of the repository's `vendor\mdad` (`~/mdad`, replaced on every `lab.ps1 deploy matrix` run) and the public PKI files (`~/lab-pki`: root certificate and its CRL). No service secrets on disk: each run that needs OpenBao gets a run token from the PC (see [above](#where-secrets-and-certificates-come-from)); its only secret is its own SSH key, which opens nothing without the 2-hour certificate the PC signs for each run | 10.10.10.10 (MAC 02:00:0a:0a:0a:0a, DHCP reservation) | `ansible-control.lab.internal` | 2 vCPU, 2 GB |
 | matrix | The Matrix stack (MDAD): Traefik, Synapse, PostgreSQL, MAS, Element Web, LiveKit server and LiveKit JWT service, a static file server for `.well-known`, a Docker socket proxy; 9 systemd units `matrix-*.service` | 10.10.10.30 (MAC 02:00:0a:0a:0a:1e, DHCP reservation) | `matrix.lab.internal`, `element.lab.internal`, `lab.internal` (published: PC gets 10.10.99.3, lab gets 10.10.10.20 after ingress cutover) | 4 vCPU, 8 GB |
 | nginx | Native nginx with the Ubuntu stream module; central SNI routing for application HTTPS and Matrix HTTP forwarding; no application stack or web administration UI | 10.10.10.20 (MAC 02:00:0a:0a:0a:14, DHCP reservation) | `nginx.lab.internal` (private management name; no separate published address) | 1 vCPU, 1 GB; Hyper-V checkpoints off, no console autologin |
 | keycloak | Keycloak 26.8.1 and its PostgreSQL 18.6 as a Docker Compose project in `/opt/keycloak-stack` | 10.10.10.40 (MAC 02:00:0a:0a:0a:28, DHCP reservation) | `keycloak.lab.internal` (published: PC gets 10.10.99.4, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 4 GB |
 | vault | OpenBao 2.7.1 (secrets manager and intermediate CA) with its data in `/opt/openbao/data`; nginx on port 80 for the CA certificates and CRLs | 10.10.10.50 (MAC 02:00:0a:0a:0a:32, DHCP reservation) | `vault.lab.internal` (published: PC gets 10.10.99.5, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 2 GB; Hyper-V checkpoints off, no console autologin |
 | rustfs | RustFS 1.0.3, S3 API and browser console over HTTPS through nginx; persistent objects in `/var/lib/rustfs/data` | 10.10.10.60 (MAC 02:00:0a:0a:0a:3c, DHCP reservation) | `rustfs.lab.internal`, `rustfs-console.lab.internal` (published: PC gets 10.10.99.6, lab gets 10.10.10.20 after ingress cutover) | 2 vCPU, 4 GB; Hyper-V checkpoints off, no console autologin |
+| k8s-server | Kubernetes control plane (RKE2 server: API server, etcd, scheduler, controller manager), Cilium agent, Traefik (the cluster's ingress, hostPort 443) | 10.10.20.10 in LabK8s (MAC 02:00:0a:0a:14:0a, DHCP reservation) | `k8s-server.lab.internal`; Rancher and Hubble UI are published as `rancher.lab.internal`, `hubble.lab.internal` (PC gets 10.10.99.7, LabNet gets nginx 10.10.10.20) | 2 vCPU, 4 GB; Hyper-V checkpoints off (etcd) |
+| k8s-agent-1..3 | Kubernetes workers (RKE2 agents): Cilium, cilium-operator, Hubble, CoreDNS, Traefik, Rancher Manager and its helpers | 10.10.20.11 to .13 in LabK8s (MACs 02:00:0a:0a:14:0b to :0d) | `k8s-agent-1.lab.internal` ... | 2 vCPU, 4 GB each |
 
 The Matrix stack in detail, as deployed (the versions come with the pinned MDAD
 commit, except where the lab pins them itself):
@@ -983,11 +990,13 @@ configures its engines from ansible-control, see *Who configures OpenBao* in
 | OpenBao | 2.7.1 (pinned; the package is held) | API, web UI (`/ui/`) and ACME directory on port 8200, TLS with a certificate signed by the offline root; secrets engine `lab` (key/value, version 2), PKI mount `pki_int` (the intermediate CA), logins by AppRole (the PC) and by token role (Ansible runs); integrated storage ("raft") in `/opt/openbao/data`; audit log `/var/log/openbao/audit.log` (every request, secret values replaced by HMAC hashes), rotated by logrotate |
 | nginx | Ubuntu's package | Port 80: only the CA certificates and CRLs (`/pki/root-ca.crt` and `/pki/root-ca.crl` from disk, the read-only CA and CRL paths of `pki_int` from OpenBao); everything else answers 404, so the API is never reachable without TLS |
 
-The firewall's adapters are added in the order WAN, LAN, HOST, so FreeBSD names
-them `hn0`, `hn1`, `hn2` (`hn` is the driver for Hyper-V network adapters). The
-OPNsense configuration binds its interfaces `wan`, `lan` and `opt1` (description
-"HOST") to exactly these names, and the build checks the mapping by MAC address
-after the first boot.
+The firewall's adapters are added in the order WAN, LAN, HOST, then one per
+segment of `config/lab.json` (K8S), so FreeBSD names them `hn0`, `hn1`, `hn2`,
+`hn3` (`hn` is the driver for Hyper-V network adapters). The OPNsense
+configuration binds its interfaces `wan`, `lan`, `opt1` (description "HOST") and
+`opt2` ("K8S") to exactly these names, and the build checks the mapping by MAC
+address after the first boot. A segment is always appended, never inserted, so
+the first three keep their names.
 
 All static MACs start with `02`, which marks a "locally administered" address
 that no network card vendor uses, so they cannot clash with real hardware. The
@@ -1000,7 +1009,7 @@ addresses easy to read. Hyper-V writes MACs without separators (`02000A0A0A1E`,
 as in `config/lab.json`), OPNsense and dnsmasq with colons
 (`02:00:0a:0a:0a:1e`, as in the firewall's `config.xml`).
 
-The six Ubuntu VMs also get, from Vagrant's provisioning
+Every Ubuntu VM also gets, from Vagrant's provisioning
 ([provision/](provision/), only what must exist before Ansible can reach a VM):
 
 - user `ansible` with passwordless sudo, which logs in only with an SSH
@@ -1061,7 +1070,7 @@ ports (the table below has every row). An arrow is the direction a connection
 is opened in; replies to it pass automatically, because pf is stateful. The
 SSH jump is not a pf rule: sshd on the firewall allows forwarding only to port
 22 of the lab VMs (`PermitOpen`), and those connections leave from the
-firewall's LAN address.
+firewall's address in the VM's network (LAN 10.10.10.1, or 10.10.20.1 in LabK8s).
 
 ```mermaid
 flowchart LR
@@ -1073,7 +1082,9 @@ flowchart LR
         vip3["10.10.99.3<br>published matrix"]
         vip4["10.10.99.4<br>published keycloak"]
         vip5["10.10.99.5<br>published vault"]
+        vip7["10.10.99.7<br>published rancher, hubble"]
         lan["LAN 10.10.10.1<br>DHCP, DNS, SSH, API"]
+        k8sif["K8S 10.10.20.1<br>DHCP, DNS only"]
         wan["WAN, Default Switch<br>outbound NAT"]
     end
     subgraph LABNET["LabNet 10.10.10.0/24, one switch"]
@@ -1081,6 +1092,10 @@ flowchart LR
         matrix["matrix 10.10.10.30<br>Traefik 443 and 80, LiveKit 7881 and 7882"]
         keycloak["keycloak 10.10.10.40<br>Keycloak 443"]
         vault["vault 10.10.10.50<br>OpenBao 8200, nginx 80"]
+    end
+    subgraph LABK8S["LabK8s 10.10.20.0/24, one switch"]
+        k8sserver["k8s-server 10.10.20.10<br>API server, etcd, Traefik 443"]
+        k8sagents["k8s-agent-1..3<br>Rancher, Hubble, Cilium"]
     end
     internet(("Internet"))
 
@@ -1091,6 +1106,12 @@ flowchart LR
     vip3 -->|DNAT, same ports| matrix
     vip4 -->|DNAT 443| keycloak
     vip5 -->|DNAT 8200 and 80| vault
+    browser -->|443| vip7
+    vip7 -->|DNAT 443 to central nginx, then by SNI| k8sserver
+    control -->|SSH 22 only| LABK8S
+    LABK8S -->|DNS 53| k8sif
+    LABK8S -->|internet only, NAT to the WAN address| wan
+    LABK8S --x|blocked and logged: LabNet, the HOST and WAN networks| LABNET
     lan -->|SSH jump via sshd, only port 22 of the lab VMs| LABNET
     LABNET -->|any port| lan
     LABNET -->|internet only, NAT to the WAN address| wan
@@ -1105,16 +1126,25 @@ flowchart LR
 | PC 10.10.99.1 (LabHost) | firewall 10.10.99.2: any other port, including HTTP 80 (the GUI's HTTP -> HTTPS redirect is switched off) | no |
 | PC (LabHost) | published address 10.10.99.3: TCP 443, TCP 80, TCP 7881, UDP 7882 | yes: 443/80 to central nginx 10.10.10.20, then matrix 10.10.10.30; media 7881/7882 directly to matrix |
 | PC (LabHost) | published address 10.10.99.4: TCP 443 | yes, forwarded to central nginx 10.10.10.20, then by SNI to keycloak 10.10.10.40 |
-| PC (LabHost) | published address 10.10.99.5: TCP 443, TCP 8200, TCP 80 | yes, forwarded through central nginx to vault 10.10.10.50: HTTPS to OpenBao with trusted original-source metadata, HTTP to the existing CA/CRL allow-list |
+| PC (LabHost) | published address 10.10.99.5: TCP 8200, TCP 80 | yes, forwarded directly to vault 10.10.10.50 (never through nginx: OpenBao binds logins and tokens to client addresses, which a proxy would hide): HTTPS to OpenBao, HTTP to the CA/CRL allow-list |
 | PC 10.10.99.1 (LabHost) | published address 10.10.99.6: TCP 443 | yes, PC-only forward to central nginx 10.10.10.20, then by SNI to RustFS's local nginx at 10.10.10.60:443 |
+| PC 10.10.99.1 (LabHost) | published address 10.10.99.7: TCP 443 | yes, PC-only forward to central nginx 10.10.10.20, then by SNI (`rancher`, `hubble`) to Traefik on k8s-server 10.10.20.10:443 |
 | PC (LabHost) | published addresses: anything else, including DNS, SSH and Matrix federation 8448 | no |
 | PC (LabHost) | ansible-control, matrix, keycloak, vault directly | no. Use SSH through the firewall (jump host) |
 | Default Switch (WAN) | firewall | no. There is no pass rule on WAN, so pf's default applies. Vagrant does not use this side |
 | Lab VMs (LabNet) | firewall at 10.10.10.1 | yes, every port (DHCP, DNS, SSH and GUI/API for ansible-control; a lab shortcut, see [section 10](#10-security-notes)) |
 | Lab VMs (LabNet) | internet | yes, behind the firewall's WAN address (automatic outbound NAT) |
-| Lab VMs (LabNet) | HOST network 10.10.99.0/24: the PC at 10.10.99.1 and the firewall's HOST side (.2 to .5) | no, blocked and logged by the first LAN rule |
+| Lab VMs (LabNet) | HOST network 10.10.99.0/24: the PC at 10.10.99.1 and the firewall's HOST side (.2 to .7) | no, blocked and logged by the first LAN rule |
 | Lab VMs (LabNet) | WAN network (the Hyper-V Default Switch subnet), which includes your PC's Default Switch address | no, blocked and logged by the second LAN rule (otherwise the lab could reach Windows services on the PC through outbound NAT) |
 | Lab VM | other lab VM (for example MAS on matrix to Keycloak's 443; ansible-control and Traefik to OpenBao's 8200; OpenBao to Traefik's 80 for the ACME challenge) | yes. Same switch, so this traffic never passes the firewall. (SSH logins between lab VMs are refused by sshd itself, except from ansible-control: `AllowUsers` in [provision/harden-ssh.sh](provision/harden-ssh.sh)) |
+| ansible-control 10.10.10.10 | LabK8s 10.10.20.0/24: TCP 22 | yes (Ansible manages the nodes over SSH) |
+| nginx 10.10.10.20 | k8s-server 10.10.20.10: TCP 443 | yes, generated from the published port with `targetVm` nginx |
+| Lab VMs (LabNet) | LabK8s: anything else | no, blocked and logged, before "Lab to internet" |
+| Kubernetes nodes (LabK8s) | firewall 10.10.20.1: DNS 53 (UDP and TCP), DHCP | yes (DHCP through the rules dnsmasq registers itself) |
+| Kubernetes nodes (LabK8s) | firewall 10.10.20.1: any other port | no, blocked and logged |
+| Kubernetes nodes (LabK8s) | LabNet, the HOST network, the WAN network | no, blocked and logged: the cluster cannot open a connection into the lab |
+| Kubernetes nodes (LabK8s) | internet | yes, behind the firewall's WAN address (images, Rancher's catalog data). Pods leave with their node's address (Cilium masquerades), so the firewall never sees pod addresses |
+| Kubernetes node | other Kubernetes node (API 6443, supervisor 9345, kubelet 10250, Cilium health 4240, Hubble 4244, routed pod traffic 10.42.0.0/16) | yes. Same switch, never passes the firewall |
 | firewall itself | internet | yes (upstream DNS, OPNsense updates) |
 | Anything else | anything | blocked (pf default deny) |
 
@@ -1125,8 +1155,15 @@ reach the internet. 10.10.99.5 was added later: it answers on 8200 and 80, as
 the checks at the end of `lab.ps1 deploy vault` show; the full port check was not
 repeated for it.
 
+The rules of the segments (into LabK8s on the LAN side, and everything coming in
+on K8S) are generated by `lab.ps1 firewall` from `segments` and `published` in
+`config/lab.json` (`New-FirewallConfig` in
+[scripts/lib/LabFirewall.ps1](scripts/lib/LabFirewall.ps1), placeholders
+`<!--{{SEGMENT_LAN_RULES}}-->` and `<!--{{SEGMENT_RULES}}-->`); the LAN rule "Lab
+to internet and firewall services" is sequence 90 so they come first.
+
 Besides the rules in the template, OPNsense adds some by itself: the DHCP rules
-on LAN (`default_fw_rules` in the dnsmasq section) and one filter rule for each
+on LAN and the segments (`default_fw_rules` in the dnsmasq section) and one filter rule for each
 port forward ("register rule", `<pass>rule</pass>`). Ping from the PC works only
 to 10.10.99.2. Nothing is forwarded to a lab VM except the published ports, so
 ping from the PC to a lab VM or to a published address gets no answer.
@@ -2323,6 +2360,137 @@ and SSH trust checks with:
 
 The console is available at [https://rustfs-console.lab.internal](https://rustfs-console.lab.internal).
 
+### Kubernetes: RKE2 with Cilium and Rancher Manager
+
+A Kubernetes cluster of four VMs in a network segment of its own, LabK8s
+(10.10.20.0/24): **k8s-server** runs the control plane, **k8s-agent-1..3** are the
+workers. The code is in its own folder,
+[ansible/kubernetes/](ansible/kubernetes/), because the cluster is a stack of its own.
+
+| Layer | What | Version (pinned) |
+|---|---|---|
+| Distribution | RKE2 ("RKE Government"), SUSE's Kubernetes: one binary that runs containerd, the kubelet and, on a server, the control plane (API server, etcd, scheduler, controller manager) as static pods; its add-ons come as Helm charts it applies itself | v1.36.5+rke2r1 (Kubernetes 1.36.5), release files checked against pinned SHA-256 hashes |
+| Network (CNI) | Cilium: pod addresses and routing between the nodes, Kubernetes Services in eBPF instead of kube-proxy, network policies, Hubble (flow visibility) | 1.20.2, RKE2's bundled chart |
+| Ingress | Traefik, RKE2's default ingress controller (ingress-nginx is retired), a DaemonSet with hostPort 80/443 | v3.7.13, bundled |
+| Management | Rancher Manager: web UI and API for Kubernetes, here for its own cluster ("local") | 2.15.2, chart vendored in [vendor/rancher](vendor/rancher/) |
+
+**Deploying it.** The segment needs a firewall with a fourth adapter, so on an
+existing lab the order is (all from the project folder, elevated where marked):
+
+```powershell
+.\lab.ps1 deploy vault              # policy ansible-k8s, PKI role k8s-ingress, SSH roles for the four nodes
+.\lab.ps1 firewall -Rebuild         # elevated: switch LabK8s, adapter hn3, interface, DHCP, rules
+.\lab.ps1 up                        # elevated: creates the four VMs (16 GB of RAM together)
+.\lab.ps1 deploy nginx              # routes rancher.lab.internal and hubble.lab.internal
+.\lab.ps1 deploy k8s                # RKE2, Cilium, Rancher, Hubble UI, checks
+```
+
+This PC's SSH certificate must allow the jump from the firewall's address in the
+new segment (10.10.20.1, its `source-address`); it is renewed by itself as soon as
+`config/lab.json` names another address list. A new lab gets all of it from `up`
+and `deploy all`. `deploy k8s` runs
+[kubernetes/site.yml](ansible/kubernetes/site.yml) on ansible-control (profile
+`k8s`), with an SSH certificate for the four nodes only and an OpenBao token with
+the policy `ansible-k8s`:
+
+1. [rke2.yml](ansible/kubernetes/rke2.yml): the two join tokens from OpenBao
+   (`lab/k8s/rke2/token`, `lab/k8s/rke2/agent-token`, generated there on the first
+   run); RKE2 and its image archives (about 1.2 GB per node) from GitHub, each
+   checked against its hash in
+   [vars/kubernetes.yml](ansible/kubernetes/vars/kubernetes.yml); the server's
+   `config.yaml` and the add-on settings for Cilium and Traefik; the server starts,
+   the agents join with the agent token in its full form (`K10<hash of the cluster
+   CA>::node:<secret>`, so an agent refuses a server with another CA); then every
+   node Ready, Cilium healthy and replacing kube-proxy.
+2. [rancher.yml](ansible/kubernetes/rancher.yml): TLS certificates for
+   `rancher.lab.internal` and `hubble.lab.internal` (keys made on k8s-server,
+   signed by OpenBao's intermediate CA, role `k8s-ingress`) as Kubernetes secrets;
+   the lab root as Rancher's CA; Rancher's first admin password from OpenBao
+   (`lab/k8s/rancher/bootstrap-password`); Rancher as a HelmChart object (below);
+   the Ingress for Hubble UI.
+3. [check.yml](ansible/kubernetes/check.yml): nodes, Cilium, Rancher, and both
+   names through central nginx with certificates from the current intermediate.
+   It runs alone too: `.\lab.ps1 run k8s-check`.
+
+**Using it.**
+
+- Rancher Manager: <https://rancher.lab.internal>, user `admin`. The first
+  password goes to the clipboard with `.\lab.ps1 secret k8s/rancher/bootstrap-password`;
+  Rancher asks for a new one at the first login, which is then yours. In Rancher,
+  "local" is this cluster: workloads, nodes, events, a kubectl shell in the
+  browser.
+- Hubble UI: <https://hubble.lab.internal>, Cilium's map of which pod talks to which
+  (choose a namespace, e.g. `cattle-system`). It has no login of its own, so only
+  your PC and LabNet reach it.
+- kubectl on the server: `.\lab.ps1 connect k8s-server`, then
+  `sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o wide`
+  (RKE2 brings kubectl but does not put it on the PATH; the admin kubeconfig is
+  root's only).
+
+**How the pieces fit, and why.**
+
+- **A segment of its own.** The nodes may use DNS on the firewall and the
+  internet, and nothing in LabNet: a compromised pod cannot open a connection to
+  OpenBao, Keycloak or ansible-control. From LabNet only ansible-control (SSH) and
+  central nginx (port 443 of k8s-server) get in
+  ([What is allowed where](#what-is-allowed-where)). Traffic between the nodes
+  never passes the firewall: they share one switch. Enterprise equivalent: a
+  cluster subnet or VPC of its own, with the firewall or security groups between
+  zones.
+- **A dedicated control plane.** k8s-server carries the taint
+  `CriticalAddonsOnly=true:NoExecute`: only pods that tolerate it run there
+  (Cilium's agent, CoreDNS, Traefik), Rancher and everything else on the agents.
+  With 4 GB, etcd and the API server need the room. One consequence: cilium-operator
+  cannot run on the server, and Cilium's agent waits for the operator's CRDs, so
+  the server stays NotReady until the first agent has joined. `rke2.yml` therefore
+  waits for the API server (`/readyz`), not for the server node, before the agents
+  join ([P54](#p54-the-kubernetes-server-stays-notready)).
+- **Cilium without kube-proxy, routed natively.** kube-proxy turns every Service
+  into iptables rules on every node; Cilium does the same job with eBPF programs
+  in the kernel (`kubeProxyReplacement`). Because all nodes are on one network,
+  pod traffic between nodes is plainly routed (`routingMode: native`), not wrapped
+  in VXLAN tunnels: full MTU, and `tcpdump` on a node shows pod addresses.
+  Everything a pod sends out of the cluster leaves with its node's address
+  (masquerading), so the firewall never sees 10.42.x.x. Pods: 10.42.0.0/16,
+  Services: 10.43.0.0/16 (RKE2's defaults; they exist only inside the cluster).
+- **The way in.** Your browser -> 10.10.99.7:443 (published, PC only) -> central
+  nginx, which picks the route by SNI (`rancher`, `hubble`: management source
+  policy, as for RustFS) -> Traefik on k8s-server, hostPort 443, which terminates
+  TLS with the lab certificate and passes the request to the pod. Traefik
+  normally avoids the tainted server; the `rke2-traefik` HelmChartConfig gives it
+  the toleration, so nginx has one fixed address to forward to. Enterprise
+  equivalent: a load balancer in front of several ingress nodes, or a
+  LoadBalancer Service (Cilium can announce one with LB-IPAM and L2
+  announcements; a later step here).
+- **Helm without Helm.** RKE2's Helm controller installs every chart that is
+  described by a `HelmChart` object in `/var/lib/rancher/rke2/server/manifests/`
+  (RKE2 applies that folder by itself, and again when a file changes). Rancher's
+  object carries the chart itself (`chartContent`: the vendored
+  `vendor/rancher/chart`, packed the same way on every run), so no Helm
+  repository is contacted and nothing changes unless the chart or its values do.
+  `failurePolicy: abort` keeps a failed install for you to inspect instead of
+  uninstalling it. The settings of RKE2's own charts (Cilium, Traefik) are
+  `HelmChartConfig` objects in the same folder.
+- **Rancher's certificates.** No cert-manager: Traefik serves
+  `tls-rancher-ingress` (certificate and intermediate from OpenBao), and Rancher
+  knows the lab root as its CA (`privateCA`, secret `tls-ca`), which its agents
+  then trust exclusively (`agentTLSMode: strict`). The root only, so a new
+  intermediate CA changes nothing there. The certificates are renewed by
+  `deploy k8s` 30 days before they expire or after a new intermediate (`lab.ps1
+  up` runs it when due).
+
+**Limits.** One server: no high availability of the control plane (etcd takes
+snapshots every 12 hours to `/var/lib/rancher/rke2/server/db/snapshots`, on the
+same VM). 4 GB per node is RKE2's minimum and far below what SUSE sizes for
+Rancher in production (16 GB per node, three nodes); Rancher runs with one
+replica, and `turtles` (Cluster API) and `harvester` are switched off. The pods
+cannot use the lab's services (Keycloak, OpenBao, RustFS): the firewall keeps the
+segment out of LabNet, and the lab's split DNS has no answer for a third network
+(a published name resolves there to both its addresses, neither of them
+reachable). Rancher logs in with a local admin, not through Keycloak. RKE2's
+image archives are pinned by hash, Rancher's own images by tag (the chart's
+choice).
+
 ## 5. Everyday operations
 
 ### The lab.ps1 commands
@@ -2342,7 +2510,7 @@ equivalent: one command-line tool with subcommands, like `az`, `kubectl` or `gh`
 | `up` | build or start the lab and bring it up to date, also after every Windows restart ([After a Windows restart](#after-a-windows-restart)) | elevated |
 | `down` | delete the lab VMs, or one (`down matrix`); asks first ([Rebuild one VM or the whole lab](#rebuild-one-vm-or-the-whole-lab)) | elevated |
 | `firewall` | build (`-Rebuild`) or check the OPNsense firewall VM | elevated |
-| `deploy` | deploy `vault`, `firewall`, `nginx`, `keycloak`, `matrix`, `rustfs`, or `all` (these six in this order, stopping at the first failure) ([Run a playbook, re-run a deployment](#run-a-playbook-re-run-a-deployment)) | |
+| `deploy` | deploy `vault`, `firewall`, `nginx`, `keycloak`, `matrix`, `rustfs`, `k8s`, or `all` (these seven in this order, stopping at the first failure) ([Run a playbook, re-run a deployment](#run-a-playbook-re-run-a-deployment), [Kubernetes](#kubernetes-rke2-with-cilium-and-rancher-manager)) | |
 | `run` | one Ansible run on ansible-control: `run <profile>` or `run <playbook.yml>`, then options for `ansible-playbook`; without arguments it lists the run profiles | |
 | `maintain` | renew what is due (certificates, revocation lists); `-List` only shows it | |
 | `connect` | SSH to a lab machine as `ansible`: `connect [vm] [command]` ([Log in to a VM](#log-in-to-a-vm)) | |
@@ -2357,6 +2525,7 @@ equivalent: one command-line tool with subcommands, like `az`, `kubectl` or `gh`
 | `trust` | let Windows trust the lab root CA (`-Remove`, `-RemoveRetired`) ([Step 4](#step-4-trust-the-lab-root-ca-once-you-run-it-yourself)) | your own window |
 | `recovery` | the recovery kit (`-Renew`, `-Open <file>`, `-Recover <file>`) ([Step 5](#step-5-make-the-recovery-kit-once-you-run-it-yourself)) | your own window |
 | `mdad-upgrade` | take a new matrix-docker-ansible-deploy commit into `vendor\mdad` ([Upgrade MDAD](#upgrade-mdad-and-with-it-the-matrix-components)) | |
+| `rancher-upgrade` | take another Rancher Manager chart version into `vendor\rancher` (`-Version`, `-Sha256`; [Kubernetes](#kubernetes-rke2-with-cilium-and-rancher-manager)) | |
 
 An empty "Needs" means any PowerShell window, as your own Windows user, also with the output
 redirected to a file.
@@ -2918,6 +3087,7 @@ profile gets which policy is its `policies` in
 | `keycloak` (`keycloak.yml`) | `ansible-keycloak` | create and read `lab/keycloak/*`, generate passwords (`lab-alnum-24`, `-48`), have OpenBao sign certificates of the PKI role `keycloak` |
 | `matrix-prepare` (`matrix-prepare.yml`), and MDAD's runs: `matrix`, `matrix-setup`, `mdad` | `ansible-matrix` | create and read `lab/matrix/*`, read (only) the MAS client secret `lab/keycloak/clients/matrix-authentication-service`, generate passwords (`lab-alnum-64`), mint ACME binding keys for Traefik (`pki_int/roles/acme-matrix/acme/new-eab`) and delete an unused one (`pki_int/eab/*`) |
 | `firewall` (`firewall.yml`) | `ansible-firewall` | have OpenBao sign certificates of the PKI role `firewall-gui` (only the name `firewall.<domain>`); no secrets |
+| `k8s`, `k8s-rke2`, `k8s-rancher` (`ansible/kubernetes/`) | `ansible-k8s` | create and read `lab/k8s/*` (RKE2's join tokens, Rancher's first admin password), generate passwords (`lab-alnum-24`, `-64`), have OpenBao sign certificates of the PKI role `k8s-ingress` (`rancher.<domain>`, `hubble.<domain>`) |
 | `hello-nginx` (`hello-nginx.yml`) | `ansible-web` | have OpenBao sign certificates of the PKI role `web`; no secrets |
 | `openbao-config` (`openbao-config.yml`) | `openbao-config`, through the token role `ansible-config` | configure the engines: the KV mount `lab` and its settings, the password policies, the `pki_int` mount with its URLs, revocation list, tidying, PKI roles and ACME. Never a policy, a login, a token role, the SSH CA, a CA's import or choice, a certificate or a secret; the playbook stops unless its token has exactly this policy |
 | `ping`, `base`, `checks`, `openbao`, `nginx`, `firewall-nginx`, `syntax` | none | (they need no token: they do not contact OpenBao, except `openbao.yml`, which only calls the unauthenticated health endpoint `sys/health`) |
@@ -3059,6 +3229,9 @@ own settings for MDAD belong in `ansible\matrix\`.
 | `config/nginx.json`, `ansible/playbooks/nginx.yml`, `ansible/templates/nginx/*` | `.\lab.ps1 deploy nginx`: validate and start nginx, then reconcile the bounded web-forward targets. Backend certificates and application routes must cover any new hostname. See [Central nginx domain routing](#central-nginx-domain-routing) |
 | `config/lab.json`: `published` (addresses, names, ports) | `.\lab.ps1 firewall -Rebuild` (about 4 minutes; see [Publish a name or a port](#publish-a-name-or-a-port)). If the matrix entry's `address` changes, also set `livekit_server_config_rtc_node_ip` in `vars.yml` to it and run `.\lab.ps1 deploy matrix`, or calls connect without media ([P35](#p35-a-call-connects-but-no-audio-or-video-flows)) |
 | `config/lab.json`: a new lab VM | see [Add a VM](#add-a-vm): firewall rebuild, `.\lab.ps1 deploy vault` (OpenBao's SSH roles learn the new name), then `.\lab.ps1 up` |
+| `config/lab.json`: a new segment (`segments`), or a VM moved to one (`network`) | `.\lab.ps1 deploy vault` (SSH roles; the PC's own certificate renews itself to allow the jump from the firewall's address in the new segment), `.\lab.ps1 firewall -Rebuild` (it creates the switch, and the firewall gets the new adapter; an existing firewall without it is refused), `.\lab.ps1 up`, `.\lab.ps1 deploy nginx` |
+| `ansible/kubernetes/*` (RKE2, Cilium, Rancher, Hubble UI), `config/openbao/policies/ansible-k8s.hcl` | `.\lab.ps1 deploy k8s` (a new policy also needs `.\lab.ps1 deploy vault`). RKE2 cannot change the CNI or the cluster networks of an existing cluster: for those, rebuild the four nodes |
+| A new Rancher chart version (`vendor\rancher`) | `.\lab.ps1 rancher-upgrade -Version <v> -Sha256 <hash>`, then `rancher_chart_version` in `ansible/kubernetes/vars/kubernetes.yml`, then `.\lab.ps1 deploy k8s` (it refuses while the two differ) |
 | `config/lab.json`: an existing VM's `cpus` or `memory` | `vagrant reload <vm>` in the `vagrant` folder (the VM restarts; after a reload of vault, `.\lab.ps1 unseal`) |
 | `config/lab.json`: an existing VM's MAC or IP | `.\lab.ps1 down <vm>`, then `.\lab.ps1 firewall -Rebuild` and `.\lab.ps1 up`. For vault this means a new, empty OpenBao (see [Rebuild one VM or the whole lab](#rebuild-one-vm-or-the-whole-lab)) |
 | `config/lab.json`: the `firewall` data | `.\lab.ps1 firewall -Rebuild`. If `hostIp` or `pcIp` changes: first update the matching values in `lab.ps1 host-setup` (the PC's 10.10.99.1 and its DNS server 10.10.99.2) and run it, then `.\lab.ps1 down firewall` and `.\lab.ps1 up`, which rewrites `keys\ssh_config` with the new address (step 2) before it builds the firewall (step 4). A plain `-Rebuild` would still try the old address from `keys\ssh_config` for SSH and fail. Note: the PC's OpenBao logins (`pc-admin`, `pc-deploy`, and the break-glass login `recovery` in the recovery file) are bound to the PC's address and stop working after a change of `pcIp`; no script handles that yet. With them OpenBao's signing of SSH certificates stops (its role `pc` also names the old address), so until then the SSH certificates come from the offline SSH CA (`.\lab.ps1 breakglass <command>`) |
@@ -3081,7 +3254,7 @@ own settings for MDAD belong in `ansible\matrix\`.
 | Other playbooks (`ping.yml`, `checks.yml`, `hello-nginx.yml`) | `.\lab.ps1 run <playbook>` |
 | `ansible/playbooks/base.yml`, `ansible/files/base/*` (zsh and its history search, the console autologin), a VM's `consoleAutologin` in `config/lab.json` | `.\lab.ps1 up` (it runs `base.yml` on every run) or, quicker, `.\lab.ps1 run base`; `.\lab.ps1 run base --check --diff` shows first what would change |
 | `provision/*.sh` (the bootstrap: user `ansible`, SSH with certificates, Ansible on ansible-control) | `.\lab.ps1 up` (it always re-runs provisioning of the Ubuntu VMs). Exception: a new `ANSIBLE_VERSION` in `bootstrap-ansible-control.sh` reaches an existing ansible-control only with the command below |
-| The SSH certificate roles, `$LabSshRoles` in `scripts/lib/LabSsh.ps1` (lifetimes, extensions, source addresses) | `.\lab.ps1 deploy vault`, which makes OpenBao's SSH roles from the same table. Certificates already issued keep their contents until they are renewed: the PC's at once with `.\lab.ps1 ssh-cert -Force`, a run's with the next run, host certificates 30 days before they expire |
+| The SSH certificate roles, `$LabSshRoles` in `scripts/lib/LabSsh.ps1` (lifetimes, extensions, source addresses) | `.\lab.ps1 deploy vault`, which makes OpenBao's SSH roles from the same table. User certificates ask OpenBao for the source addresses the table gives now, so a changed address list (a new segment) works before that. Certificates already issued keep their contents until they are renewed: the PC's at once with `.\lab.ps1 ssh-cert -Force` (by itself when its source addresses no longer match), a run's with the next run, host certificates 30 days before they expire |
 | `opnsense/sshd_config.d/20-lab-ssh.conf`, `opnsense/lab-sshd-files.sh`, `opnsense/lab-ssh-trust.php` | `.\lab.ps1 firewall` or `.\lab.ps1 up` (the firewall's SSH setup is applied again on every run, no rebuild) |
 | Nothing, but the PC should have a new SSH certificate now | `.\lab.ps1 ssh-cert -Force` (every script renews it by itself when fewer than 4 hours are left) |
 
@@ -3648,12 +3821,17 @@ section):
 
 1. Add it to `vms` in [config/lab.json](config/lab.json) with a unique MAC and
    an IP in 10.10.10.0/24 outside the DHCP pool (.100-.199) and other than .1
-   (the firewall) and not yet taken (.50 is vault). Following the MAC
-   convention (0x3C = 60):
+   (the firewall) and not yet taken (.60 is rustfs). Following the MAC
+   convention (0x46 = 70):
 
    ```json
-   { "name": "hello", "mac": "02000A0A0A3C", "ip": "10.10.10.60", "cpus": 1, "memory": 1024 }
+   { "name": "hello", "mac": "02000A0A0A46", "ip": "10.10.10.70", "cpus": 1, "memory": 1024 }
    ```
+
+   For a VM in a segment instead of LabNet, add `"network": "<segment>"` and an
+   address in that segment (the Kubernetes nodes have `"network": "k8s"` and
+   10.10.20.x); `scripts/lib/LabNetwork.ps1` refuses an address outside the VM's
+   network.
 
    The Vagrantfile reads this list, so the name becomes the hostname, the
    Hyper-V VM name and the DNS name `hello.lab.internal`. `cpus` and `memory`
@@ -3668,7 +3846,7 @@ section):
    ```json
    {
      "vm": "hello",
-     "address": "10.10.99.6",
+     "address": "10.10.99.8",
      "names": ["hello"],
      "ports": [
        { "protocol": "tcp", "port": 443, "description": "HTTPS (nginx)" },
@@ -5282,7 +5460,7 @@ simply keeps signing.
 
 | Certificate | Its key | Principals | Valid | Options | Renewed |
 |---|---|---|---|---|---|
-| The PC's | `keys\ssh\pc_ed25519`, made once on the PC, no passphrase | `lab-all` | 8 hours | `source-address`: the PC (10.10.99.1) and the firewall's LAN address (every login to a VM arrives from the jump host); `permit-port-forwarding`, `permit-pty` | by `Get-LabSshConfig`, the entry point of every script that uses ssh, scp or vagrant, when fewer than 4 hours are left (longer than any script runs); for `vagrant` commands you type, by the Vagrantfile; by hand: `.\lab.ps1 ssh-cert` |
+| The PC's | `keys\ssh\pc_ed25519`, made once on the PC, no passphrase | `lab-all` | 8 hours | `source-address`: the PC (10.10.99.1) and the firewall's address in every VM network (LAN 10.10.10.1 and each segment of `config/lab.json`, e.g. 10.10.20.1 for LabK8s: every login to a VM arrives from the jump host there); `permit-port-forwarding`, `permit-pty` | by `Get-LabSshConfig`, the entry point of every script that uses ssh, scp or vagrant, when fewer than 4 hours are left (longer than any script runs) or `config/lab.json` gives other source addresses; for `vagrant` commands you type, by the Vagrantfile; by hand: `.\lab.ps1 ssh-cert` |
 | An Ansible run's | ansible-control's own key, made on the VM by [provision/bootstrap-ansible-control.sh](provision/bootstrap-ansible-control.sh); it never leaves the VM | only those of the run's profile (`principals` in [config/run-profiles.json](config/run-profiles.json): `host-<vm>` opens only that machine, `lab-all` every one; an empty list means no certificate, see [Run a playbook](#run-a-playbook-re-run-a-deployment)) | 2 hours, like a deployment's OpenBao token | `source-address`: ansible-control; `permit-pty` | new for every run: `Invoke-LabRun` ([scripts/lib/LabRun.ps1](scripts/lib/LabRun.ps1)) has it signed with the profile's principals, and [ansible/bin/lab-run](ansible/bin/lab-run) installs it next to the key (`~/.ssh/id_ed25519-cert.pub`) and deletes it when the run ends, whatever happens. The sockets of Ansible's kept-open connections (ControlPersist) are removed before and after, so a connection of an earlier run with a broader certificate cannot be reused |
 | A host's | the machine's own ed25519 host key | exactly one: its full DNS name | 1 year | none | by `lab.ps1 up` (VMs) and `lab.ps1 firewall` (firewall), 30 days before it expires and at once for a new host key; one from the offline CA is replaced by one from OpenBao once OpenBao signs |
 
@@ -5304,8 +5482,9 @@ names that are not in `config/lab.json`.
 - **The Ubuntu VMs** (drop-in `/etc/ssh/sshd_config.d/10-lab-hardening.conf`,
   from `harden-ssh.sh`): `TrustedUserCAKeys` with both CAs, the principals
   file, their own `HostCertificate`, `AllowUsers` (`ansible` from the
-  firewall's LAN address and from ansible-control, `vagrant` from the firewall's
-  LAN address only), no passwords, no root login, no forwarding of any kind.
+  firewall's address in the VM's network - LAN, or the segment's address such as
+  10.10.20.1 - and from ansible-control, `vagrant` from that firewall address
+  only), no passwords, no root login, no forwarding of any kind.
   `ansible` has no `authorized_keys` at all
   ([provision/bootstrap-ansible-user.sh](provision/bootstrap-ansible-user.sh)
   removes it), so no plain key logs in as `ansible`.
@@ -5595,6 +5774,7 @@ everything else. Each consumer has its own:
 | `ansible-keycloak` | run token of `keycloak.yml` | create and read `keycloak/...`; generate with `lab-alnum-24` and `-48`; sign with the PKI role `keycloak` |
 | `ansible-matrix` | run token of `matrix-prepare.yml` and of MDAD | create and read `matrix/...`; read (not create) the MAS client secret; generate with `lab-alnum-64`; mint ACME binding keys (EAB) for the role `acme-matrix` and delete unused ones |
 | `ansible-firewall` | run token of `firewall.yml` | sign with the PKI role `firewall-gui` (the firewall's web GUI), nothing else |
+| `ansible-k8s` | run token of `ansible/kubernetes/*.yml` | create and read `k8s/...`; generate with `lab-alnum-24` and `-64`; sign with the PKI role `k8s-ingress` |
 | `ansible-web` | run token of `hello-nginx.yml` | sign with the PKI role `web`, nothing else |
 | `openbao-config` | token of `openbao-config.yml` (token role `ansible-config`) | OpenBao's configuration plane: the mounts `lab` and `pki_int` and their settings, the password policies, the intermediate's URLs, revocation list and tidying, the PKI roles, ACME; no policies, logins, CAs, certificates or secrets (below) |
 
@@ -6861,6 +7041,8 @@ DeployableServer/
 |   `-- openbao/policies/             OpenBao's ACL policies, one file per policy (file name =
 |       |                             policy name), written by lab.ps1 deploy vault (identity plane)
 |       |-- ansible-firewall.hcl      firewall.yml: only certificates of the PKI role firewall-gui
+|       |-- ansible-k8s.hcl           ansible/kubernetes/: the cluster's secrets (write-once),
+|       |                             password generation, certificates of the PKI role k8s-ingress
 |       |-- ansible-keycloak.hcl      keycloak.yml: Keycloak's secrets (write-once), password
 |       |                             generation, certificates of the PKI role keycloak
 |       |-- ansible-matrix.hcl        matrix-prepare.yml and MDAD: the Matrix secrets (write-once),
@@ -6937,11 +7119,23 @@ DeployableServer/
 |   |       `-- getty-autologin.conf  drop-in for getty@tty1.service: console autologin as ansible
 |   |-- inventory/
 |   |   |-- hosts.ini                 groups firewalls, control, matrix_servers, keycloak_servers,
-|   |   |                             vault_servers, web (empty) and ubuntu (the Ubuntu VMs)
+|   |   |                             vault_servers, rke2_servers and rke2_agents (k8s_cluster),
+|   |   |                             web (empty) and ubuntu (the Ubuntu VMs)
 |   |   `-- group_vars/all.yml        lab_pki_dir, lab_vault_url, lab_config (the run's copy of
 |   |                                 config/lab.json), lab_domain, the Keycloak/MAS contract (URL,
 |   |                                 realm, issuer, client IDs, MAS URL, provider ULID),
 |   |                                 keycloak_secrets_dir (only to remove the old folder)
+|   |-- kubernetes/                   the Kubernetes cluster, a stack of its own (profiles k8s,
+|   |   |                             k8s-rke2, k8s-rancher, k8s-check; lab.ps1 deploy k8s)
+|   |   |-- site.yml                  rke2.yml, rancher.yml, check.yml in this order
+|   |   |-- rke2.yml                  RKE2 with Cilium: join tokens from OpenBao, release files
+|   |   |                             checked against pinned hashes, server first, then the agents
+|   |   |-- rancher.yml               Rancher Manager and Hubble UI: certificates from OpenBao,
+|   |   |                             Kubernetes secrets, the vendored chart as a HelmChart object
+|   |   |-- check.yml                 read-only: nodes, Cilium, Rancher, both names through nginx
+|   |   |-- vars/kubernetes.yml       pinned versions and hashes, networks, names
+|   |   `-- templates/                RKE2's config.yaml (server, agent), the HelmChartConfigs of
+|   |                                 Cilium and Traefik, Rancher's HelmChart, Hubble UI's Ingress
 |   |-- playbooks/                    each has a run profile (config/run-profiles.json) or is
 |   |   |                             started by one (matrix-check.yml: bin/deploy-matrix)
 |   |   |-- ping.yml                  reachability and sudo test for all hosts
@@ -7032,6 +7226,9 @@ DeployableServer/
 |   |   |                             below, holds lab.ps1's command table ($LabCommands), help and
 |   |   |                             status; its header explains WHERE CODE RUNS (the PC does only
 |   |   |                             what only the PC can do, everything else is an Ansible run)
+|   |   |-- LabNetwork.ps1            the networks behind the firewall: the segments of lab.json
+|   |   |                             checked once for every reader (Get-LabSegments), a VM's
+|   |   |                             network and gateway, the private switches
 |   |   |-- LabSecrets.ps1            shared helpers: DPAPI, OpenBao API (TLS pinned to the lab root
 |   |   |                             for OpenBao's host: LabTlsPin3, only a certificate the root
 |   |   |                             signed directly), unseal, run tokens (New-LabRunToken,
@@ -7113,9 +7310,12 @@ DeployableServer/
 |   |   `-- Install-LabRootCA.ps1     lab.ps1 trust, once: trust the 2026 root CA for your Windows
 |   |                                 user (-Remove; -RemoveRetired drops the retired first CA)
 |   `-- dev/
-|       `-- Update-LabMdad.ps1        lab.ps1 mdad-upgrade -Commit <hash>: git subtree pull of
-|                                     another MDAD commit into vendor\mdad, then its roles (two
-|                                     commits); the only script that downloads MDAD
+|       |-- Update-LabMdad.ps1        lab.ps1 mdad-upgrade -Commit <hash>: git subtree pull of
+|       |                             another MDAD commit into vendor\mdad, then its roles (two
+|       |                             commits); the only script that downloads MDAD
+|       `-- Update-LabRancherChart.ps1  lab.ps1 rancher-upgrade -Version -Sha256: the Rancher
+|                                     chart into vendor\rancher, refused unless its SHA-256
+|                                     matches; the only script that downloads it
 |-- tests/                            the lab's tests, run from the project root: .\lab.ps1 test
 |   |                                 (tests\README.md; see "Run the tests")
 |   |-- README.md                     what each test checks and whether it changes anything
@@ -7133,6 +7333,8 @@ DeployableServer/
 |   |                                 firewall.yml --check report changed=0 (no drift)
 |   |-- Test-LabCertificates.ps1      HTTPS endpoints: right CA (the firewall's: the intermediate),
 |   |                                 valid > 30 days, trusted by Windows
+|   |-- Test-LabAcmeBinding.ps1       ACME account binding: OpenBao requires it, no key pending,
+|   |                                 Traefik's account recorded as bound on the matrix VM
 |   |-- Test-LabTlsPin.ps1            the PC's OpenBao calls pinned to the lab root, other hosts
 |   |                                 not; for the pinned host a foreign chain and a chain through
 |   |                                 the intermediate are refused
@@ -7157,9 +7359,12 @@ DeployableServer/
 |                                     to compare the state before and after a change
 |-- vendor/                           third-party code the lab runs, unchanged, at a pinned version
 |   |-- README.md                     what is vendored, from where, which version, licence, upgrade
-|   `-- mdad/                         MDAD at the pinned commit with its 32 roles (roles\galaxy\),
-|                                     unchanged; copied to ~/mdad by the run profile matrix-prepare
-|                                     (syncMdad; lab.ps1 deploy matrix)
+|   |-- mdad/                         MDAD at the pinned commit with its 32 roles (roles\galaxy\),
+|   |                                 unchanged; copied to ~/mdad by the run profile matrix-prepare
+|   |                                 (syncMdad; lab.ps1 deploy matrix)
+|   `-- rancher/                      the Rancher Manager chart (chart\, unpacked, unchanged) and
+|                                     .lab-vendored-version (version and SHA-256); copied to
+|                                     ~/lab/vendor/rancher by the profiles k8s and k8s-rancher
 `-- keys/                             generated, never commit (in .gitignore), readable only by you and
                                       SYSTEM; secrets in it are DPAPI-encrypted (*.dpapi: only your
                                       Windows account on this PC can decrypt them)
@@ -7174,7 +7379,8 @@ DeployableServer/
     |   |                             holds (not secret)
     |   |-- pc_ed25519(.pub)          this PC's SSH key, no passphrase; opens nothing without:
     |   |-- pc_ed25519-cert.pub       its current certificate (8 hours); pc_ed25519-cert.valid-until:
-    |   |                             its expiry and CA, read without starting ssh-keygen
+    |   |                             its expiry, CA and source addresses (a change to these
+    |   |                             renews it), read without starting ssh-keygen
     |   |-- openbao-ca.pub            OpenBao's SSH CA public key, cached by lab.ps1 deploy vault
     |   |-- openbao-ca.trusted        its fingerprint, written once every machine accepted a test
     |   |                             login: from then on OpenBao signs
@@ -8586,6 +8792,23 @@ path lengths and the vendored MDAD (P50-P52), and SSH certificates (P53).
   genuine never moves signing to the offline CA without a `breakglass` from
   you.
 
+### P54. The Kubernetes server stays NotReady
+
+Right after `rke2-server` starts on k8s-server, `kubectl get nodes` shows the
+server as `NotReady`, and it stays so as long as no agent has joined. Not a
+fault: Cilium's agent waits for its CRDs (custom resource definitions), which
+only cilium-operator registers, and the operator does not tolerate the server's
+taint `CriticalAddonsOnly`, so it can only start on an agent. Without Cilium the
+node has no pod network, and the kubelet reports it NotReady. Once an agent is
+in, the operator starts there, Cilium comes up on every node and the server
+turns Ready. [rke2.yml](ansible/kubernetes/rke2.yml) therefore lets the agents
+join as soon as the API server answers (`/readyz`), and checks every node at the
+end. If a node stays NotReady after that:
+`.\lab.ps1 connect k8s-server 'sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml -n kube-system get pods -o wide'`
+shows which pod is missing, and `sudo journalctl -u rke2-agent` on an agent why
+it did not join (a wrong token, or the firewall: the agents reach the server on
+the same switch, so it would be the node's own state, not pf).
+
 ### Other design decisions you will meet in the code
 
 - One entry point, `lab.ps1`, and a plain script on purpose (no
@@ -8792,6 +9015,9 @@ copy them to production.
 | OpenBao's identity rests on a hand-written pin on the PC: for `vault.lab.internal` the PC's scripts accept only a certificate that the offline root signed directly (a chain of exactly two, `LabTlsPin3`), which is why the root still signs a server certificate. ansible-control (`openbao-run`, the playbooks) and the browser trust the lab root for OpenBao and rely on the intermediates' name constraint, which excludes `vault.lab.internal` only in intermediates made since that exclusion exists | `LabSecrets.ps1`, `lib\LabPki.ps1`, `lab.ps1 deploy vault` | The secrets manager's TLS certificate from a CA of its own that issues nothing else, every client trusting exactly that CA for it (a dedicated trust store rather than a pin in code), often mutual TLS |
 | Revocation through CRLs only (no OCSP), and no procedure that ever revokes a certificate. Renewals happen only when a script runs, not on a schedule: `lab.ps1 up` (after every Windows restart) checks what is due and runs the script that renews it: OpenBao's own certificate (397 days, renewed 30 days before it expires), the root's CRL (400 days, 60 days before) and the intermediate CA (3 years; a new one 400 days before it expires) through `lab.ps1 deploy vault`, Keycloak's certificate (1 year, 30 days before) through `lab.ps1 deploy keycloak`, the firewall's GUI certificate (1 year from the intermediate, 30 days before, and at once while it does not come from the current intermediate, like a new firewall's first one from the root) through `lab.ps1 deploy firewall`. Only the Matrix certificates (90 days, ACME) renew themselves. No rollover procedure yet for the root (10 years) | `lab.ps1 up`, `LabSecrets.ps1`, `lib\LabPki.ps1`, `lab.ps1 deploy vault`, `tasks/openbao-certificate.yml`, `lab.ps1 deploy firewall`, `firewall.yml` | OCSP or short-lived CRLs published automatically, a revocation process, expiry monitoring with alerts, every certificate renewed automatically on a schedule by an agent or ACME client (cert-manager, certmonger, Vault Agent), planned and rehearsed CA rollovers |
 | ACME with external account binding, but the binding key is minted by the deployment's run token and lies for one run in Traefik's configuration file on the matrix VM (it is single-use and deleted by OpenBao at registration); the ACME directory itself answers anything that reaches port 8200 | `vars/openbao-config.yml`, `matrix-prepare.yml`, `lab-setup.yml`, `lab.ps1 deploy vault` | EAB keys issued per client through an approval in the CA's portal and delivered by a secrets agent; the ACME directory reachable only from the server networks |
+| Kubernetes: Rancher Manager signs in with a local admin (its first password from OpenBao, which the chart also copies into Helm's release record, a secret in `cattle-system`); Hubble UI has no login at all, only the PC and LabNet reach it (firewall forward and nginx's management source policy) | `ansible/kubernetes/rancher.yml` | Rancher logins through the IdP (OIDC with Keycloak), the local admin only as break-glass in a vault; an authenticating proxy (OAuth2 Proxy) in front of Hubble UI |
+| Kubernetes: one control-plane node (no high availability), its etcd snapshots on the same VM, 4 GB per node (RKE2's minimum; SUSE sizes Rancher at 16 GB per node, three nodes) | `ansible/kubernetes/`, `config/lab.json` | three servers (etcd quorum), snapshots to object storage off the cluster (S3, e.g. RustFS), nodes sized to the vendor's requirements |
+| Kubernetes nodes may reach the whole internet (RKE2's release files, Rancher's images and catalog data); Rancher's images are pinned by tag, not digest (RKE2's own images come from hash-pinned archives) | `scripts/lib/LabFirewall.ps1` (segment rules), `ansible/kubernetes/` | egress only through a proxy or an allow-list, a private registry mirroring images by digest (Harbor, RKE2's `system-default-registry`), network policies inside the cluster |
 | Self-built SSH bastion without MFA or session recording, running on the perimeter firewall itself (restricted to certificate logins of `ansible` from the PC and ansible-control, and to forwarding to port 22 of the lab VMs) | `keys\ssh_config`, `lab.ps1 connect`, `config.xml.template`, `opnsense/sshd_config.d/20-lab-ssh.conf` | MFA on the bastion, session recording, often a managed product (e.g. Azure Bastion, AWS Systems Manager Session Manager, Teleport); the bastion is a separate host in a management network |
 | Firewall administration: the GUI user `root` with a random password; one full-admin account `ansible` serves as SSH jump account and REST API user. These passwords and the API key and secret are DPAPI files on the PC (`keys\opnsense\*.dpapi`, with copies in the recovery file), not in OpenBao, because the firewall exists before OpenBao | `lab.ps1 firewall`, `config.xml.template`, `keys\opnsense\` | Personal admin accounts from central authentication (RADIUS, LDAP) with MFA; the local root password only as a break-glass credential in a vault; a separate, restricted jump account (the lab restricts forwarding with `PermitOpen`, but for its one full-admin account) and a separate least-privilege API user per automation tool, with secrets in a vault |
 | Firewall management (GUI, API, SSH, DNS) open to the whole lab network, and on the PC side to 10.10.99.1, your everyday workstation, which also browses the internet | `config.xml.template` | Management interfaces reachable only from a dedicated management network (often out-of-band), never from server networks; administration only from privileged access workstations (PAW) or a management jump host |

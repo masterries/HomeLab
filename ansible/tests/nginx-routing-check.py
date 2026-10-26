@@ -47,7 +47,7 @@ def main():
     parser.add_argument("--ca-file", required=True)
     parser.add_argument("--lab", required=True)
     parser.add_argument("--routes", required=True)
-    parser.add_argument("--denied-source", help="Optional local source IP outside the allowed RustFS client networks")
+    parser.add_argument("--denied-source", help="Optional local source IP outside the networks the management routes allow (RustFS, firewall GUI, Rancher, Hubble UI)")
     args = parser.parse_args()
     lab = json.loads(Path(args.lab).read_text())
     routes = json.loads(Path(args.routes).read_text())
@@ -89,16 +89,37 @@ def main():
     print("PASS: unknown SNI is rejected before TLS handshake")
     assert_handshake_rejected(args.address, None)
     print("PASS: missing SNI is rejected before TLS handshake")
+    # The routes that must carry nginx's management source policy: the firewall GUI and every VM
+    # whose routed HTTPS port (443 to nginx) lab.json limits to the PC. Taken from lab.json, not
+    # from the "source" key under test, so a route that lost "source": "management" is caught.
+    pc_only = {p["vm"] for p in lab.get("published", [])
+               if any(port.get("targetVm") == "nginx" and port.get("port") == 443 and port.get("source") == "pc"
+                      for port in p["ports"])} | {"firewall"}
+
+    def is_management(route):
+        return route.get("source", "any") == "management"
+
+    for route in routes["tls"]:
+        if (route["vm"] in pc_only) != is_management(route):
+            raise RuntimeError(f"nginx.json's source policy for {route['vm']} differs from lab.json (PC-only publication)")
+    print("PASS: every PC-only publication's route carries the management source policy, and only those")
+    # nginx enforces "source" only in TLS routes: an http or tcp route would ignore it.
+    for route in routes["http"] + routes.get("tcp", []):
+        if "source" in route:
+            raise RuntimeError(f"nginx.json: 'source' is enforced only on tls routes ({route['vm']})")
+        if route["vm"] in pc_only:
+            raise RuntimeError(f"nginx.json routes PC-only {route['vm']} over plain HTTP or TCP, without a source policy")
+    print("PASS: no http or tcp route to a PC-only publication, and no source policy outside TLS routes")
     if args.denied_source:
-        control_route = next(route for route in routes["tls"] if route["vm"] not in ("rustfs", "firewall"))
+        control_route = next(route for route in routes["tls"] if not is_management(route) and route["vm"] not in pc_only)
         control_name = control_route["names"][0]
         control_host = lab["domain"] if control_name == "@" else control_name + "." + lab["domain"]
         leaf(args.address, 443, control_host, context, args.denied_source)
         print(f"PASS: source {args.denied_source} reaches unrestricted {control_host} as a positive control")
         for route in routes["tls"]:
-            if route["vm"] in ("rustfs", "firewall"):
+            if is_management(route) or route["vm"] in pc_only:
                 for name in route["names"]:
-                    hostname = name + "." + lab["domain"]
+                    hostname = lab["domain"] if name == "@" else name + "." + lab["domain"]
                     assert_handshake_rejected(args.address, hostname, args.denied_source)
                     print(f"PASS: {hostname}: disallowed source {args.denied_source} rejected before TLS handshake")
 

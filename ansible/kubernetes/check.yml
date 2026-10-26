@@ -1,0 +1,124 @@
+# kubernetes/check.yml -- checks that the lab's Kubernetes cluster really works
+#
+# Where it runs: on ansible-control, at the end of ".\lab.ps1 deploy k8s" (kubernetes/site.yml),
+# or alone at any time: .\lab.ps1 run k8s-check (an SSH certificate for k8s-server, no OpenBao
+# token). Read-only: it asks the cluster and the web endpoints and changes nothing.
+#
+# What it checks (each one fails the run):
+#   1. From k8s-server, with kubectl: every node of the inventory is Ready; Cilium replaces
+#      kube-proxy and routes natively, and its agent reports itself healthy; Rancher is available.
+#   2. From ansible-control, through central nginx (the path the PC uses): rancher.<domain> and
+#      hubble.<domain> serve certificates from OpenBao's CURRENT intermediate CA (compared by key
+#      identifier, as matrix-check.yml does), Rancher answers /ping with "pong", Hubble UI answers.
+# What the PC sees (Windows' trust, the firewall's forward to nginx) is checked by
+# tests\Test-LabCertificates.ps1 and lab.ps1 deploy k8s.
+- name: Kubernetes - the cluster, seen from its server
+  hosts: rke2_servers
+  become: true
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    # The single quotes keep the double quotes and the \n of the jsonpath for kubectl: the command
+    # module splits its line like a shell would and would strip them.
+    - name: Every node is Ready
+      ansible.builtin.command: >-
+        {{ rke2_kubectl }} get nodes
+        -o 'jsonpath={range.items[*]}{.metadata.name}={.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+      register: k8s_nodes
+      changed_when: false
+      check_mode: false
+      failed_when: >-
+        k8s_nodes.rc != 0 or
+        (k8s_nodes.stdout_lines | select('match', '^.+=True$') | map('regex_replace', '=True$', '') | sort)
+        != (groups['k8s_cluster'] | sort)
+
+    - name: Every node runs RKE2 {{ rke2_version }}
+      ansible.builtin.command: >-
+        {{ rke2_kubectl }} get nodes
+        -o 'jsonpath={range.items[*]}{.metadata.name}={.status.nodeInfo.kubeletVersion}{"\n"}{end}'
+      register: k8s_versions
+      changed_when: false
+      check_mode: false
+      failed_when: >-
+        k8s_versions.rc != 0 or
+        (k8s_versions.stdout_lines | reject('match', '^.+=' ~ (rke2_version | regex_escape) ~ '$') | list | length) > 0
+
+    - name: Cilium replaces kube-proxy and routes natively
+      ansible.builtin.command: >-
+        {{ rke2_kubectl }} -n kube-system get configmap cilium-config
+        -o jsonpath={.data.kube-proxy-replacement}/{.data.routing-mode}
+      register: cilium_settings
+      changed_when: false
+      check_mode: false
+      failed_when: cilium_settings.stdout != 'true/native'
+
+    - name: Cilium is healthy
+      ansible.builtin.command: "{{ rke2_kubectl }} -n kube-system exec daemonset/cilium -c cilium-agent -- cilium-dbg status --brief"
+      register: cilium_status
+      changed_when: false
+      check_mode: false
+      failed_when: cilium_status.rc != 0 or cilium_status.stdout | trim != 'OK'
+
+    - name: Rancher is available
+      ansible.builtin.command: "{{ rke2_kubectl }} -n cattle-system get deployment rancher -o jsonpath={.status.availableReplicas}"
+      register: rancher_available
+      changed_when: false
+      check_mode: false
+      failed_when: rancher_available.rc != 0 or (rancher_available.stdout | int) < 1
+
+    - name: The nodes
+      ansible.builtin.command: "{{ rke2_kubectl }} get nodes -o wide"
+      register: k8s_nodes_wide
+      changed_when: false
+      check_mode: false
+
+- name: Kubernetes - Rancher and Hubble UI through central nginx
+  hosts: control
+  gather_facts: false
+  vars_files: [vars/kubernetes.yml]
+  tasks:
+    - name: The current intermediate CA (public, no login needed)
+      ansible.builtin.uri:
+        url: "{{ lab_vault_url }}/v1/pki_int/cert/ca"
+        return_content: true
+      register: issuing_ca
+      check_mode: false
+
+    - name: Its subject key identifier
+      community.crypto.x509_certificate_info:
+        content: "{{ issuing_ca.json.data.certificate }}"
+      register: issuing_ca_info
+      check_mode: false
+
+    - name: Traefik serves certificates from that CA (through nginx)
+      community.crypto.get_certificate:
+        host: "{{ item }}"
+        port: 443
+        server_name: "{{ item }}"
+      register: served
+      failed_when: >-
+        served.cert is not defined or
+        (served.cert | community.crypto.x509_certificate_info).authority_key_identifier | default('')
+        != issuing_ca_info.subject_key_identifier
+      loop: ["{{ rancher_hostname }}", "{{ hubble_hostname }}"]
+      check_mode: false
+
+    - name: Rancher answers /ping
+      ansible.builtin.uri:
+        url: "https://{{ rancher_hostname }}/ping"
+        return_content: true
+      register: rancher_ping
+      failed_when: rancher_ping.status != 200 or rancher_ping.content | trim != 'pong'
+      check_mode: false
+
+    - name: Hubble UI answers
+      ansible.builtin.uri:
+        url: "https://{{ hubble_hostname }}/"
+      check_mode: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg:
+          - "{{ hostvars[groups['rke2_servers'][0]].k8s_nodes_wide.stdout_lines }}"
+          - "Rancher Manager: https://{{ rancher_hostname }} (user admin; the first password to the clipboard: .\\lab.ps1 secret k8s/rancher/bootstrap-password)"
+          - "Hubble UI (Cilium's network flows): https://{{ hubble_hostname }}"

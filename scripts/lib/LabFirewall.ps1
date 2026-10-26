@@ -51,6 +51,12 @@ $adapters = @(
     @{ Name = 'LAN';  Switch = 'LabNet';         Mac = '02000A0A0A01'; Device = 'hn1' },
     @{ Name = 'HOST'; Switch = 'LabHost';        Mac = '02000A0A0A02'; Device = 'hn2' }
 )
+# Further networks ("segments" in config\lab.json, e.g. LabK8s): one adapter each, APPENDED after
+# HOST, so FreeBSD names them hn3, hn4, ... and the three above keep their names (the template
+# and the firewall playbooks rely on hn2 = HOST). Get-LabSegments checks the order.
+foreach ($segment in @(Get-LabSegments)) {
+    $adapters += @{ Name = $segment.name.ToUpper(); Switch = $segment.switch; Mac = $segment.mac; Device = $segment.device }
+}
 
 # --- Small helpers ----------------------------------------------------------------------------
 
@@ -487,6 +493,95 @@ function New-FirewallConfig($Secrets, $Certificate) {
         }
     }
 
+    # Further networks ("segments" in lab.json, e.g. the Kubernetes nodes on LabK8s): per segment
+    # an interface, a DHCP range, DNS on its firewall address, and filter rules in both
+    # directions. What the rules allow:
+    #   into the segment, from LabNet  ansible-control: SSH (it manages every VM);
+    #                                  central nginx: the published web ports of the segment's
+    #                                  VMs (targetVm nginx); nothing else (logged)
+    #   out of the segment             DNS on the firewall; the internet (packages, images);
+    #                                  never LabNet, the PC's networks or other firewall services
+    # Pod addresses (Kubernetes) never reach the firewall: the nodes translate them to their own.
+    $segmentInterfaces = New-Object Text.StringBuilder
+    $segmentRanges = New-Object Text.StringBuilder
+    $lanRules = New-Object Text.StringBuilder
+    $segmentRules = New-Object Text.StringBuilder
+    $rule = { param($Builder, [int]$Sequence, $Action, $Interface, $Protocol, $Source, $Destination, $Port, [int]$Log, $Description)
+        $portLine = if ($Port) { "`n            <destination_port>$Port</destination_port>" } else { '' }
+        [void]$Builder.Append(@"
+          <rule>
+            <enabled>1</enabled>
+            <statetype>keep</statetype>
+            <sequence>$Sequence</sequence>
+            <action>$Action</action>
+            <quick>1</quick>
+            <interface>$Interface</interface>
+            <direction>in</direction>
+            <ipprotocol>inet</ipprotocol>
+            <protocol>$Protocol</protocol>
+            <source_net>$Source</source_net>
+            <destination_net>$Destination</destination_net>$portLine
+            <log>$Log</log>
+            <description>$(& $xmlText $Description)</description>
+          </rule>
+
+"@)
+    }
+    $controlIp = $vmIp['ansible-control']
+    $nginxIp = $vmIp['nginx']
+    $lanSequence = 20
+    $segmentIndex = 0
+    foreach ($segment in @(Get-LabSegments)) {
+        $label = $segment.name.ToUpper()
+        [void]$segmentInterfaces.Append(@"
+    <$($segment.interface)>
+      <enable>1</enable>
+      <if>$($segment.device)</if>
+      <descr>$label</descr>
+      <spoofmac/>
+      <ipaddr>$($segment.firewallIp)</ipaddr>
+      <subnet>24</subnet>
+    </$($segment.interface)>
+
+"@)
+        [void]$segmentRanges.Append(@"
+    <dhcp_ranges>
+      <interface>$($segment.interface)</interface>
+      <start_addr>$($segment.firewallIp -replace '\.\d+$', '.100')</start_addr>
+      <end_addr>$($segment.firewallIp -replace '\.\d+$', '.199')</end_addr>
+      <lease_time>43200</lease_time>
+    </dhcp_ranges>
+
+"@)
+        # LAN side, before "Lab to internet and firewall services" (which passes everything else).
+        & $rule $lanRules ($lanSequence++) pass lan tcp $controlIp $segment.cidr 22 0 "ansible-control: SSH to the $label segment (Ansible)"
+        foreach ($pub in $lab.published) {
+            $vm = $lab.vms | Where-Object { $_.name -eq $pub.vm }
+            if (-not (Test-LabAddressInNetwork $vm.ip $segment.cidr)) { continue }
+            foreach ($port in @($pub.ports | Where-Object { $_.targetVm -eq 'nginx' })) {
+                & $rule $lanRules ($lanSequence++) pass lan tcp $nginxIp $vm.ip ([int]$port.port) 0 "nginx: $($pub.vm) port $($port.port) (published through central nginx)"
+            }
+        }
+        & $rule $lanRules ($lanSequence++) block lan any lan $segment.cidr $null 1 "Lab may not reach the $label segment"
+        if ($lanSequence -gt 89) { throw 'Too many generated LAN rules (sequence 20-89).' }
+        # Segment side: traffic that enters the firewall from the segment.
+        $ruleSequence = 200 + 20 * $segmentIndex
+        $segmentIf = $segment.interface
+        & $rule $segmentRules ($ruleSequence++) pass $segmentIf udp $segment.cidr $segment.firewallIp 53 0 "${label}: DNS (udp)"
+        & $rule $segmentRules ($ruleSequence++) pass $segmentIf tcp $segment.cidr $segment.firewallIp 53 0 "${label}: DNS (tcp)"
+        & $rule $segmentRules ($ruleSequence++) block $segmentIf any $segment.cidr $segment.firewallIp $null 1 "$label may use only DNS on the firewall"
+        & $rule $segmentRules ($ruleSequence++) block $segmentIf any $segment.cidr lan $null 1 "$label may not reach the lab network"
+        & $rule $segmentRules ($ruleSequence++) block $segmentIf any $segment.cidr opt1 $null 1 "$label may not reach the PC network"
+        & $rule $segmentRules ($ruleSequence++) block $segmentIf any $segment.cidr wan $null 1 "$label may not reach the PC through the WAN network"
+        foreach ($other in @(Get-LabSegments | Where-Object { $_.name -ne $segment.name })) {
+            & $rule $segmentRules ($ruleSequence++) block $segmentIf any $segment.cidr $other.cidr $null 1 "$label may not reach the $($other.name.ToUpper()) segment"
+        }
+        & $rule $segmentRules ($ruleSequence++) pass $segmentIf any $segment.cidr any $null 0 "$label to the internet"
+        if ($ruleSequence -gt 200 + 20 * ($segmentIndex + 1)) { throw 'Too many rules for one segment (20 sequence numbers each).' }
+        $segmentIndex++
+    }
+    $dnsmasqInterfaces = (@('lan', 'opt1') + @(Get-LabSegments | ForEach-Object { $_.interface })) -join ','
+
     $values = @{
         '{{DOMAIN}}'                      = $lab.domain
         '{{TIMEZONE}}'                    = $TimeZone
@@ -506,11 +601,16 @@ function New-FirewallConfig($Secrets, $Certificate) {
         '{{CA_CRT_B64}}'                  = ConvertTo-Base64 $Certificate.CaPem
         '{{GUI_CRT_B64}}'                 = ConvertTo-Base64 $Certificate.CrtPem
         '{{GUI_KEY_B64}}'                 = ConvertTo-Base64 $Certificate.KeyPem
+        '{{DNSMASQ_INTERFACES}}'          = $dnsmasqInterfaces
     }
     $xml = Get-Content -Raw (Join-Path $projectRoot 'opnsense\config.xml.template')
     $xml = $xml.Replace('<!--{{DNSMASQ_HOSTS}}-->', $hosts.ToString().TrimEnd())
     $xml = $xml.Replace('<!--{{VIRTUAL_IPS}}-->', $vips.ToString().TrimEnd())
     $xml = $xml.Replace('<!--{{PORT_FORWARDS}}-->', $forwards.ToString().TrimEnd())
+    $xml = $xml.Replace('<!--{{SEGMENT_INTERFACES}}-->', $segmentInterfaces.ToString().TrimEnd())
+    $xml = $xml.Replace('<!--{{SEGMENT_DHCP_RANGES}}-->', $segmentRanges.ToString().TrimEnd())
+    $xml = $xml.Replace('<!--{{SEGMENT_LAN_RULES}}-->', $lanRules.ToString().TrimEnd())
+    $xml = $xml.Replace('<!--{{SEGMENT_RULES}}-->', $segmentRules.ToString().TrimEnd())
     foreach ($placeholder in $values.Keys) { $xml = $xml.Replace($placeholder, $values[$placeholder]) }
     if ($xml -match '\{\{[A-Z_0-9]+\}\}') { throw "Unreplaced placeholder in config.xml: $($Matches[0])" }
     [void][xml]$xml   # must be well-formed XML
@@ -711,16 +811,27 @@ function Update-FirewallSsh([string]$FirstBootFingerprint) {
     Write-Host 'SSH:         firewall checked: host certificate valid, certificate login works'
 }
 
-# 7a. The adapters must have come up as hn0/hn1/hn2 in the order they were added.
+# 7a. The adapters must have come up as hn0, hn1, hn2, ... in the order they were added.
 function Test-AdapterMapping {
-    $text = (Invoke-FirewallSsh 'for i in hn0 hn1 hn2; do echo $i $(ifconfig $i ether | grep -o -E ..:..:..:..:..:..); done') -join "`n"
+    $devices = ($adapters | ForEach-Object { $_.Device }) -join ' '
+    $text = (Invoke-FirewallSsh "for i in $devices; do echo `$i `$(ifconfig `$i ether | grep -o -E ..:..:..:..:..:..); done") -join "`n"
     foreach ($adapter in $adapters) {
         $mac = (($adapter.Mac -split '(..)' | Where-Object { $_ }) -join ':').ToLower()
         if ($text -notmatch "$($adapter.Device) $mac") {
             throw "Adapter mapping differs: expected $($adapter.Device) = $mac ($($adapter.Name)). Firewall reports:`n$text"
         }
     }
-    Write-Host 'Adapters:    hn0 = WAN, hn1 = LAN, hn2 = HOST (checked by MAC)'
+    Write-Host "Adapters:    $(($adapters | ForEach-Object { "$($_.Device) = $($_.Name)" }) -join ', ') (checked by MAC)"
+}
+
+# An existing firewall gets its adapters only when it is built: a segment added to lab.json
+# later needs a rebuild (a Generation 1 VM cannot even get a network adapter while it runs).
+function Assert-FirewallAdapters($Vm) {
+    $present = @(Get-VMNetworkAdapter -VM $Vm | ForEach-Object { $_.MacAddress.ToUpper() })
+    $missing = @($adapters | Where-Object { $present -notcontains $_.Mac.ToUpper() })
+    if ($missing) {
+        throw "The firewall VM has no adapter for $(($missing | ForEach-Object { "$($_.Name) ($($_.Switch))" }) -join ', '): it was built before config\lab.json named that network. Rebuild it from the repository: .\lab.ps1 firewall -Rebuild"
+    }
 }
 
 # 7b. Split-horizon DNS drop-in (not part of config.xml, so it is installed on every run).

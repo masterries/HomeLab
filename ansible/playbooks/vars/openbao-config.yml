@@ -81,6 +81,10 @@ openbao_pki_roles:
   keycloak: { allowed_domains: ["keycloak.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
   # RustFS: its S3 API and console have separate HTTPS names and a VM-local private key.
   rustfs: { allowed_domains: ["rustfs.{{ lab_domain }}", "rustfs-console.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
+  # The Kubernetes cluster's web names (ansible/kubernetes/rancher.yml): Rancher Manager and
+  # Hubble UI. The keys are made on k8s-server and stored as Kubernetes TLS secrets, which the
+  # cluster's ingress (Traefik) serves.
+  k8s-ingress: { allowed_domains: ["rancher.{{ lab_domain }}", "hubble.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
   # The firewall's web GUI (firewall.yml): the key is made on the firewall.
   firewall-gui: { allowed_domains: ["firewall.{{ lab_domain }}"], key_type: ec, key_bits: 256, ttl: 31536000, max_ttl: 31536000 }
   # The nginx demo (hello-nginx.yml) on a VM named "hello"; add names here for others.

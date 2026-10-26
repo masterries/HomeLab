@@ -28,8 +28,9 @@
          ISO's staging folder and the ISO, and both are deleted once the firewall has imported
          it.
       5. VM: Generation 1 (the nano image boots with BIOS only), 1 vCPU (the 26.7 kernel can
-         panic on Hyper-V with more; fixed in 26.7.7), 3 GB RAM, three network adapters with
-         fixed MACs, all still DISCONNECTED, COM1 as a named pipe.
+         panic on Hyper-V with more; fixed in 26.7.7), 3 GB RAM, network adapters with fixed
+         MACs (WAN, LAN, HOST and one per segment of lab.json, e.g. LabK8s), all still
+         DISCONNECTED, COM1 as a named pipe.
       6. First boot, driven over the serial console like the Unix tool "expect": answer
          OPNsense's configuration importer with the ISO, connect the network adapters, wait
          for the login prompt. With the adapters disconnected until our configuration is in,
@@ -54,7 +55,8 @@
     due, sshd drop-in, the SSH CAs user ansible accepts) and the DNS drop-in are re-applied, a
     pending update or reboot is finished, and the checks run.
     Changes to opnsense\ or to
-    config\lab.json (VMs, "published") are only applied by a rebuild. Use -Rebuild to throw
+    config\lab.json (VMs, "published", "segments") are only applied by a rebuild; an existing
+    firewall without an adapter for a segment of lab.json is refused with that hint. Use -Rebuild to throw
     it away and build it again from the repository (the "cattle, not pets" idea: servers are
     rebuilt from code instead of being repaired by hand).
 
@@ -104,9 +106,13 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 foreach ($tool in $openssl, $bzip2) {
     if (-not (Test-Path $tool)) { throw "$tool is missing. It comes with Git for Windows." }
 }
-foreach ($switch in 'Default Switch', 'LabNet', 'LabHost') {
+# The private switches (LabNet and the segments of lab.json) are created here if missing, so a
+# rebuild for a new segment does not depend on lab.ps1 up having run first. LabHost (with the
+# PC's address) is lab.ps1 host-setup's, the Default Switch Windows'.
+Initialize-LabPrivateSwitches
+foreach ($switch in @($adapters | ForEach-Object { $_.Switch })) {
     if (-not (Get-VMSwitch -Name $switch -ErrorAction SilentlyContinue)) {
-        throw "Hyper-V switch '$switch' is missing (LabNet: lab.ps1 up, LabHost: lab.ps1 host-setup)."
+        throw "Hyper-V switch '$switch' is missing (LabHost: lab.ps1 host-setup)."
     }
 }
 if (-not (Test-Path $sshConfig)) { throw "keys\ssh_config is missing. Run .\lab.ps1 up." }
@@ -120,6 +126,7 @@ if ($existing -and $existing.Notes -ne $vmTag) {
 if ($existing -and -not $Rebuild) {
     # Left behind by an earlier first boot that failed?
     Remove-SeedIso
+    Assert-FirewallAdapters $existing
     if ($existing.State -ne 'Running') { Start-VM -VM $existing; Write-Host "VM:          $vmName started" }
     # After the ingress cutover the GUI (10.10.99.2:443) goes through nginx, and the certificate
     # check below waits for it: start an existing nginx VM too (after a Windows restart it is off).

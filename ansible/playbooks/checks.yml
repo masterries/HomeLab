@@ -52,7 +52,28 @@
       {%- endif -%}
       {%- endfor -%}
       {{ ns.out }}
-    checks_published_vms: "{{ checks_routed | map(attribute='vm') | list }}"
+    # VMs whose own name is routed (matrix, keycloak, rustfs): that name means nginx in the lab.
+    # A VM published under other names only (k8s-server as rancher) keeps its own address.
+    checks_published_vms: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for pub in checks_routed if pub.vm in pub.names -%}
+      {%- set ns.out = ns.out + [pub.vm] -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    # Every VM published under its own name, direct (vault) or routed (matrix, keycloak, rustfs):
+    # that name carries two addresses, the lab-side one and the PC-side published one.
+    checks_own_name_published: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for pub in lab_config.published if pub.vm in pub.names -%}
+      {%- set ns.out = ns.out + [pub.vm] -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    # A VM in a segment (the Kubernetes nodes on LabK8s) gets such a name with both addresses:
+    # dnsmasq answers with the address in the asker's subnet (localise-queries), and neither is in
+    # the segment's. The firewall lets the segment reach neither anyway, so such a VM checks only
+    # the names that carry one address: the VMs not published under their own name.
+    checks_in_lab_network: >-
+      {{ ((lab_config.vms | selectattr('name', 'equalto', inventory_hostname) | first).network | default('lab')) in ['', 'lab'] }}
   tasks:
     - name: Web VM names resolve to ingress and management names to their private address
       ansible.builtin.command: getent ahostsv4 {{ item.name }}.{{ lab_domain }}
@@ -66,7 +87,7 @@
         ([item.ip, checks_ingress_ip] if
           (lab_allow_bootstrap_dns | default(false) | bool) and item.name in checks_published_vms
          else [checks_ingress_ip] if item.name in checks_published_vms else [item.ip])
-      loop: "{{ lab_config.vms }}"
+      loop: "{{ lab_config.vms if checks_in_lab_network else (lab_config.vms | rejectattr('name', 'in', checks_own_name_published) | list) }}"
       loop_control:
         label: "{{ item.name }}"
 
@@ -79,7 +100,7 @@
         web_resolved.rc != 0 or
         (web_resolved.stdout | regex_findall('(?m)^([0-9.]+)\s') | unique | sort) != [checks_ingress_ip]
       loop: "{{ (checks_routed | map(attribute='names') | flatten | unique) + ['firewall'] }}"
-      when: not (lab_allow_bootstrap_dns | default(false) | bool)
+      when: not (lab_allow_bootstrap_dns | default(false) | bool) and checks_in_lab_network
 
     - name: sshd settings
       ansible.builtin.command: sshd -T

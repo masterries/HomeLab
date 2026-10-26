@@ -1,0 +1,66 @@
+# kubernetes/vars/kubernetes.yml -- what the lab's Kubernetes cluster is made of: pinned versions,
+# networks and names. Read by every playbook in ansible/kubernetes/.
+#
+# Pinning: every piece of software the cluster runs is fixed here by version AND by SHA-256 (the
+# release files) or comes from this repository (the Rancher chart, vendor/rancher). Nothing is
+# installed "latest", so every deployment and every rebuild runs the same bits. An upgrade is a
+# deliberate edit of this file (and of vendor/rancher), reviewed like any other change.
+# Enterprise equivalent: an internal artifact repository (Artifactory, Harbor, Nexus) with
+# reviewed, pinned versions, and Kubernetes upgrades planned per minor version.
+
+# --- RKE2 -------------------------------------------------------------------------------------------
+# RKE2 (also "RKE Government"): SUSE's Kubernetes distribution. One binary that runs the kubelet,
+# containerd and, on a server, the control plane (API server, scheduler, controller manager, etcd)
+# as static pods. Add-ons (CoreDNS, the CNI, the ingress controller) come as Helm charts it applies
+# itself. Hardened defaults (CIS-oriented), FIPS-capable, and the Kubernetes Rancher builds on.
+#
+# The v1.36 line (Kubernetes 1.36): RKE2's "stable" channel on 2026-10-26, supported by SUSE until
+# 2027-10-12. Not v1.37: Rancher 2.15 runs on Kubernetes 1.34 to 1.36 only (its chart refuses
+# 1.37). Upgrade: a newer v1.36 patch first; a new minor only together with a Rancher version that
+# supports it. Change the version and the three hashes together (the release's
+# sha256sum-amd64.txt), then .\lab.ps1 deploy k8s.
+rke2_version: v1.36.5+rke2r1
+# GitHub writes the "+" of the version as %2B in its download URLs.
+rke2_release_url: "https://github.com/rancher/rke2/releases/download/{{ rke2_version | replace('+', '%2B') }}"
+# The files are not signed (only RKE2's RPMs are), so these SHA-256 values are the trust anchor.
+rke2_install_archive: { name: rke2.linux-amd64.tar.gz, sha256: 4fdbe8a8a32517fbcb6e80c71ca393b96828fbb87685102d9058b51527f9278d }
+# The container images of RKE2's own components (Kubernetes, etcd, CoreDNS, Traefik, the Helm job
+# image) and of Cilium, as archives ("air-gap images"). containerd imports them on every node at
+# start, so no image of the cluster itself is pulled by tag from a registry. Images of workloads
+# (Rancher) are pulled normally.
+rke2_image_archives:
+  - { name: rke2-images-core.linux-amd64.tar.zst, sha256: adc5fe6ca25a3ebc8866e3dad3ff3690d38c8af4a5d312e71bf954e6e3213203 }
+  - { name: rke2-images-cilium.linux-amd64.tar.zst, sha256: 3095e4fd58dff229d4efb5b7a8321f4e42af11f5a40f251f0400158830f078d0 }
+
+# Where the release archive is kept on each node (re-downloaded only when its hash differs).
+rke2_download_dir: /var/cache/lab-rke2
+# RKE2's own paths (fixed by RKE2).
+rke2_images_dir: /var/lib/rancher/rke2/agent/images
+rke2_manifests_dir: /var/lib/rancher/rke2/server/manifests
+rke2_agent_token_file: /var/lib/rancher/rke2/server/agent-token
+# kubectl comes with RKE2 but is not on the PATH; its admin kubeconfig is root's only.
+rke2_kubectl: /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml
+
+# --- Networks -----------------------------------------------------------------------------------------
+# Pod and service addresses (RKE2's defaults). They exist only inside the cluster: Cilium routes
+# pod traffic between the nodes directly (they share one network, LabK8s), and everything a pod
+# sends out of the cluster leaves with its node's address (masquerading), so the firewall never
+# sees 10.42.x.x. Must not overlap any lab network (10.10.0.0/16).
+k8s_cluster_cidr: 10.42.0.0/16
+k8s_service_cidr: 10.43.0.0/16
+
+# --- Rancher Manager and Hubble UI ------------------------------------------------------------------
+# Rancher Manager: SUSE's web UI and API for Kubernetes clusters (here only its own, "local").
+# The chart is vendored (vendor/rancher/chart, .\lab.ps1 rancher-upgrade); this must name the same
+# version as vendor/rancher/.lab-vendored-version, or rancher.yml refuses to run.
+rancher_chart_version: 2.15.2
+rancher_hostname: "rancher.{{ lab_domain }}"
+# Hubble UI: Cilium's view of the network flows between pods (which pod talks to which, what was
+# dropped by a policy).
+hubble_hostname: "hubble.{{ lab_domain }}"
+# Rancher features switched off (CATTLE_FEATURES): turtles = Cluster API, for provisioning new
+# clusters from Rancher, and the Harvester (HCI) integration. Neither is used with only the local
+# cluster, and both cost memory on 4 GB nodes. Fleet (Rancher's GitOps) stays on.
+rancher_features: turtles=false,harvester=false
+# The TLS files of the cluster's web names on k8s-server (keys made there, root only).
+k8s_tls_dir: /etc/lab-k8s/tls
